@@ -8,6 +8,9 @@ rules live in `config/`, not in the code.
 Markets: Indonesia, Malaysia, Korea, Philippines, China, Taiwan.
 Japan, Thailand and India are config additions later - see the spec.
 
+**How it works, in detail:**
+[`../docs/limit-up-down-how-it-works.md`](../docs/limit-up-down-how-it-works.md)
+
 ## Running
 
 ```
