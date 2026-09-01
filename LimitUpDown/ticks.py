@@ -15,7 +15,7 @@ prices near a tier boundary.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 Tiers = list  # list[tuple[Decimal, Decimal]]
 
@@ -23,13 +23,24 @@ Tiers = list  # list[tuple[Decimal, Decimal]]
 def parse_tsr(text: str) -> Tiers:
     """Read the ATS tick-size-rule format: whitespace-delimited, no header,
     RuleName Floor TickValue.  LimitUpDown.r:308-312 reads it with sep=" "
-    and names the columns in that order."""
+    and names the columns in that order.
+
+    Blank lines and # comments are skipped.  A line that looks like data but
+    will not parse RAISES - half a tick ladder rounds prices wrongly and
+    silently, which is worse than not publishing the market at all."""
     out = {}
-    for line in text.splitlines():
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
         parts = line.split()
         if len(parts) < 3:
             continue
-        out[Decimal(parts[1])] = Decimal(parts[2])
+        try:
+            out[Decimal(parts[1])] = Decimal(parts[2])
+        except InvalidOperation:
+            raise ValueError(
+                f"tick file line {n}: {line.strip()!r} has a non-numeric "
+                f"floor or tick")
     return sorted(out.items())
 
 
@@ -81,6 +92,27 @@ def self_test() -> int:
           parse_tsr("A 0 1\nA 0 2\n"), [(D("0"), D("2"))])
     check("an empty file is an empty ladder, not an error",
           parse_tsr(""), [])
+    check("a # comment is not data", parse_tsr("# a note\nA 0 1\n"),
+          [(D("0"), D("1"))])
+    check("nor is an indented one", parse_tsr("   # a note\nA 0 1\n"),
+          [(D("0"), D("1"))])
+
+    def raises(name, fn, fragment):
+        nonlocal ok
+        try:
+            fn()
+            got = "no exception"
+        except ValueError as e:
+            got = str(e)
+        good = fragment in got
+        ok = ok and good
+        print(f"  {'ok  ' if good else 'FAIL'}  {name}"
+              + ("" if good else f"   got {got!r}, want it to contain "
+                                f"{fragment!r}"))
+
+    raises("a data line that will not parse STOPS us - half a ladder rounds "
+           "silently wrong, which is worse than no market at all",
+           lambda: parse_tsr("A 0 1\nA two 3\n"), "line 2")
 
     print("\nreading config rows")
     check("same structure from ticks.csv",
