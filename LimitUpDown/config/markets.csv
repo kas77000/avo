@@ -1,0 +1,13 @@
+Country,FidessaVenueID,BBGVenueCode,BBGComposite,Time,RefPrice,TickSource,MinPrice,Rounding
+Korea,KOE-MAIN,KQ,KS,07:30:00,close_print,config,,inward
+Korea,KSC-MAIN,KP,KS,07:30:00,close_print,config,,inward
+Malaysia,KLS-MAIN,MK,MK,07:59:00,last_trade,config,,inward
+Taiwan,TAI-MAIN,TT,TT,07:59:00,close_print,config,,inward
+Indonesia,JKT-MAIN,IJ,IJ,07:59:00,close_print,spol_JKT.tsr,50,inward
+China,SHA-MAIN,CG,CH,09:03:00,close_print,config,,inward
+China,SHH-MAIN,CG,CH,09:03:00,close_print,config,,inward
+China,SSC-MAIN,C1,CH,09:03:00,close_print,config,,inward
+China,SZA-MAIN,CS,CH,09:03:00,close_print,config,,inward
+China,SHZ-MAIN,CS,CH,09:03:00,close_print,config,,inward
+China,SZC-MAIN,C2,CH,09:03:00,close_print,config,,inward
+Philippines,PHS-MAIN,PM,PM,09:03:00,close_print,config,,inward
