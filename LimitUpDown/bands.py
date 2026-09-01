@@ -10,6 +10,28 @@ symmetric market is one tier with equal values; Indonesia is three tiers;
 Japan (later) is thirty-three tiers with kind='abs'.  None of them is a
 branch in this file.
 
+MOST MARKETS DO NOT ROUND, and rounding='none' is the common case.  The
+band is ref x (1 +/- pct) and that number is published as it comes out.
+Two reasons:
+
+  The R job this replaces rounded exactly ONE market - Indonesia - because
+  Indonesia is the one market it computed rather than read from Bloomberg
+  (LimitUpDown.r:323).  Every other market's limits arrived already struck
+  by the exchange.
+
+  And inward rounding does not change which orders the band admits.
+  floor(raw/tick)*tick is the largest valid tick price <= raw, so for any
+  order price m that is itself on a tick, m <= rounded exactly when
+  m <= raw.  Korea at 71,300 with 100 KRW ticks: raw limit up 92,690,
+  rounded 92,600, and the only ticks nearby are 92,600 and 92,700.  Nothing
+  falls between them.  Rounding makes the published number match what the
+  exchange prints; it does not make the check stricter.
+
+So a market rounds only where we know it should: Indonesia today, Japan
+when it arrives.  A venue with rounding='none' needs no tick table at all,
+which is why there is no tick data to source for Korea, Malaysia, Taiwan,
+China or the Philippines.
+
 DECIMAL, NOT FLOAT.  floor(Decimal('1.15') / Decimal('0.05')) is 23.  In
 binary floating point it is 22.  Tick rounding is exactly where that bites,
 so every quantity here is a Decimal and the callers hand us Decimals.
@@ -61,7 +83,14 @@ def raw_band(tier: Tier, ref: Decimal):
     raise BandError(f"unknown tier kind {tier.kind!r}")
 
 
-def round_band(up: Decimal, down: Decimal, tick: Decimal, rounding: str):
+def round_band(up: Decimal, down: Decimal, tick, rounding: str):
+    """Most markets do not round at all - see the note in the module
+    docstring.  'none' ignores the tick, which may be None."""
+    if rounding == "none":
+        return up, down
+    if tick is None:
+        raise BandError(f"rounding {rounding!r} needs a tick and none was "
+                        f"resolved")
     if tick <= 0:
         raise BandError("tick is not positive")
     if rounding == "inward":
@@ -76,7 +105,7 @@ def round_band(up: Decimal, down: Decimal, tick: Decimal, rounding: str):
     raise BandError(f"unknown rounding mode {rounding!r}")
 
 
-def compute(tiers, ticker: str, ref: Decimal, tick: Decimal,
+def compute(tiers, ticker: str, ref: Decimal, tick,
             min_price: Optional[Decimal], rounding: str):
     if ref is None or ref <= 0:
         raise BandError("reference price is not positive")
@@ -165,6 +194,18 @@ def self_test() -> int:
           "arrives later with no code change",
           raw_band(Tier("abs", "", D("0"), D("300"), D("300")), D("1234")),
           (D("1534"), D("934")))
+
+    print("\nnot rounding at all - the common case")
+    check("'none' publishes the band exactly as computed",
+          round_band(D("92690"), D("49910"), None, "none"),
+          (D("92690"), D("49910")))
+    check("and does not need a tick to do it",
+          compute([P("", "0", "0.30", "0.30")], "005930", D("71300"), None,
+                  None, "none"),
+          (D("92690.0"), D("49910.0")))
+    raises("but any OTHER mode without a tick is a bug, not a silent pass",
+           lambda: round_band(D("100"), D("90"), None, "inward"),
+           "rounding 'inward' needs a tick and none was resolved")
 
     print("\nrounding to a tick")
     check("inward pulls both bounds into the band",

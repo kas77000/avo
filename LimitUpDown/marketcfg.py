@@ -22,7 +22,7 @@ from typing import Optional
 import bands
 import ticks
 
-VALID_ROUNDING = ("inward", "outward", "nearest")
+VALID_ROUNDING = ("none", "inward", "outward", "nearest")
 VALID_REFPRICE = ("close_print", "last_trade")
 VALID_KIND = ("pct", "abs")
 
@@ -117,18 +117,33 @@ def load(config_dir, tsr_dir) -> Config:
             up=_decimal(r["Up"], f"bands.csv {vid} Up"),
             down=_decimal(r["Down"], f"bands.csv {vid} Down")))
 
+    #  Only a venue that ROUNDS needs a tick table, and most do not - see the
+    #  note in bands.py.  ticks.csv is therefore optional and is read only if
+    #  some venue actually asks for it.
     tick_rows = {}
-    for r in rows("ticks.csv"):
-        vid = r["FidessaVenueID"].strip()
-        if vid not in venues:
-            raise ConfigError(
-                f"ticks.csv: venue {vid} is not defined in markets.csv")
-        tick_rows.setdefault(vid, []).append(r)
+    if any(v.tick_source == "config" for v in venues.values()):
+        for r in rows("ticks.csv"):
+            vid = r["FidessaVenueID"].strip()
+            if vid not in venues:
+                raise ConfigError(
+                    f"ticks.csv: venue {vid} is not defined in markets.csv")
+            tick_rows.setdefault(vid, []).append(r)
 
     tick_map = {}
     for vid, v in venues.items():
         if vid not in band_map:
             raise ConfigError(f"{vid} has no band tiers in bands.csv")
+        if v.rounding == "none":
+            if v.tick_source:
+                raise ConfigError(
+                    f"markets.csv {vid}: Rounding=none but TickSource is "
+                    f"{v.tick_source!r}. A venue that does not round must "
+                    f"not name a tick table - one of the two is a mistake.")
+            continue
+        if not v.tick_source:
+            raise ConfigError(
+                f"markets.csv {vid}: Rounding={v.rounding} needs a "
+                f"TickSource, which is blank")
         if v.tick_source == "config":
             if vid not in tick_rows:
                 raise ConfigError(
@@ -247,18 +262,47 @@ def self_test() -> int:
         raises("a tick file that is not there", lambda: load(cfg, tsrd),
                "does not exist")
 
+    print("\nrounding=none, the common case")
+    NONE = MK.replace("spol_JKT.tsr,50,inward", ",50,none")
+    with tempfile.TemporaryDirectory() as d:
+        cfg, tsrd = write(d, mk=NONE)
+        c = load(cfg, tsrd)
+        check("no tick source is needed", c.venues["JKT-MAIN"].tick_source, "")
+        check("and no tick table is loaded", c.ticks, {})
+        check("ticks.csv need not even exist",
+              (Path(cfg) / "ticks.csv").is_file(), True)
+    with tempfile.TemporaryDirectory() as d:
+        cfg, tsrd = write(d, mk=NONE)
+        (Path(cfg) / "ticks.csv").unlink()
+        check("really - a config where nobody rounds does not read it",
+              load(cfg, tsrd).ticks, {})
+    with tempfile.TemporaryDirectory() as d:
+        cfg, tsrd = write(d, mk=MK.replace("spol_JKT.tsr,50,inward",
+                                           "spol_JKT.tsr,50,none"))
+        raises("naming a tick table AND not rounding is a mistake, so say so",
+               lambda: load(cfg, tsrd), "must not name a tick table")
+    with tempfile.TemporaryDirectory() as d:
+        cfg, tsrd = write(d, mk=MK.replace("spol_JKT.tsr,50,inward",
+                                           ",50,inward"))
+        raises("rounding with no tick table is the other half of that",
+               lambda: load(cfg, tsrd), "needs a TickSource")
+
     print("\nthe real shipped config")
     here = Path(__file__).resolve().parent
     real = load(here / "config", here / "config")
     check("twelve venues", len(real.venues), 12)
-    check("Indonesia has three band tiers",
-          len(real.bands["JKT-MAIN"]), 3)
+    check("Indonesia has three band tiers", len(real.bands["JKT-MAIN"]), 3)
     check("China's Connect venues are configured like their onshore twins",
           [t.up for t in real.bands["SSC-MAIN"]],
           [t.up for t in real.bands["SHA-MAIN"]])
     check("KOE-MAIN is KQ, which looks swapped and is not",
           real.venues["KOE-MAIN"].bbg_venue, "KQ")
     check("KSC-MAIN is KP", real.venues["KSC-MAIN"].bbg_venue, "KP")
+    check("Indonesia is the ONLY venue that rounds, exactly as the R job did",
+          sorted(real.ticks), ["JKT-MAIN"])
+    check("everyone else publishes the band as computed",
+          {v.rounding for k, v in real.venues.items() if k != "JKT-MAIN"},
+          {"none"})
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

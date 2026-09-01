@@ -114,10 +114,14 @@ def price_universe(cfg, rows, refs):
         if ref is None:
             drop("no reference price", r.ric)
             continue
-        tick = ticks.tick_for(cfg.ticks[r.venue_id], ref)
-        if tick is None:
-            drop("no tick tier for the reference price", r.ric)
-            continue
+        #  Only a venue that rounds has a tick table at all - most publish
+        #  the band as computed.  See the note in bands.py.
+        tick = None
+        if venue.rounding != "none":
+            tick = ticks.tick_for(cfg.ticks[r.venue_id], ref)
+            if tick is None:
+                drop("no tick tier for the reference price", r.ric)
+                continue
         try:
             up, down = bands.compute(cfg.bands[r.venue_id], r.ticker, ref,
                                      tick, venue.min_price, venue.rounding)
@@ -321,7 +325,7 @@ def demo() -> int:
     cn = marketcfg.Venue(
         country="China", venue_id="SHA-MAIN", bbg_venue="CG",
         bbg_composite="CH", cutoff=time(9, 3), ref_price="close_print",
-        tick_source="config", min_price=None, rounding="inward")
+        tick_source="", min_price=None, rounding="none")
     cfg = marketcfg.Config(
         venues={"JKT-MAIN": venue, "SHA-MAIN": cn},
         bands={"JKT-MAIN": [bands.Tier("pct", "", Decimal("50"),
@@ -336,8 +340,7 @@ def demo() -> int:
                                        Decimal("0.10"), Decimal("0.10"))]},
         ticks={"JKT-MAIN": [(Decimal("0"), Decimal("1")),
                             (Decimal("200"), Decimal("2")),
-                            (Decimal("5000"), Decimal("25"))],
-               "SHA-MAIN": [(Decimal("0"), Decimal("0.01"))]})
+                            (Decimal("5000"), Decimal("25"))]})
 
     def row(ric, bbg, code, venue_id):
         return crosscode.Row(ric=ric, bbg=bbg, ticker=bbg.rsplit(" ", 1)[0],
@@ -470,6 +473,25 @@ def self_test() -> int:
           reasons["no band tier for price 10"], ["TINY.JK"])
     check("so is a name kdb had no price for", reasons["no reference price"],
           ["NOPX.JK"])
+
+    print("\na venue that does not round needs no tick table")
+    kr_venue = marketcfg.Venue(
+        country="Korea", venue_id="KSC-MAIN", bbg_venue="KP",
+        bbg_composite="KS", cutoff=time(7, 30), ref_price="close_print",
+        tick_source="", min_price=None, rounding="none")
+    kr_cfg = marketcfg.Config(
+        venues={"KSC-MAIN": kr_venue},
+        bands={"KSC-MAIN": [bands.Tier("pct", "", D("0"), D("0.30"),
+                                       D("0.30"))]},
+        ticks={})          # note: EMPTY, and nothing goes looking in it
+    kr_rows = [crosscode.Row("005930.KS", "005930 KP", "005930", "005930.KR",
+                             "KSC-MAIN", "Equity")]
+    kr_out, kr_excl = price_universe(kr_cfg, kr_rows,
+                                     {"005930.KS": D("71300")})
+    check("Korea prices with no tick table in sight",
+          (kr_out[0]["LimitUpPrice"], kr_out[0]["LimitDownPrice"]),
+          ("92690", "49910"))
+    check("and nothing was excluded for want of a tick", kr_excl, [])
 
     print("\nprices are written plainly, never in exponent form")
     check("a big round number", _plain(D("1E+3")), "1000")

@@ -1965,53 +1965,7 @@ git commit -m "feat(luld): --compare against the R output for cutover"
 
 ---
 
-### Task 9: Populate the tick tables — DATA TASK, BLOCKS PRODUCTION
-
-The `config/ticks.csv` committed in Task 3 holds **placeholder single-tier values**. Every one is wrong for a market with a tiered tick ladder, and wrong ticks produce silently wrong prices.
-
-**Files:**
-- Modify: `Nova/LimitUpDown/config/ticks.csv`
-
-- [ ] **Step 1: Check whether the ATS already has the tables**
-
-```bash
-ls "CHANGEME/" | grep -i tsr
-```
-`spol_JKT.tsr` is known to exist. If siblings exist for KOE/KSC/KLS/TAI/PHS/SHA/SHH/SSC/SZA/SHZ/SZC, prefer them: set that venue's `TickSource` to the filename in `markets.csv` and delete its `ticks.csv` rows. The ATS file is authoritative and cannot drift from the trading system.
-
-- [ ] **Step 2: For every venue with no `.tsr`, enter the exchange's published tick ladder**
-
-One row per tier, ascending. Example shape (values must be sourced, not copied from here):
-
-```csv
-FidessaVenueID,FloorFrom,Tick
-TAI-MAIN,0,0.01
-TAI-MAIN,10,0.05
-TAI-MAIN,50,0.10
-TAI-MAIN,100,0.50
-TAI-MAIN,500,1.00
-TAI-MAIN,1000,5.00
-```
-
-- [ ] **Step 3: Have a second person check every ladder against the exchange's own rule page**
-
-This is the step that catches the error `--self-test` cannot: a table that is internally consistent and factually wrong.
-
-- [ ] **Step 4: Verify the loader accepts them**
-
-Run: `cd Nova/LimitUpDown && python marketcfg.py --self-test && python limit_up_down.py --demo`
-Expected: `all checks passed`, then a CSV
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add Nova/LimitUpDown/config/ticks.csv Nova/LimitUpDown/config/markets.csv
-git commit -m "feat(luld): real tick ladders for KR/MY/TW/CN/PH"
-```
-
----
-
-### Task 10: Parallel run and cutover
+### Task 9: Parallel run and cutover
 
 - [ ] **Step 1: Fill in `local_settings.py` from `config_cash.xml`**
 
@@ -2019,7 +1973,7 @@ Paths are in the XML, verified: `CrossCode.csv` under `CHANGEME\`; Temp under `C
 
 - [ ] **Step 2: Verify assumption — RIC join**
 
-Confirm `crosscode.RicCode` values appear as `close_print.sym`. If they do not, a normalisation step is needed before Task 10 can proceed.
+Confirm `crosscode.RicCode` values appear as `close_print.sym`. If they do not, a normalisation step is needed before the parallel run can proceed.
 
 ```bash
 cd Nova/LimitUpDown && python -c "import kdbsource; c=kdbsource.connect(HOST,PORT); print(list(kdbsource.close_prices(c,'2026-09-01',['BBCA.JK'])) )"
@@ -2057,7 +2011,7 @@ Keep `LimitUpDown.r` runnable throughout.
 | §4 components | 1–7 |
 | §5.1 markets.csv | 3 |
 | §5.2 bands.csv | 3 |
-| §5.3 ticks.csv | 3 (placeholder), 9 (real) |
+| §5.3 rounding optional | 2 (`none` mode), 3 (loader rejects the mismatched pair) |
 | §5.4 FidessaVenueID key | 3 (loader keys on it, self-test asserts it) |
 | §6 data flow | 6 (`run`, `_fetch_refs`) |
 | §6 cutoff semantics | 4 |
@@ -2066,9 +2020,8 @@ Keep `LimitUpDown.r` runnable throughout.
 | §8 error handling | 4 (exclusions), 6 (validate), 7 (email, copy) |
 | §9 Kind=abs for Japan | 2 (`raw_band`, self-test covers `abs`) |
 | §9 exclusion hook | 4 — sited between the venue and cutoff filters |
-| §10.1 China ST | 10 step 6, gated before Prod |
-| §10.2 tick tables | 9 |
-| §10.3 RIC join assumption | 10 step 2 |
+| §10.1 China ST | 9 step 6, gated before Prod |
+| §10.3 RIC join assumption | 9 step 2 |
 | §11 `--self-test` | every task |
 | §11 `--demo` | 6 |
 | §11 `--compare` | 8 |

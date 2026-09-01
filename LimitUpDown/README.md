@@ -49,9 +49,11 @@ server and SMTP host. The paths are already those from `config_cash.xml`.
 
 ## Before this goes to Prod
 
-1. **`config/ticks.csv` holds placeholder tick ladders** for every market
-   except Indonesia. Real exchange ladders must be entered and checked.
-2. **China ST / \*ST names get ±10% instead of ±5%** because we have no source
+1. **China ST / \*ST names get ±10% instead of ±5%** because we have no source
    for the ST flag. The error is in the dangerous direction. See §10.1 of
    `../docs/superpowers/specs/2026-09-01-limit-up-down-python-design.md`.
-3. Run in parallel with the R job and reconcile with `--compare`.
+2. Run in parallel with the R job and reconcile with `--compare`.
+
+Only Indonesia rounds to a tick, as the R job does. Every other market
+publishes `ref x (1 +/- pct)` as computed - see the note in `bands.py` for
+why rounding does not change which orders the band admits.

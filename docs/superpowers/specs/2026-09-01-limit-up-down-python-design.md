@@ -1,7 +1,7 @@
 # Limit Up/Down feed — Python rewrite
 
 **Date:** 2026-09-01
-**Status:** design approved, not yet implemented
+**Status:** implemented; tasks 1-8 of the plan complete, parallel run outstanding
 **Replaces:** `Nova/LimitUpDown/LimitUpDown.r`
 
 ---
@@ -31,10 +31,12 @@ Every market in scope caps the daily move as a percentage of a reference price.
 Indonesia's existing implementation is already the correct shape:
 
 ```
-band = f(reference price, tier table) rounded to a tick
+band = f(reference price, tier table)
 ```
 
 Generalising that one function to all six markets removes Bloomberg entirely.
+Indonesia additionally rounds the result to a tick; that part stays specific
+to Indonesia (§5.3).
 
 ---
 
@@ -80,14 +82,13 @@ market excluded for a data problem is therefore safe; a *wrong* row is not.
 Nova/LimitUpDown/
   limit_up_down.py     args, orchestration, validation, env copy
   bands.py             tier lookup + band maths + tick rounding   <- pure
-  ticks.py             tick tier lookup; reads .tsr or ticks.csv  <- pure
-  marketcfg.py         load and validate the three config files
+  ticks.py             tick tier lookup, for the markets that round <- pure
+  marketcfg.py         load and validate the config files
   crosscode.py         read and filter CrossCode.csv
   kdbsource.py         reference price from kdb (pykx, lazy import)
   mailer.py            failure alerts
   config/markets.csv
   config/bands.csv
-  config/ticks.csv
   local_settings.py    gitignored: kdb host:port, paths, SMTP, recipients
   LimitUpDown.r        retained, unrun, as the cutover reference
 ```
@@ -100,26 +101,27 @@ database and no q licence.
 
 ## 5. Configuration
 
-Three CSVs, replacing `config_cash.xml` and generalising
+Two CSVs, replacing `config_cash.xml` and generalising
 `Indo_maping_limit_up.csv`. CSV so the desk can edit them in Excel, which is
-how `Indo_maping_limit_up.csv` is maintained today.
+how `Indo_maping_limit_up.csv` is maintained today. A third, `ticks.csv`, is
+read only if some venue asks for it — none does today.
 
 ### 5.1 `markets.csv` — one row per venue
 
 ```csv
 Country,FidessaVenueID,BBGVenueCode,BBGComposite,Time,RefPrice,TickSource,MinPrice,Rounding
-Korea,KOE-MAIN,KQ,KS,07:30:00,close_print,config,,inward
-Korea,KSC-MAIN,KP,KS,07:30:00,close_print,config,,inward
-Malaysia,KLS-MAIN,MK,MK,07:59:00,last_trade,config,,inward
-Taiwan,TAI-MAIN,TT,TT,07:59:00,close_print,config,,inward
+Korea,KOE-MAIN,KQ,KS,07:30:00,close_print,,,none
+Korea,KSC-MAIN,KP,KS,07:30:00,close_print,,,none
+Malaysia,KLS-MAIN,MK,MK,07:59:00,last_trade,,,none
+Taiwan,TAI-MAIN,TT,TT,07:59:00,close_print,,,none
 Indonesia,JKT-MAIN,IJ,IJ,07:59:00,close_print,spol_JKT.tsr,50,inward
-China,SHA-MAIN,CG,CH,09:03:00,close_print,config,,inward
-China,SHH-MAIN,CG,CH,09:03:00,close_print,config,,inward
-China,SSC-MAIN,C1,CH,09:03:00,close_print,config,,inward
-China,SZA-MAIN,CS,CH,09:03:00,close_print,config,,inward
-China,SHZ-MAIN,CS,CH,09:03:00,close_print,config,,inward
-China,SZC-MAIN,C2,CH,09:03:00,close_print,config,,inward
-Philippines,PHS-MAIN,PM,PM,09:03:00,close_print,config,,inward
+China,SHA-MAIN,CG,CH,09:03:00,close_print,,,none
+China,SHH-MAIN,CG,CH,09:03:00,close_print,,,none
+China,SSC-MAIN,C1,CH,09:03:00,close_print,,,none
+China,SZA-MAIN,CS,CH,09:03:00,close_print,,,none
+China,SHZ-MAIN,CS,CH,09:03:00,close_print,,,none
+China,SZC-MAIN,C2,CH,09:03:00,close_print,,,none
+Philippines,PHS-MAIN,PM,PM,09:03:00,close_print,,,none
 ```
 
 | Column | Meaning |
@@ -129,9 +131,9 @@ Philippines,PHS-MAIN,PM,PM,09:03:00,close_print,config,,inward
 | `BBGComposite` | Bloomberg composite code. Carried from the XML; not used in logic. |
 | `Time` | Cutoff. The venue is published only once this local time has passed. |
 | `RefPrice` | `close_print` or `last_trade`. |
-| `TickSource` | A `.tsr` filename, or `config` meaning rows in `ticks.csv`. |
+| `TickSource` | A `.tsr` filename, or `config` meaning rows in `ticks.csv`. **Blank when `Rounding=none`.** |
 | `MinPrice` | Floor applied to the down limit before rounding. Blank = none. |
-| `Rounding` | `inward` \| `outward` \| `nearest`. |
+| `Rounding` | `none` (the usual) \| `inward` \| `outward` \| `nearest`. |
 
 ### 5.2 `bands.csv` — one row per venue per tier
 
@@ -165,24 +167,34 @@ reads as ±35%; the old `1.35` required knowing the convention.
 tier. Today that silently yields `NA` and the row is dropped at
 `LimitUpDown.r:327`. The new job excludes it *and reports it*.
 
-### 5.3 `ticks.csv` — one row per venue per tick tier
+### 5.3 Rounding is optional, and off for most markets
 
-```csv
-FidessaVenueID,FloorFrom,Tick
-TAI-MAIN,0,0.01
-TAI-MAIN,10,0.05
-TAI-MAIN,50,0.10
-```
+`Rounding=none` needs no tick table at all. The band is `ref × (1 ± pct)` and
+that number is published as computed.
 
-Used for every venue whose `TickSource` is `config`. Indonesia instead reads
-`spol_JKT.tsr` — the file the ATS itself validates against — so it cannot drift
-from the trading system. Both readers produce the same `[(floor, tick), ...]`
-structure and share one lookup function.
+**Only Indonesia rounds**, exactly as `LimitUpDown.r:323` does — because
+Indonesia is the one market the R job *computed* rather than read from
+Bloomberg. Every other market's limits arrived already struck by the exchange
+and were published unrounded. Japan will round when it arrives.
 
-**Only Indonesia has a `.tsr` file today.** Tick tiers for the other five
-markets must be sourced from the exchanges and entered in `ticks.csv` as part
-of implementation. This is a data task, not a code task, and it is on the
-critical path.
+Two reasons this is right, not a shortcut:
+
+1. **It matches the job being replaced.** Tick rounding appears once in 516
+   lines of R, for one market.
+2. **Inward rounding does not change which orders the band admits.**
+   `floor(raw/tick)*tick` is the largest valid tick price ≤ `raw`, so for any
+   order price `m` that is itself on a tick, `m ≤ rounded` exactly when
+   `m ≤ raw`. Korea at 71,300 with 100 KRW ticks: raw limit up 92,690, rounded
+   92,600, and the only ticks nearby are 92,600 and 92,700 — nothing falls
+   between them. Rounding makes the published number match what the exchange
+   prints; it does not make the check stricter.
+
+A venue that rounds names a `TickSource` (a `.tsr` filename, or `config` plus a
+`ticks.csv` of `FidessaVenueID,FloorFrom,Tick` rows). A venue that does not must
+leave it blank. Both mismatches are config errors, not silent defaults.
+
+Indonesia reads `spol_JKT.tsr` from the ATS, so its ladder cannot drift from
+the trading system.
 
 ### 5.4 Why `FidessaVenueID` and not the Bloomberg exchange code
 
@@ -264,6 +276,9 @@ else:                                        # abs
     raw_down = ref - tier.Down
 
 if MinPrice:  raw_down = max(raw_down, MinPrice)      # before rounding
+
+if Rounding == 'none':                       publish raw_up, raw_down
+                                             # no tick table is consulted
 
 tick = ticks tier with the greatest FloorFrom <= ref  # keyed on ref, not on
                                                       # the limit price
@@ -359,12 +374,12 @@ Options, none yet chosen:
 Recommendation: (1) if a flag can be found within the implementation window,
 otherwise (2) with a scheduled review, and (4) only with explicit desk sign-off.
 
-### 10.2 Tick tables for five markets do not exist yet
+### 10.2 ~~Tick tables for five markets~~ — RESOLVED, no longer an issue
 
-Only `spol_JKT.tsr` exists. KR / MY / TW / CN / PH tick tiers must be sourced
-from the exchanges and entered in `ticks.csv`. Data task, on the critical path,
-and wrong values here produce silently wrong prices — every table needs a
-second pair of eyes against the exchange's published rules.
+Superseded by §5.3. KR / MY / TW / CN / PH use `Rounding=none` and need no
+tick table, matching what `LimitUpDown.r` publishes for them today. The only
+tick ladder in the system is Indonesia's, and it already exists on the ATS
+share.
 
 ### 10.3 Assumptions to verify during implementation
 
@@ -396,8 +411,7 @@ Three modes, following the conventions in the sibling `kdb-queries` scripts:
 ### Cutover
 
 1. Implement, `--self-test` and `--demo` green.
-2. Populate `ticks.csv`; review every tier against the exchange rules.
-3. Run both jobs daily for one to two weeks, comparing with `--compare`,
+2. Run both jobs daily for one to two weeks, comparing with `--compare`,
    publishing from R.
 4. Resolve §10.1 before China reaches Prod.
 5. Switch Test, then Pilot, then Prod. Keep `LimitUpDown.r` runnable throughout.
