@@ -1,0 +1,24 @@
+# Copy to local_settings.py and fill in.  local_settings.py is gitignored.
+#
+# STRICT: an unknown name here is a hard error.  A typo'd EMAIL_T0 fails
+# loudly rather than silently sending nowhere.
+
+# The server hosting equity_master.  It is in neither the :5010/:5012 order
+# pair nor the :5011/:5013 qatt pair - ask whoever runs kdb.
+EQUITY_MASTER_SERVER = "CHANGEME:5010"
+
+CROSSCODE_PATH = r"CHANGEME\CrossCode.csv"
+OUTPUT_PATH = r"CHANGEME\TradingData.csv"
+TEMP_PATH = r"CHANGEME\TradingData.tmp.csv"
+
+# Optional.  Absent means the columns they feed are left blank, and the run
+# says so rather than failing.
+MSCI_MAPPING_PATH = ""
+OPEN_AUCTION_OVERRIDE_PATH = ""
+HKEX_CAS_LIST_PATH = ""
+INDIA_NSE_CAS_LIST_PATH = ""
+INDIA_BSE_CAS_LIST_PATH = ""
+
+SMTP_HOST = "CHANGEME"
+EMAIL_FROM = "CHANGEME"
+EMAIL_TO = ["CHANGEME"]
