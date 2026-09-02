@@ -1,0 +1,143 @@
+BLOOMBERG FIELDS REQUESTED BY CreateTradingDataENT.r
+====================================================
+
+Source of truth: no_git/CreateTradingDataENT.r.  Line numbers are into it.
+"covered" means equity_master carries a column of that name.
+
+There are four distinct Bloomberg surfaces in this job and they are not
+equally removable:
+
+  (a) EquitiesDataLicence.rds   a bulk file on disk, read at :83.  No
+                               terminal, no rate limit.  Most of the
+                               reference columns come from here.
+  (b) R_bdp                     live terminal calls, at :103, :120, :181,
+                                :273
+  (c) load_BbgIntraday          intraday, at :357
+  (d) load_FXdatas              FX, at :145.  A Sibyl call; probably not
+                                Bloomberg, unverified.
+
+equity_master replaces (a) and (b) together, because it IS the Data Licence
+feed loaded into kdb.
+
+
+1. FROM THE DATA LICENCE FILE  (:83, joined at :90 on
+   BloombergCode = TICKER_AND_EXCH_CODE)
+
+   FIELD                  FEEDS                     COVERED
+   PX_LAST                Close                     yes
+   EQY_BETA               Beta                      yes
+   CUR_MKT_CAP            MarketCap, Capi           yes
+   REL_INDEX              Index, seeds ICBIndex     yes
+   INDUSTRY_SECTOR        Sector (fallback)         yes
+   ID_ISIN                ISIN                      yes
+   CRNCY                  the FX join at :156       yes
+   TICKER_AND_EXCH_CODE   the join key itself       yes
+
+   Dropped by the R job at :84-88, listed for completeness:
+   DVD_CRNCY, DVD_DECLARED_DT, DVD_FREQ, DVD_PAY_DT, DVD_SH_LAST,
+   DVD_TYP_LAST, DVD_SH_12M, DVD_RECORD_DT, EQY_DVD_SH_12M_NET,
+   EQY_DVD_YLD_12M, EQY_DVD_YLD_12M_NET, EQY_DVD_YLD_IND,
+   PX_TRADE_LOT_SIZE, PX_HIGH, PX_LOW, PX_ROUND_LOT_SIZE
+
+   13 of those 16 are in equity_master (four under an EQY_ prefix:
+   EQY_DVD_FREQ, EQY_DVD_SH_LAST, EQY_DVD_TYP_LAST, EQY_DVD_SH_12M).
+   Only the three yield fields are absent.  This overlap is the evidence
+   that equity_master and the RDS are the same feed.
+
+
+2. R_bdp AT :103                        (on equity tickers)
+
+   FIELD                  FEEDS                     COVERED
+   VOLATILITY_10D         Volatility10D             NO - equity_master has
+                                                    a `volatility` column
+                                                    but its definition is
+                                                    NOT confirmed to be the
+                                                    10-day figure
+   GICS_SECTOR_NAME       Sector (preferred)        NO - no equivalent.
+                                                    Sector therefore always
+                                                    takes the INDUSTRY_SECTOR
+                                                    fallback at :295, and
+                                                    three rungs of the MSCI
+                                                    ladder go dead
+
+
+3. R_bdp AT :120                        (DEAD CODE - see the :113 bug)
+
+   FIELD                  FEEDS                     COVERED
+   CUR_MKT_CAP            top-up                    yes
+   MKT_CAP_LAST_TRD       top-up                    no
+   EQY_BETA               top-up                    yes
+   BETA_ADJ_OVERRIDABLE   top-up                    no
+   INTERVAL_VOLATILITY    top-up                    no
+   INDUSTRY_SECTOR        top-up                    yes
+
+   :113 reads `if (length(idx) == 0)`, where idx is the set of rows MISSING
+   those fields.  The block therefore runs only when there is nothing to
+   fix, on an empty frame.  MKT_CAP_LAST_TRD, BETA_ADJ_OVERRIDABLE and
+   INTERVAL_VOLATILITY have never populated anything.  Almost certainly
+   should be `> 0`.  Preserved verbatim; not silently fixed.  The Python
+   run reports how many rows WOULD have entered the top-up, which is the
+   number that says whether fixing it in R would change anything.
+
+
+4. R_bdp AT :181                        (on MSCI INDEX tickers, not equities)
+
+   FIELD                  FEEDS                     COVERED
+   PX_LAST                validation at :186        yes, for equities
+   LAST_UPDATE_DT         validation at :186        yes, for equities
+   MARKET_STATUS          validation at :186        yes, for equities
+
+   Used only to filter the msci_mapping to indices that are ACTV with a
+   non-null price updated within 60 days.  Whether equity_master carries
+   index-level rows as well as equity rows is UNKNOWN; if it does not, this
+   validation is reported as skipped.
+
+   Note MARKET_STATUS is not one of the 20 output columns.
+
+
+5. R_bdp AT :273
+
+   FIELD                  FEEDS                     COVERED
+   REL_INDEX              ICBIndex top-up           yes
+
+
+6. load_BbgIntraday AT :357
+
+   FIELD                  FEEDS                     COVERED
+   TRADING_CONDITIONS_1   Segment, HK ETFs only     NO - the one genuinely
+                                                    unavailable field.
+                                                    qatt.cond was considered
+                                                    as a substitute and
+                                                    ruled out.
+
+
+7. load_FXdatas AT :145
+
+   Not a field list - returns a rate per CRNCY.  equity_master has fx_last,
+   which is assumed to be the same rate in the same direction (local->USD).
+   UNVERIFIED.
+
+
+SUMMARY
+-------
+Covered by equity_master:   PX_LAST, EQY_BETA, CUR_MKT_CAP, REL_INDEX,
+                            INDUSTRY_SECTOR, ID_ISIN, CRNCY, MARKET_STATUS,
+                            LAST_UPDATE_DT, and fx_last for the FX
+Not covered:                GICS_SECTOR_NAME, TRADING_CONDITIONS_1,
+                            MKT_CAP_LAST_TRD, BETA_ADJ_OVERRIDABLE,
+                            INTERVAL_VOLATILITY (the last three are dead
+                            code anyway)
+Covered but unverified:     volatility (is it 10-day?),
+                            fx_last (which direction?)
+
+
+THE THREE QUESTIONS THAT WOULD CLOSE THIS OUT
+---------------------------------------------
+1. Is equity_master.volatility the 10-day figure?
+2. Is fx_last a local->USD rate, matching what load_FXdatas returned?
+3. Does equity_master carry index-level rows (MXAU Index and friends), or
+   only equities?  That decides whether the :186 MSCI validation can run.
+
+A fourth, if anyone knows: is there any source at all for GICS_SECTOR_NAME?
+Without it Sector takes the fallback for every row and three rungs of the
+MSCI ladder stay dead.
