@@ -23,7 +23,7 @@ character as OCR-suspect. Brackets and string literals were verified to balance.
 R is not installed here, so the file has never been parsed.
 
 To re-read a photo: `pillow_heif` + `PIL` are installed under
-`C:CHANGEME`. Convert to PNG, crop and upscale 2-3x for
+your local Python. Convert to PNG, crop and upscale 2-3x for
 anything ambiguous.
 
 `LimitUpDown/v1` is a completed Python port of the sibling R job and is the
@@ -47,7 +47,7 @@ Sample row (ASX):
 
 - args: job ids, e.g. `AlgoEnterpriseProd AlgoEnterprisePilot AlgoEnterpriseTest`,
   or `SorEnterprise{Test,Pilot,Prod}`
-- `r_home` = `CHANGEME\`
+- `r_home` = CHANGEME
 - XML config: `<r_home>cfg\TradingDataENT\TradingData_ENT_Config.xml`
 - Data Licence file: `get_config_value("BUFFER") + /analytics_data/EquitiesDataLicence.rds`
 - log dir: `<r_home>/log/`
@@ -114,7 +114,7 @@ list the job names")`. Loops job ids at `:656`, one `generateTradingData` per
 job, emails per-job failures, prints elapsed seconds. The scheduler entry has
 not been seen.
 
-Python side: nothing exists. Python 3.13 is at `C:CHANGEME`.
+Python side: nothing exists. Python 3.13 is installed locally.
 `pykx` is not installed here and no kdb is reachable, so import it lazily inside
 `connect()` the way the LimitUpDown port does, and keep `--self-test` / `--demo`
 runnable anywhere.

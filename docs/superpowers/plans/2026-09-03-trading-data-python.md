@@ -6,7 +6,7 @@
 
 **Architecture:** Five modules. `columns.py` is pure arithmetic and string rules with no I/O. `crosscode.py`, `msci.py` read files. `equitymaster.py` is the only module that touches kdb, with `pykx` imported inside `connect()`. `trading_data.py` orchestrates, validates, writes to a temp path and copies. Every reference file is optional: present means used, absent means its columns go blank and the run says so.
 
-**Tech Stack:** Python 3.13 (`C:CHANGEME`), stdlib only plus `pykx` for live runs. `decimal.Decimal` for all price and money arithmetic, never float.
+**Tech Stack:** Python 3.13, stdlib only plus `pykx` for live runs. `decimal.Decimal` for all price and money arithmetic, never float.
 
 ## Global Constraints
 

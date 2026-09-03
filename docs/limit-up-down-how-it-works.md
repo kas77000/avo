@@ -231,7 +231,7 @@ yesterday's file in place in Test/Pilot/Prod rather than half of today's.
 one is counted, printed and emailed:
 
 ```
-1234 rows -> CHANGEME
+1234 rows -> <OUT_TEMP>\limitUpDown.csv
 published to Test, Pilot
   excluded     18  no reference price
   excluded      3  no band tier for price 45

@@ -1969,7 +1969,7 @@ git commit -m "feat(luld): --compare against the R output for cutover"
 
 - [ ] **Step 1: Fill in `local_settings.py` from `config_cash.xml`**
 
-Paths are in the XML, verified: `CrossCode.csv` under `CHANGEME\`; Temp under `CHANGEME\`; Test/Pilot/Prod under `CHANGEME\{env}CHANGEME\`.
+Paths are in the XML, verified: the CrossCode input, the temp directory and the per-environment upload directories are all named there. They are not repeated here - read them from `config_cash.xml` on the target machine.
 
 - [ ] **Step 2: Verify assumption — RIC join**
 
