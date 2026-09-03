@@ -38,13 +38,27 @@ that answers per name, and prints the tally every run:
 `PX_YEST_CLOSE` rides along purely as a diagnostic. The first real run tells you
 which candidate to keep — then delete the others from `bpipe.PREV_CLOSE_FIELDS`.
 
-## The status filter, and the trap in it
+## The status filter
 
-Only `MARKET_STATUS == "ACTV"` is published. That is a **lifecycle** test — is
-this listing alive — despite the field's name. `MARKET_STATUS` is static, so it
-may not be served to us.
+Only ACTV names are published, and the status comes from **CrossCode's own
+`BloombergStatus` column** — not from Bloomberg. It is already in the
+file we read to build the universe, and `dedupe` already trusts it to choose
+between two rows claiming one code. The filter applies it once more, to the
+case dedupe never sees: a delisted name that had no competitor to lose to.
 
-**Do not substitute `RT_EXCH_MARKET_STATUS` for it.** Bloomberg's own real-time
+That removes a dependency rather than adding one. `MARKET_STATUS` is a
+**static** field, from the same family as `PX_LAST` — the one our
+entitlement refused. It is still requested and still honoured as a
+cross-check when it is served, but nothing depends on it any more.
+
+Two rules keep the filter from emptying the file:
+
+| | |
+|---|---|
+| a **blank** status | no opinion — the row is kept, the same rule `band_from` applies to a field Bloomberg did not serve |
+| a **missing column** | fatal. Every row would read as "no opinion", the filter would pass everything, and the only symptom would be delisted names quietly getting a band |
+
+**And do not reach for `RT_EXCH_MARKET_STATUS` instead.** Bloomberg's own real-time
 model has two status axes, visible as two `MKTDATA_EVENT_SUBTYPE` values:
 
 | axis | field | answers |
@@ -140,9 +154,11 @@ silently missing from a production feed.
 - **The cutoff is cumulative by time of day.** Each run rewrites the whole file
   with the venues whose `Time` has passed, so the 07:30 run publishes Japan and
   Korea and the 09:03 run republishes those and adds the rest.
-- **Deduplication prefers the ACTV row.** A repeated `BloombergCode` is settled
-  on `BloombergStatus`; if none of the group is ACTV the code is published by
-  nobody, because a band off a delisted line is worse than no band.
+- **Deduplication prefers the ACTV row, then the ACTV filter takes the
+  rest.** A repeated `BloombergCode` is settled on `BloombergStatus`; if
+  none of the group is ACTV the code is published by nobody, because a band
+  off a delisted line is worse than no band. The order matters — filtering
+  first would leave dedupe's preference as dead code.
 - **A limit that does not bracket the last trade is not published.** A *missing*
   last price is not a veto, though — it is counted and reported, because this
   job runs pre-open and a real-time field may not have ticked yet. If
@@ -178,7 +194,7 @@ must not have them.
 ## Before this goes anywhere near Prod
 
 1. **Confirm which previous-close field answers**, then prune the candidates.
-2. **Confirm the status field** — see above; `MARKET_STATUS` may not be served.
-3. **Coverage per venue against the file in production today.** `--compare`
-   exists for this. A market Bloomberg will not price is a market this version
-   cannot publish, and the row count is where that shows.
+2. **Coverage per venue against the file in production today.**
+   `--compare` exists for this. A market Bloomberg will not price is a
+   market this version cannot publish, and the row count is where that
+   shows.

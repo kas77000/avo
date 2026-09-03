@@ -4,11 +4,24 @@
 Two files and a clock.  config/markets.csv says which venues exist and when
 each one's data is ready; CrossCode.csv says what trades on them.
 
-THREE FILTERS, in this order:
+FOUR FILTERS, in this order:
 
   security type      Equity and ETF only
   configured venue   a FidessaMarket we know
   cutoff             a venue whose Time has passed
+  BloombergStatus    ACTV only, applied after deduplication
+
+THE ACTV FILTER IS THE ONE WE ALREADY HAD THE DATA FOR.  CrossCode carries
+BloombergStatus, and dedupe below already trusts it to choose between two
+rows claiming one code.  Trusting it once more - to drop a delisted name
+that happens to be the ONLY claimant of its code - costs one comparison and
+removes v2's dependency on Bloomberg's MARKET_STATUS, which is a STATIC
+field and may not be served to a datafeed entitlement at all.
+
+A BLANK status is NOT a status of 'not active'.  It means CrossCode has no
+opinion, so the row is kept - the same rule bpipe.band_from applies to a
+field Bloomberg did not serve.  A MISSING COLUMN is different and fatal: it
+would silently empty the universe, so it is refused at the header.
 
 THE CUTOFF IS CUMULATIVE BY TIME OF DAY.  Each run rewrites the WHOLE output
 with only the venues that are open, so an 07:30 run publishes Japan and
@@ -37,6 +50,8 @@ from datetime import time
 from pathlib import Path
 
 KEEP_TYPES = ("Equity", "ETF")
+STATUS_COLUMN = "BloombergStatus"
+ACTIVE_STATUS = ("ACTV",)
 
 
 class ConfigError(Exception):
@@ -124,7 +139,15 @@ def load(path, venues: dict, now: time):
         by_reason.setdefault(reason, []).append(ric)
 
     with path.open(newline="", encoding="utf-8-sig") as fh:
-        for r in csv.DictReader(fh):
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames or STATUS_COLUMN not in reader.fieldnames:
+            #  Fatal, not a warning.  Without the column every row reads as
+            #  'no opinion', the ACTV filter passes everything, and the only
+            #  symptom is delisted names quietly getting a band.
+            raise ConfigError(
+                f"{path} has no {STATUS_COLUMN} column - that column IS the "
+                f"ACTV filter, and without it every name looks alive")
+        for r in reader:
             ric = (r.get("RicCode") or "").strip()
             sec_type = (r.get("Type") or "").strip()
             venue_id = (r.get("FidessaMarket") or "").strip()
@@ -155,6 +178,20 @@ def load(path, venues: dict, now: time):
     kept, deduped = dedupe(kept)
     if deduped:
         by_reason["duplicate BloombergCode"] = deduped
+
+    #  AFTER dedupe, deliberately.  Dedupe's job is to pick the live row out
+    #  of a group claiming one code; this drops what is left over - a name
+    #  that is not ACTV and had no competitor to lose to.  Run the other way
+    #  round, dedupe would never see a non-ACTV row and its preference would
+    #  be dead code.
+    live = []
+    for r in kept:
+        status = r.status.strip()
+        if not status or status.upper() in ACTIVE_STATUS:
+            live.append(r)
+        else:
+            drop(f"BloombergStatus is {status}, not ACTV", r.ric)
+    kept = live
 
     if not kept and not by_reason:
         raise ConfigError(f"{path} is empty")
@@ -300,6 +337,37 @@ def self_test() -> int:
         check("three rows, one ACTV: every non-ACTV goes, not just the "
               "later ones", [r.ric for r in rows], ["B.T"])
 
+    print("\nthe ACTV filter, which is why v2 needs no MARKET_STATUS")
+    with tempfile.TemporaryDirectory() as d:
+        cc = Path(d) / "CrossCode.csv"
+        cc.write_text(HDR +
+                      "A.T,A JT,A.JP,TYO-MAIN,Equity,ACTV\n"
+                      "B.T,B JT,B.JP,TYO-MAIN,Equity,DLST\n",
+                      encoding="utf-8")
+        rows, excl = load(cc, V, time(10, 0))
+        check("a delisted name with NOBODY to lose a duplicate to is still "
+              "dropped - the case dedupe alone never saw",
+              [r.ric for r in rows], ["A.T"])
+        check("and it is named by its status, not miscounted as a duplicate",
+              {e.reason: e.rows for e in excl}["BloombergStatus is DLST, "
+                                              "not ACTV"], ["B.T"])
+
+        cc.write_text(HDR +
+                      "A.T,A JT,A.JP,TYO-MAIN,Equity,ACTV\n"
+                      "B.T,B JT,B.JP,TYO-MAIN,Equity,\n"
+                      "C.T,C JT,C.JP,TYO-MAIN,Equity,  \n",
+                      encoding="utf-8")
+        rows, _ = load(cc, V, time(10, 0))
+        check("a BLANK status is 'no opinion', not 'not active' - otherwise "
+              "one empty column empties the whole published file",
+              sorted(r.ric for r in rows), ["A.T", "B.T", "C.T"])
+
+        cc.write_text(HDR + "A.T,A JT,A.JP,TYO-MAIN,Equity,actv\n",
+                      encoding="utf-8")
+        rows, _ = load(cc, V, time(10, 0))
+        check("case does not decide whether a name trades",
+              [r.ric for r in rows], ["A.T"])
+
     print("\nfiles that must be refused")
     with tempfile.TemporaryDirectory() as d:
         raises("a crosscode that is not there",
@@ -310,6 +378,15 @@ def self_test() -> int:
         raises("a crosscode with no rows at all", lambda: load(cc, V,
                                                               time(10, 0)),
                "is empty")
+        nostatus = Path(d) / "NoStatus.csv"
+        nostatus.write_text(
+            "RicCode,BloombergCode,FidessaCode,FidessaMarket,Type\n"
+            "A.T,A JT,A.JP,TYO-MAIN,Equity\n", encoding="utf-8")
+        raises("a crosscode with no BloombergStatus column - it would pass "
+               "every name through the ACTV filter, and the only symptom "
+               "would be delisted names quietly getting a band",
+               lambda: load(nostatus, V, time(10, 0)),
+               "has no BloombergStatus column")
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

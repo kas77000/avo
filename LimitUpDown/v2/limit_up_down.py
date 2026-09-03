@@ -21,8 +21,9 @@ request:
                                    candidate that answers
   last trade   PX_LAST             LAST_PRICE
 
-  CrossCode.csv + markets.csv  ->  the universe, filtered by type, venue and
-                                   cutoff, deduplicated on BloombergCode
+  CrossCode.csv + markets.csv  ->  the universe, filtered by type, venue,
+                                   cutoff and BloombergStatus, deduplicated
+                                   on BloombergCode
   split by Source              ->  ask Bloomberg | compute
   temp file -> validate -> Test / Pilot / Prod
 

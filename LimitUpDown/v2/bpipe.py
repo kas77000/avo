@@ -35,10 +35,12 @@ from decimal import Decimal, InvalidOperation
 #  limit that does not bracket the last trade is a limit we should not
 #  publish.
 #
-#  STATUS_FIELD keeps only rows whose MARKET_STATUS is ACTV.  It is a STATIC
-#  field and may be barred or absent for us - in which case it does not
-#  answer, the filter does not fire, and the run report says so on its own
-#  line.
+#  STATUS_FIELD is a CROSS-CHECK, no longer the filter.  The real ACTV test
+#  runs in crosscode.py against CrossCode's own BloombergStatus column - a
+#  status we already have, in a file we already read.  MARKET_STATUS is a
+#  STATIC field and may be barred or absent for us; when it does not answer
+#  the check does not fire, and the run report says so on its own line.
+#  Nothing depends on it, which is the point.
 #
 #  DO NOT SUBSTITUTE RT_EXCH_MARKET_STATUS FOR IT.  Bloomberg's own
 #  real-time model has two different status axes, visible as two different
@@ -57,7 +59,8 @@ from decimal import Decimal, InvalidOperation
 #
 #  The diagnostics below are requested and TALLIED but never filtered on,
 #  so one real run shows what values they actually carry.  When that is
-#  known, point STATUS_FIELD at the right one and set STATUS_ACTIVE.
+#  known, point STATUS_FIELD at the right one and set STATUS_ACTIVE - or
+#  leave it, now that the published file no longer hangs on the answer.
 STATUS_FIELD = "MARKET_STATUS"
 STATUS_ACTIVE = ("ACTV",)
 STATUS_DIAGNOSTIC = ["RT_SIMP_SEC_STATUS", "RT_EXCH_MARKET_STATUS"]
