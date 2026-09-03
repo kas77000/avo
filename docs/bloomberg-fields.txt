@@ -1,303 +1,53 @@
-BLOOMBERG FIELDS REQUESTED BY THE TWO R JOBS
-============================================
-
-Source of truth is the R, not the Python port:
-
-  PART A   no_git/CreateTradingDataENT.r   (676 lines)
-  PART B   no_git/LimitUpDown.r            (515 lines)
-
-Line numbers are into whichever file the part names.
-"covered" means equity_master carries a column of that name.
-
-
-THE ONE-LINE ANSWER
--------------------
-TradingData can come off Bloomberg almost entirely.  LimitUpDown cannot
-come off Bloomberg at all: PX_MAX_LIMIT and PX_MIN_LIMIT are the two
-fields the whole job exists to produce, and equity_master has neither.
-See PART B and the combined table at the end.
-
-
-================================================================
-PART A - CreateTradingDataENT.r
-================================================================
-
-There are four distinct Bloomberg surfaces in this job and they are not
-equally removable:
-
-  (a) EquitiesDataLicence.rds   a bulk file on disk, read at :83.  No
-                               terminal, no rate limit.  Most of the
-                               reference columns come from here.
-  (b) R_bdp                     live terminal calls, at :103, :120, :181,
-                                :273
-  (c) load_BbgIntraday          intraday, at :357
-  (d) load_FXdatas              FX, at :145.  A Sibyl call; probably not
-                                Bloomberg, unverified.
-
-equity_master replaces (a) and (b) together, because it IS the Data Licence
-feed loaded into kdb.
-
-
-A1. FROM THE DATA LICENCE FILE  (:83, joined at :90 on
-    BloombergCode = TICKER_AND_EXCH_CODE)
-
-   FIELD                  FEEDS                     COVERED
-   PX_LAST                Close                     yes
-   EQY_BETA               Beta                      yes
-   CUR_MKT_CAP            MarketCap, Capi           yes
-   REL_INDEX              Index, seeds ICBIndex     yes
-   INDUSTRY_SECTOR        Sector (fallback)         yes
-   ID_ISIN                ISIN                      yes
-   CRNCY                  the FX join at :156       yes
-   TICKER_AND_EXCH_CODE   the join key itself       yes
-
-   Dropped by the R job at :84-88, listed for completeness:
-   DVD_CRNCY, DVD_DECLARED_DT, DVD_FREQ, DVD_PAY_DT, DVD_SH_LAST,
-   DVD_TYP_LAST, DVD_SH_12M, DVD_RECORD_DT, EQY_DVD_SH_12M_NET,
-   EQY_DVD_YLD_12M, EQY_DVD_YLD_12M_NET, EQY_DVD_YLD_IND,
-   PX_TRADE_LOT_SIZE, PX_HIGH, PX_LOW, PX_ROUND_LOT_SIZE
-
-   13 of those 16 are in equity_master (four under an EQY_ prefix:
-   EQY_DVD_FREQ, EQY_DVD_SH_LAST, EQY_DVD_TYP_LAST, EQY_DVD_SH_12M).
-   Only the three yield fields are absent.  This overlap is the evidence
-   that equity_master and the RDS are the same feed.
-
-
-A2. R_bdp AT :103                       (on equity tickers)
-
-   FIELD                  FEEDS                     COVERED
-   VOLATILITY_10D         Volatility10D             NO - equity_master has
-                                                    a `volatility` column
-                                                    but its definition is
-                                                    NOT confirmed to be the
-                                                    10-day figure
-   GICS_SECTOR_NAME       Sector (preferred)        NO - no equivalent.
-                                                    Sector therefore always
-                                                    takes the INDUSTRY_SECTOR
-                                                    fallback at :295, and
-                                                    three rungs of the MSCI
-                                                    ladder go dead
-
-
-A3. R_bdp AT :120                       (DEAD CODE - see the :113 bug)
-
-   FIELD                  FEEDS                     COVERED
-   CUR_MKT_CAP            top-up                    yes
-   MKT_CAP_LAST_TRD       top-up                    no
-   EQY_BETA               top-up                    yes
-   BETA_ADJ_OVERRIDABLE   top-up                    no
-   INTERVAL_VOLATILITY    top-up                    no
-   INDUSTRY_SECTOR        top-up                    yes
-
-   :113 reads `if (length(idx) == 0)`, where idx is the set of rows MISSING
-   those fields.  The block therefore runs only when there is nothing to
-   fix, on an empty frame.  MKT_CAP_LAST_TRD, BETA_ADJ_OVERRIDABLE and
-   INTERVAL_VOLATILITY have never populated anything.  Almost certainly
-   should be `> 0`.  Preserved verbatim; not silently fixed.  The Python
-   run reports how many rows WOULD have entered the top-up, which is the
-   number that says whether fixing it in R would change anything.
-
-
-A4. R_bdp AT :181                       (on MSCI INDEX tickers, not equities)
-
-   FIELD                  FEEDS                     COVERED
-   PX_LAST                validation at :186        yes, for equities
-   LAST_UPDATE_DT         validation at :186        yes, for equities
-   MARKET_STATUS          validation at :186        yes, for equities
-
-   Used only to filter the msci_mapping to indices that are ACTV with a
-   non-null price updated within 60 days.  Whether equity_master carries
-   index-level rows as well as equity rows is UNKNOWN; if it does not, this
-   validation is reported as skipped.
-
-   Note MARKET_STATUS is not one of the 20 output columns.
-
-
-A5. R_bdp AT :273
-
-   FIELD                  FEEDS                     COVERED
-   REL_INDEX              ICBIndex top-up           yes
-
-
-A6. load_BbgIntraday AT :357
-
-   FIELD                  FEEDS                     COVERED
-   TRADING_CONDITIONS_1   Segment, HK ETFs only     NO - the one genuinely
-                                                    unavailable field.
-                                                    qatt.cond was considered
-                                                    as a substitute and
-                                                    ruled out.
-
-
-A7. load_FXdatas AT :145
-
-   Not a field list - returns a rate per CRNCY.  equity_master has fx_last,
-   which is assumed to be the same rate in the same direction (local->USD).
-   UNVERIFIED.
-
-
-PART A SUMMARY
---------------
-Covered by equity_master:   PX_LAST, EQY_BETA, CUR_MKT_CAP, REL_INDEX,
-                            INDUSTRY_SECTOR, ID_ISIN, CRNCY, MARKET_STATUS,
-                            LAST_UPDATE_DT, and fx_last for the FX
-Not covered:                GICS_SECTOR_NAME, TRADING_CONDITIONS_1,
-                            MKT_CAP_LAST_TRD, BETA_ADJ_OVERRIDABLE,
-                            INTERVAL_VOLATILITY (the last three are dead
-                            code anyway)
-Covered but unverified:     volatility (is it 10-day?),
-                            fx_last (which direction?)
-
-
-================================================================
-PART B - LimitUpDown.r
-================================================================
-
-One surface only.  Every field comes from R_bdp - live terminal calls,
-four call sites, no RDS file, no intraday, no FX.  Securities are always
-addressed as `<BloombergCode> Equity` (built at :427 and :390).
-
-
-B1. R_bdp AT :189                       (the main call, every market
-                                         except Indonesia)
-
-   FIELD                  FEEDS                     COVERED
-   PX_MAX_LIMIT           LimitUpPrice              NO
-   PX_MIN_LIMIT           LimitDownPrice            NO
-   MARKET_STATUS          ACTV filter, :201 :250    yes
-   PX_LAST                the sanity check at :252  yes
-
-   :252 flags any name whose PX_LAST falls outside its own returned band
-   and emails 'WrongLimitBBG'.  PX_LAST is not written to the output.
-
-   Not a field, but it decides who gets requested: :180 drops Thai
-   foreign-board lines (SET-MAIN with /F or /Q in the BloombergCode)
-   before the call.
-
-
-B2. R_bdp AT :212                       (the retry, up to 2 extra passes,
-                                         only for names that came back
-                                         with a null PX_MAX_LIMIT)
-
-   FIELD                  FEEDS                     COVERED
-   PX_MAX_LIMIT           LimitUpPrice              NO
-   PX_MIN_LIMIT           LimitDownPrice            NO
-   PX_LAST                carried through           yes
-   VOLUME_AVG_5D          retry filter at :222      NO - equity_master has
-                                                    PX_VOLUME, one day, not
-                                                    a 5-day average
-   ID_MIC_PRIM_EXCH       retry filter at :222      yes
-   MARKET_STATUS          retry filter at :222      yes
-
-   :222 keeps only VOLUME_AVG_5D > 0 AND ID_MIC_PRIM_EXCH != "ROCO" AND
-   MARKET_STATUS == "ACTV".  ROCO is the Taiwan emerging-stock board, an
-   unsupported segment.  The two filter fields exist purely to decide
-   which no-limit names are worth complaining about - a name that fails
-   them is dropped quietly instead of emailing 'NoLimitBBG'.
-
-
-B3. R_bdp AT :269                       (Indonesia only, JKT-MAIN, split
-                                         off at :434)
-
-   FIELD                  FEEDS                     COVERED
-   PX_YEST_CLOSE          the base price for the    NO - equity_master has
-                          whole threshold ladder,   px_last_prev, which is
-                          :289 and :315             a PLAUSIBLE but
-                                                    UNVERIFIED equivalent
-   SECURITY_TYP           the filter at :327        yes
-   MARKET_STATUS          requested, never read     yes
-
-   Indonesia gets no PX_MAX_LIMIT / PX_MIN_LIMIT from Bloomberg at all.
-   The limits are computed locally from PX_YEST_CLOSE against a percent
-   ladder in the threshold CSV, floored at IDR 50 (:292).  :327 then drops
-   anything whose SECURITY_TYP is "right" (case-insensitive) and anything
-   left with a null LimitUpPrice.
-
-   :335-382 is an older commented-out version of this same function.  It
-   requests the identical three fields, so it adds nothing to this list.
-
-
-B4. R_bdp AT :393                       (BSE secondary venue, India)
-
-   FIELD                  FEEDS                     COVERED
-   PX_MAX_LIMIT           LimitUpPrice              NO
-   PX_MIN_LIMIT           LimitDownPrice            NO
-   MARKET_STATUS          returned, kept in frame   yes
-
-   Runs only for crosscode rows whose VenueList contains BSE-SECONDARY and
-   whose BSEBloombergCode is not already a primary BloombergCode (:438-440).
-   No retry loop and no PX_LAST sanity check on this path.
-
-
-NOT A BLOOMBERG FIELD, DESPITE THE NAME
-   BloombergStatus (:424, :156) is a column of the CrossCode file, not
-   something requested from Bloomberg.  Same for BloombergCode,
-   BSEBloombergCode and BSERic.  Don't go looking for them in equity_master.
-
-
-PART B SUMMARY
---------------
-Eight distinct fields:      PX_MAX_LIMIT, PX_MIN_LIMIT, MARKET_STATUS,
-                            PX_LAST, VOLUME_AVG_5D, ID_MIC_PRIM_EXCH,
-                            PX_YEST_CLOSE, SECURITY_TYP
-Covered by equity_master:   MARKET_STATUS, PX_LAST, ID_MIC_PRIM_EXCH,
-                            SECURITY_TYP
-Not covered:                PX_MAX_LIMIT, PX_MIN_LIMIT, VOLUME_AVG_5D
-Covered but unverified:     PX_YEST_CLOSE, if px_last_prev is the same thing
-
-The four covered fields are all filters and checks.  The two that carry
-the answer are the two that are missing.  So equity_master does not
-remove Bloomberg from this job the way it does from TradingData - it
-would at best trim the retry pass and the Indonesia call.
-
-
-================================================================
-COMBINED - EVERY FIELD BOTH JOBS ASK BLOOMBERG FOR
-================================================================
-
-   FIELD                  A   B   COVERED BY equity_master
-   PX_LAST                x   x   yes
-   MARKET_STATUS          x   x   yes
-   EQY_BETA               x       yes
-   CUR_MKT_CAP            x       yes
-   REL_INDEX              x       yes
-   INDUSTRY_SECTOR        x       yes
-   ID_ISIN                x       yes
-   CRNCY                  x       yes
-   LAST_UPDATE_DT         x       yes
-   TICKER_AND_EXCH_CODE   x       yes  (join key)
-   ID_MIC_PRIM_EXCH           x   yes
-   SECURITY_TYP               x   yes
-   ---------------------------------------------------------------
-   volatility / VOLATILITY_10D  x  unverified - is it the 10-day figure?
-   PX_YEST_CLOSE              x   unverified - is px_last_prev the same?
-   fx_last / load_FXdatas x       unverified - which direction?
-   ---------------------------------------------------------------
-   PX_MAX_LIMIT               x   NO
-   PX_MIN_LIMIT               x   NO
-   VOLUME_AVG_5D              x   NO  (PX_VOLUME is one day)
-   GICS_SECTOR_NAME       x       NO
-   TRADING_CONDITIONS_1   x       NO  (intraday; qatt.cond ruled out)
-   MKT_CAP_LAST_TRD       x       NO  (dead code)
-   BETA_ADJ_OVERRIDABLE   x       NO  (dead code)
-   INTERVAL_VOLATILITY    x       NO  (dead code)
-
-Two jobs, 24 distinct fields, 12 covered outright.
-
-
-THE QUESTIONS THAT WOULD CLOSE THIS OUT
----------------------------------------
-1. Is equity_master.volatility the 10-day figure?           (A)
-2. Is fx_last a local->USD rate, matching load_FXdatas?     (A)
-3. Does equity_master carry index-level rows (MXAU Index and
-   friends), or only equities?  That decides whether the
-   :186 MSCI validation can run.                            (A)
-4. Is equity_master.px_last_prev the previous close, i.e.
-   PX_YEST_CLOSE?  That is the whole Indonesia calculation.  (B)
-5. Is there ANY source for the limit prices other than the
-   terminal - a daily exchange file, a kdb table, anything?
-   Without one, LimitUpDown keeps its BBG dependency.        (B)
-
-A sixth, if anyone knows: is there any source at all for
-GICS_SECTOR_NAME?  Without it Sector takes the fallback for every row and
-three rungs of the MSCI ladder stay dead.
+BLOOMBERG FIELDS
+================
+Scripts: no_git/CreateTradingDataENT.r, no_git/LimitUpDown.r
+Covered = equity_master has a column of that name.
+
+
+FIELD                   SCRIPT                  COVERED
+---------------------   ---------------------   -------------------------
+PX_LAST                 TradingData             yes
+                        LimitUpDown
+MARKET_STATUS           TradingData             yes
+                        LimitUpDown
+EQY_BETA                TradingData             yes
+CUR_MKT_CAP             TradingData             yes
+REL_INDEX               TradingData             yes
+INDUSTRY_SECTOR         TradingData             yes
+ID_ISIN                 TradingData             yes
+CRNCY                   TradingData             yes
+LAST_UPDATE_DT          TradingData             yes
+TICKER_AND_EXCH_CODE    TradingData             yes
+ID_MIC_PRIM_EXCH        LimitUpDown             yes
+SECURITY_TYP            LimitUpDown             yes
+
+VOLATILITY_10D          TradingData             unverified - equity_master
+                                                has `volatility`, unknown
+                                                if it is the 10-day figure
+PX_YEST_CLOSE           LimitUpDown             unverified - equity_master
+                                                has `px_last_prev`, unknown
+                                                if it is the same thing
+load_FXdatas (rate)     TradingData             unverified - equity_master
+                                                has `fx_last`, direction
+                                                unknown
+
+PX_MAX_LIMIT            LimitUpDown             no
+PX_MIN_LIMIT            LimitUpDown             no
+VOLUME_AVG_5D           LimitUpDown             no
+GICS_SECTOR_NAME        TradingData             no
+TRADING_CONDITIONS_1    TradingData             no
+MKT_CAP_LAST_TRD        TradingData             no - dead code
+BETA_ADJ_OVERRIDABLE    TradingData             no - dead code
+INTERVAL_VOLATILITY     TradingData             no - dead code
+
+
+READ BUT DROPPED - TradingData, :84-88, no output column
+DVD_CRNCY, DVD_DECLARED_DT, DVD_FREQ, DVD_PAY_DT, DVD_SH_LAST,
+DVD_TYP_LAST, DVD_SH_12M, DVD_RECORD_DT, EQY_DVD_SH_12M_NET,
+EQY_DVD_YLD_12M, EQY_DVD_YLD_12M_NET, EQY_DVD_YLD_IND,
+PX_TRADE_LOT_SIZE, PX_HIGH, PX_LOW, PX_ROUND_LOT_SIZE
+
+
+NOT BLOOMBERG FIELDS, DESPITE THE NAME
+BloombergCode, BloombergStatus, BSEBloombergCode, BSERic - all CrossCode
+file columns.
