@@ -4,3 +4,5 @@ __pycache__/
 out/
 *.HEIC
 no_git/
+*.tsr
+!LimitUpDown/*/config/spol_JKT.tsr

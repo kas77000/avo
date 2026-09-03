@@ -1,0 +1,10 @@
+# PLACEHOLDER
+# The real file lives on the ATS share and is named in config_cash.xml as
+# TSRIndo. Point TSR_DIR in local_settings.py at that folder; this copy exists
+# only so the shipped config can be validated offline.
+# Format: RuleName Floor TickValue  - lines with fewer than 3 fields are skipped
+SPOL_JKT 0 1
+SPOL_JKT 200 2
+SPOL_JKT 500 5
+SPOL_JKT 2000 10
+SPOL_JKT 5000 25

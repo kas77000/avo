@@ -3,25 +3,23 @@
 
 THREE FILTERS, in this order:
 
-  security type      Equity and ETF only, as LimitUpDown.r:420 does
+  security type      Equity and ETF only
   configured venue   a FidessaMarket with no row in markets.csv
   cutoff             a venue whose Time has not yet passed
 
 The cutoff is why running this at 07:59 and again at 09:03 produces
 different files.  Each run rewrites the WHOLE output with only the venues
 that are open, so the 09:03 run republishes Korea and adds China.  That is
-existing behaviour (LimitUpDown.r:93-98) and changing it silently would
-strand a market.
+long-standing behaviour, and changing it silently would strand a market.
 
 Nothing is dropped quietly.  Every filter returns what it removed so the run
 can report it.
 
 FUTURE: the static-limit exclusion goes here.  India's in-nse_drv.stra and
 in-bse_drv.stra list names whose limits are configured in the ATS strategy
-file and which must therefore NOT get a published limit
-(LimitUpDown.r:112-152).  India is out of scope today; when it returns, the
-filter belongs between the venue and cutoff checks and needs one optional
-ExcludeFile column in markets.csv.
+file and which must therefore NOT get a published limit.  India is out of
+scope today; when it returns, the filter belongs between the venue and
+cutoff checks and needs one optional ExcludeFile column in markets.csv.
 
     python crosscode.py --self-test
 """
@@ -53,8 +51,7 @@ class Excluded:
 
 
 def split_bbg(bbg: str):
-    """('005930 KP') -> ('005930', 'KP').  Same split as
-    CreateTradingDataENT.r:261."""
+    """('005930 KP') -> ('005930', 'KP')."""
     parts = (bbg or "").rsplit(" ", 1)
     if len(parts) == 1:
         return parts[0], ""

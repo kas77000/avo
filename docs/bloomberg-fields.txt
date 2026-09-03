@@ -1,10 +1,5 @@
 BLOOMBERG FIELDS THAT FILL AN OUTPUT COLUMN
 ===========================================
-Scripts: no_git/CreateTradingDataENT.r, no_git/LimitUpDown.r
-Covered = equity_master has a column of that name.
-
-Fields used only to join, filter or validate are not listed.
-
 
 FIELD                   SCRIPT          FILLS               COVERED
 ---------------------   -------------   -----------------   -----------------

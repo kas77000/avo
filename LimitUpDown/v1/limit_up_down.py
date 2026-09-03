@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build limitUpDown.csv - the daily price band file the Nova ATS consumes.
 
-Replaces LimitUpDown.r.  No Bloomberg: every band in scope is arithmetic on
-a reference price, and the rules live in config/, not in this file.
+No Bloomberg: every band in scope is arithmetic on a reference price, and
+the rules live in config/, not in this file.
 
   CrossCode.csv + markets.csv  ->  the universe we owe a price for
   kdb                          ->  a reference price for each name
@@ -10,9 +10,8 @@ a reference price, and the rules live in config/, not in this file.
   temp file -> validate -> Test / Pilot / Prod
 
 REPORT, NEVER SILENTLY DROP.  Every name we cannot price leaves the universe
-with a reason attached, and the reasons are counted in the run report.  The R
-job it replaces filtered unpriceable names out with a dplyr filter and no one
-ever saw the list.
+with a reason attached, and the reasons are counted in the run report.  A
+name that quietly vanishes is a name nobody investigates.
 
 NOTHING PARTIALLY PUBLISHED.  The file is written to a temp path and
 validated before a single environment is touched, so a bad run leaves
@@ -22,7 +21,7 @@ yesterday's file in place rather than half of today's.
   python limit_up_down.py --demo             a whole run on canned data
   python limit_up_down.py ""                 real run, publish nowhere
   python limit_up_down.py "Test|Pilot|Prod"  real run, publish
-  python limit_up_down.py --compare OLD.csv  diff against the R job's file
+  python limit_up_down.py --compare OLD.csv  diff against another file
 """
 
 from __future__ import annotations
@@ -141,8 +140,8 @@ def price_universe(cfg, rows, refs):
 
 
 def dedupe(out_rows):
-    """Drop repeated BloombergCodes, keeping the first.  LimitUpDown.r:154
-    does the same and emails the list."""
+    """Drop repeated BloombergCodes, keeping the first.  The list is
+    reported and emailed rather than silently applied."""
     seen = set()
     kept, removed = [], []
     for r in out_rows:
@@ -215,7 +214,7 @@ def copy_to_envs(temp, envs, targets):
 
 
 def compare(old_rows, new_rows):
-    """Differences between the R job's file and ours, worst first: venue row
+    """Differences between two output files, worst first: venue row
     counts, names present in one only, then prices that moved."""
     out = []
     old = {r["#ReutersCode"]: r for r in old_rows}
@@ -379,7 +378,7 @@ def main(argv=None) -> int:
     p.add_argument("--demo", action="store_true",
                    help="run the whole pipeline on canned data and exit")
     p.add_argument("--compare", metavar="OLD_CSV",
-                   help="diff the last output against the R job's file")
+                   help="diff the last output against another file")
     a = p.parse_args(argv)
 
     if a.self_test:
@@ -526,7 +525,7 @@ def self_test() -> int:
           ["A: LimitUpPrice '' is not a number"])
 
     print("\nparsing the environment argument")
-    check("the R job's pipe separated form", parse_envs("Test|Pilot|Prod"),
+    check("the pipe separated form", parse_envs("Test|Pilot|Prod"),
           ["Test", "Pilot", "Prod"])
     check("one environment", parse_envs("Pilot"), ["Pilot"])
     check("empty means publish nowhere - a dry run", parse_envs(""), [])
@@ -559,7 +558,7 @@ def self_test() -> int:
         check("one row", len(text.splitlines()), 2)
         check("unix line endings", "\r\n" in text, False)
 
-    print("\ncomparing against the R job's output")
+    print("\ncomparing two output files")
     old = [{"#ReutersCode": "A.JK", "Venue": "JKT-MAIN",
             "LimitUpPrice": "135", "LimitDownPrice": "65"},
            {"#ReutersCode": "B.JK", "Venue": "JKT-MAIN",

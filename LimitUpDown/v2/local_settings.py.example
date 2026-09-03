@@ -1,0 +1,35 @@
+#  Copy to local_settings.py and edit.  local_settings.py is gitignored, so a
+#  git pull is always clean and these survive it.
+#
+#  STRICT: a name this file sets that limit_up_down.py does not define is an
+#  ERROR, not a new setting.  EMAIL_T0 with a zero would otherwise sit there
+#  mailing no one.
+#
+#  The three B-PIPE settings are the Bloomberg API Demo Tool's fields, with
+#  API Product = BPipe and Authorization Type = Application:
+#
+#      BPIPE_HOST  <- Host Addresses
+#      BPIPE_PORT  <- Port
+#      BPIPE_APP   <- Application Name
+#
+#  None of them has a default.  The job refuses to start rather than connect
+#  somewhere you did not mean.
+
+BPIPE_HOST = "CHANGEME"
+BPIPE_PORT = 8194
+BPIPE_APP = "CHANGEME"
+
+CROSSCODE_PATH = r""
+
+TSR_DIR = r""
+
+
+OUT_TEMP = r""
+
+OUT_TEST = r""
+OUT_PILOT = r""
+OUT_PROD = r""
+
+SMTP_HOST = "CHANGEME"
+EMAIL_FROM = "CHANGEME"
+EMAIL_TO = []

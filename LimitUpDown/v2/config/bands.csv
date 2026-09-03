@@ -1,0 +1,4 @@
+FidessaVenueID,Kind,SymPrefix,FloorFrom,Up,Down
+JKT-MAIN,pct,,50,0.35,0.35
+JKT-MAIN,pct,,200,0.25,0.25
+JKT-MAIN,pct,,5000,0.20,0.20

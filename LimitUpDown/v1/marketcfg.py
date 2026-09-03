@@ -298,7 +298,7 @@ def self_test() -> int:
     check("KOE-MAIN is KQ, which looks swapped and is not",
           real.venues["KOE-MAIN"].bbg_venue, "KQ")
     check("KSC-MAIN is KP", real.venues["KSC-MAIN"].bbg_venue, "KP")
-    check("Indonesia is the ONLY venue that rounds, exactly as the R job did",
+    check("Indonesia is the ONLY venue that rounds",
           sorted(real.ticks), ["JKT-MAIN"])
     check("everyone else publishes the band as computed",
           {v.rounding for k, v in real.venues.items() if k != "JKT-MAIN"},

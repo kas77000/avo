@@ -1,7 +1,13 @@
-# LimitUpDown — how the Python version works
+# LimitUpDown v1 — how the Python version works
 
-How `Nova/LimitUpDown` builds `limitUpDown.csv`, the daily price-band file the
-Nova ATS uses to bound orders.
+How `Nova/LimitUpDown/v1` builds `limitUpDown.csv`, the daily price-band file
+the Nova ATS uses to bound orders.
+
+> **This describes v1**, which computes the band from rules in config against a
+> kdb reference price. `v2/` is an alternative that asks Bloomberg for the band
+> over B-PIPE instead, and has no band arithmetic at all — see
+> [`../LimitUpDown/README.md`](../LimitUpDown/README.md) for how the two
+> compare. Paths below are relative to `LimitUpDown/v1/`.
 
 For *why* it is built this way, see
 [`superpowers/specs/2026-09-01-limit-up-down-python-design.md`](superpowers/specs/2026-09-01-limit-up-down-python-design.md).

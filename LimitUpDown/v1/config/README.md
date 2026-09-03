@@ -20,9 +20,9 @@ so it can never be used as a lookup key.
 `Rounding=none` is the normal setting and needs no tick table: the band is
 `ref x (1 +/- pct)` and that number is published as it comes out.
 
-Only Indonesia rounds, exactly as `LimitUpDown.r` does today, because
-Indonesia is the one market the R job computed rather than read from
-Bloomberg. Japan will round too when it arrives.
+Only Indonesia rounds, because Indonesia is the one market whose band is
+computed here rather than read from Bloomberg. Japan will round too when it
+arrives.
 
 A venue that rounds names a `TickSource`; a venue that does not must leave it
 blank. Getting that pair wrong is a config error, not a silent default.
