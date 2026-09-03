@@ -1,53 +1,31 @@
-BLOOMBERG FIELDS
-================
+BLOOMBERG FIELDS THAT FILL AN OUTPUT COLUMN
+===========================================
 Scripts: no_git/CreateTradingDataENT.r, no_git/LimitUpDown.r
 Covered = equity_master has a column of that name.
 
-
-FIELD                   SCRIPT                  COVERED
----------------------   ---------------------   -------------------------
-PX_LAST                 TradingData             yes
-                        LimitUpDown
-MARKET_STATUS           TradingData             yes
-                        LimitUpDown
-EQY_BETA                TradingData             yes
-CUR_MKT_CAP             TradingData             yes
-REL_INDEX               TradingData             yes
-INDUSTRY_SECTOR         TradingData             yes
-ID_ISIN                 TradingData             yes
-CRNCY                   TradingData             yes
-LAST_UPDATE_DT          TradingData             yes
-TICKER_AND_EXCH_CODE    TradingData             yes
-ID_MIC_PRIM_EXCH        LimitUpDown             yes
-SECURITY_TYP            LimitUpDown             yes
-
-VOLATILITY_10D          TradingData             unverified - equity_master
-                                                has `volatility`, unknown
-                                                if it is the 10-day figure
-PX_YEST_CLOSE           LimitUpDown             unverified - equity_master
-                                                has `px_last_prev`, unknown
-                                                if it is the same thing
-load_FXdatas (rate)     TradingData             unverified - equity_master
-                                                has `fx_last`, direction
-                                                unknown
-
-PX_MAX_LIMIT            LimitUpDown             no
-PX_MIN_LIMIT            LimitUpDown             no
-VOLUME_AVG_5D           LimitUpDown             no
-GICS_SECTOR_NAME        TradingData             no
-TRADING_CONDITIONS_1    TradingData             no
-MKT_CAP_LAST_TRD        TradingData             no - dead code
-BETA_ADJ_OVERRIDABLE    TradingData             no - dead code
-INTERVAL_VOLATILITY     TradingData             no - dead code
+Fields used only to join, filter or validate are not listed.
 
 
-READ BUT DROPPED - TradingData, :84-88, no output column
-DVD_CRNCY, DVD_DECLARED_DT, DVD_FREQ, DVD_PAY_DT, DVD_SH_LAST,
-DVD_TYP_LAST, DVD_SH_12M, DVD_RECORD_DT, EQY_DVD_SH_12M_NET,
-EQY_DVD_YLD_12M, EQY_DVD_YLD_12M_NET, EQY_DVD_YLD_IND,
-PX_TRADE_LOT_SIZE, PX_HIGH, PX_LOW, PX_ROUND_LOT_SIZE
+FIELD                   SCRIPT          FILLS               COVERED
+---------------------   -------------   -----------------   -----------------
+PX_LAST                 TradingData     Close               yes
+EQY_BETA                TradingData     Beta                yes
+CUR_MKT_CAP             TradingData     MarketCap, Capi     yes
+REL_INDEX               TradingData     Index, ICBIndex     yes
+INDUSTRY_SECTOR         TradingData     Sector (fallback)   yes
+ID_ISIN                 TradingData     ISIN                yes
 
+VOLATILITY_10D          TradingData     Volatility10D       unverified
+                                                            `volatility`, is
+                                                            it the 10-day?
+FX rate (load_FXdatas)  TradingData     MarketCap           unverified
+                                                            `fx_last`, which
+                                                            direction?
+PX_YEST_CLOSE           LimitUpDown     LimitUpPrice and    unverified
+                                        LimitDownPrice,     `px_last_prev`,
+                                        Indonesia only      same thing?
 
-NOT BLOOMBERG FIELDS, DESPITE THE NAME
-BloombergCode, BloombergStatus, BSEBloombergCode, BSERic - all CrossCode
-file columns.
+GICS_SECTOR_NAME        TradingData     Sector (preferred)  no
+TRADING_CONDITIONS_1    TradingData     Segment, HK ETFs    no
+PX_MAX_LIMIT            LimitUpDown     LimitUpPrice        no
+PX_MIN_LIMIT            LimitUpDown     LimitDownPrice      no
