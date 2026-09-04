@@ -35,11 +35,17 @@ gets up to two candidates — the crosscode's own suffix first, then the venue's
 `BBGComposite` — because Shanghai is `600001 CG` in the crosscode and
 `600001.CH` in equity_master. The run reports which suffix hit.
 
-### Which venues can be switched
+### As shipped: Japan asks, everything else computes
 
-Twelve of the fifteen. **Japan cannot**, and that is deliberate: TSE limits are
-an absolute price-step table nobody has written down here, and a percentage
-tier would be a plausible-looking wrong answer. Switching `TYO-MAIN` is refused
+```
+bloomberg   TYO-MAIN  JNX-MAIN  CHJ-MAIN
+computed    the other twelve
+```
+
+**Japan is the only market Bloomberg prices**, and it is also the only one that
+*cannot* be computed — deliberately. TSE limits are an absolute price-step
+table nobody has written down here, and a percentage tier would be a
+plausible-looking wrong answer on live orders. Switching `TYO-MAIN` is refused
 outright:
 
 ```
@@ -259,13 +265,13 @@ Seven countries, fifteen venues:
 
 | | venues | cutoff | source |
 |---|---|---|---|
-| Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | bloomberg |
-| Korea | `KOE-MAIN`, `KSC-MAIN` | 07:30 | bloomberg |
-| Malaysia | `KLS-MAIN` | 07:59 | bloomberg |
-| Taiwan | `TAI-MAIN` | 07:59 | bloomberg |
-| Indonesia | `JKT-MAIN` | 07:59 | **computed** |
-| China | `SHA`, `SHH`, `SSC`, `SZA`, `SHZ`, `SZC` | 09:03 | bloomberg |
-| Philippines | `PHS-MAIN` | 09:03 | bloomberg |
+| Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | **bloomberg** |
+| Korea | `KOE-MAIN`, `KSC-MAIN` | 07:30 | computed, ±30% |
+| Malaysia | `KLS-MAIN` | 07:59 | computed, ±30% |
+| Taiwan | `TAI-MAIN` | 07:59 | computed, ±10% |
+| Indonesia | `JKT-MAIN` | 07:59 | computed, tiered + tick |
+| China | `SHA`, `SHH`, `SSC`, `SZA`, `SHZ`, `SZC` | 09:03 | computed, ±10% / ±20% |
+| Philippines | `PHS-MAIN` | 09:03 | computed, ±30% |
 
 **Thailand and India are out, deliberately** — not merely unlisted. Adding either
 is more than a config row: Thailand needs a `/F|/Q` foreign-ticker filter, and
@@ -274,12 +280,26 @@ file must NOT get a published limit — plus the BSE secondary venue. Neither
 filter is written here, so a bare config row would publish limits for names that
 must not have them.
 
+### The one arithmetic gap, and it is China's
+
+The China tiers key the wider band off the **ticker prefix**: `688` for the
+STAR board and `300` for ChiNext get ±20%, everything else ±10%. That is
+correct for the boards, but **ST and \*ST names are capped at ±5% and nothing
+here knows which they are** — the crosscode carries no such flag, so they get
+±10% and the band comes out twice as wide as the exchange allows.
+
+Bloomberg knew. This is the one thing the computed path gives up, and it
+applies to every Chinese venue now that they are all computed. Before Prod,
+either find a source for the ST flag or keep China on `bloomberg`.
+
 ## Before this goes anywhere near Prod
 
-1. ~~Confirm which previous-close field answers.~~ **Done** —
-   `PREV_CLOSE_VALUE_REALTIME` answered for all 884 Indonesian names on
-   2026-09-04. The other two stay as a free fallback.
-2. **Coverage per venue against the file in production today.**
-   `--compare` exists for this. A market Bloomberg will not price is a
-   market this version cannot publish, and the row count is where that
-   shows.
+1. **Set `EQUITY_MASTER_SERVER`**, and check the `sym hit` counts in the run
+   report. A market whose count is zero is a market whose key does not
+   resolve, and it will publish nothing.
+2. **China's ST names** — see above. The only known arithmetic gap.
+3. **Coverage per venue against the file in production today.** `--compare`
+   exists exactly for this, and it matters more now than it did: twelve
+   markets just changed where their numbers come from, so the diff against
+   yesterday's Bloomberg-sourced file is the check that the tiers agree with
+   what the exchange actually did.

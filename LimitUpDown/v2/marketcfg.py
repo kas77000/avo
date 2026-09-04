@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """Load and validate the config, and enforce the split.
 
-THE SPLIT IS THE POINT.  The universe divides in two: Indonesia is
-computed from a tier table and a tick ladder, everything else comes from
-Bloomberg.  That division lives here, as one column:
+THE SPLIT IS ONE COLUMN, AND IT IS A SWITCH.  Every venue names its own
+source and any of them can be moved by editing one word:
 
     Source=bloomberg   ask B-PIPE for MIN_LIMIT and MAX_LIMIT
     Source=computed    band = f(previous close, tiers), rounded to the tick
 
-A column rather than a branch means a second computed market - or Indonesia
-moving to Bloomberg, if Bloomberg turns out to price it - is an edit, not a
-patch.
+As shipped, JAPAN is the only market Bloomberg prices; the other twelve
+venues are computed against a close from equity_master.  That is a config
+decision, not a code one, and reversing it for any venue is an edit.
 
-VALIDATION IS STRICT AND LOUD, and most of it exists to catch a venue that
-is half configured.  A bloomberg venue carrying a tick file, or a computed
-venue with no tiers, is somebody's half-finished edit; both would otherwise
-surface as a market silently missing from a production feed.
+LATENT CONFIG IS ALLOWED AND STILL VALIDATED.  Tiers, MinPrice and rounding
+may sit on a bloomberg venue unused, waiting for the day it flips - that is
+what makes the switch a one-word edit.  They are checked anyway, because a
+latent setting that is wrong is a trap that springs on whoever makes the
+switch, months later and in a hurry.
+
+WHAT IS STILL REFUSED is the half-finished edit: a venue that names a tick
+table but no rounding to use it, a computed venue with no tiers, tiers for a
+venue markets.csv has never heard of.  Each would otherwise surface as a
+market silently missing from a production feed.
 
     python marketcfg.py --self-test
 """
@@ -35,10 +40,6 @@ import ticks
 VALID_SOURCE = ("bloomberg", "computed")
 VALID_ROUNDING = ("none", "inward", "outward", "nearest")
 VALID_KIND = ("pct", "abs")
-
-#  Columns a bloomberg venue must leave blank - it has no arithmetic to do.
-COMPUTED_ONLY = ("TickSource", "MinPrice", "Rounding")
-
 
 class ConfigError(Exception):
     pass
@@ -347,9 +348,15 @@ def self_test() -> int:
           sorted({v.country for v in real.venues.values()}),
           ["China", "Indonesia", "Japan", "Korea", "Malaysia", "Philippines",
            "Taiwan"])
-    check("Indonesia is the only computed one",
-          [v.venue_id for v in real.venues.values() if v.computed],
-          ["JKT-MAIN"])
+    check("JAPAN is the only market Bloomberg prices - everything else is "
+          "computed, so an entitlement refusal cannot empty a market",
+          sorted(v.venue_id for v in real.venues.values()
+                 if not v.computed),
+          ["CHJ-MAIN", "JNX-MAIN", "TYO-MAIN"])
+    check("and every computed venue has the tiers it needs, so the shipped "
+          "config cannot fail at load",
+          [v.venue_id for v in real.venues.values()
+           if v.computed and v.venue_id not in real.bands], [])
     check("with three tiers", len(real.bands["JKT-MAIN"]), 3)
     check("the 50 rupiah floor", real.venues["JKT-MAIN"].min_price,
           Decimal("50"))

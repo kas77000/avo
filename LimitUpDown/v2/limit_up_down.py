@@ -570,13 +570,19 @@ def demo() -> int:
     here = Path(__file__).resolve().parent
     cfg = marketcfg.load(here / "config", here / "config")
 
+    #  Japan exercises the ASKED branch, because Japan is now the only
+    #  market Bloomberg prices.  Everything else exercises the COMPUTED one.
     rows = [_row("7203.T", "7203 JT", "7203.JP", "TYO-MAIN"),
             _row("7203.JNX", "7203 JE", "7203.JE", "JNX-MAIN"),
+            _row("NOPX.T", "NOPX JT", "NOPX.JP", "TYO-MAIN"),
+            _row("HALF.T", "HALF JT", "HALF.JP", "TYO-MAIN"),
+            _row("WIDE.T", "WIDE JT", "WIDE.JP", "TYO-MAIN"),
+            _row("DEAD.T", "DEAD JT", "DEAD.JP", "TYO-MAIN"),
             _row("600001.SS", "600001 CG", "600001.CN", "SHA-MAIN"),
-            _row("NOPX.SS", "NOPX CG", "NOPX.CN", "SHA-MAIN"),
-            _row("HALF.SS", "HALF CG", "HALF.CN", "SHA-MAIN"),
-            _row("WIDE.SS", "WIDE CG", "WIDE.CN", "SHA-MAIN"),
-            _row("DEAD.SS", "DEAD CG", "DEAD.CN", "SHA-MAIN"),
+            _row("688001.SS", "688001 CG", "688001.CN", "SHA-MAIN"),
+            _row("NOCL.SS", "NOCL CG", "NOCL.CN", "SHA-MAIN"),
+            _row("005930.KS", "005930 KP", "005930.KR", "KSC-MAIN"),
+            _row("MAYBANK.KL", "MAYBANK MK", "MAYBANK.MY", "KLS-MAIN"),
             _row("BBCA.JK", "BBCA IJ", "BBCA.ID", "JKT-MAIN"),
             _row("TLKM.JK", "TLKM IJ", "TLKM.ID", "JKT-MAIN"),
             _row("TINY.JK", "TINY IJ", "TINY.ID", "JKT-MAIN"),
@@ -590,18 +596,22 @@ def demo() -> int:
                                  "MARKET_STATUS": "ACTV"},
               "7203 JE Equity": {"MIN_LIMIT": 2433.0, "MAX_LIMIT": 3833.0,
                                  "LAST_PRICE": 3130.0},
-              "600001 CG Equity": {"MIN_LIMIT": 11.106, "MAX_LIMIT": 13.574,
-                                   "LAST_PRICE": 12.34},
-              "HALF CG Equity": {"MAX_LIMIT": 13.574},
-              "WIDE CG Equity": {"MIN_LIMIT": 11.106, "MAX_LIMIT": 13.574,
-                                 "LAST_PRICE": 99.0},
-              "DEAD CG Equity": {"MIN_LIMIT": 11.106, "MAX_LIMIT": 13.574,
+              "HALF JT Equity": {"MAX_LIMIT": 3833.0},
+              "WIDE JT Equity": {"MIN_LIMIT": 2433.0, "MAX_LIMIT": 3833.0,
+                                 "LAST_PRICE": 99000.0},
+              "DEAD JT Equity": {"MIN_LIMIT": 2433.0, "MAX_LIMIT": 3833.0,
                                  "MARKET_STATUS": "DLST"}}
-    refused = {"NOPX CG Equity": "Unknown/Invalid Security"}
+    refused = {"NOPX JT Equity":
+               "Security Entitlement Check Failed! EID(s) needed: 64487 "
+               "or 64488 [nid:58106]"}
 
     #  What kdbclose.closes_for returns: keyed on the RIC, already Decimal.
-    #  NOCL has no row in equity_master at all.
-    closes = {"BBCA.JK": Decimal("8000"), "TLKM.JK": Decimal("3000"),
+    #  The NOCL pair have no row in equity_master at all.
+    closes = {"600001.SS": Decimal("12.34"),
+              "688001.SS": Decimal("50"),      # STAR board, the 688 prefix
+              "005930.KS": Decimal("70000"),
+              "MAYBANK.KL": Decimal("9.50"),
+              "BBCA.JK": Decimal("8000"), "TLKM.JK": Decimal("3000"),
               "TINY.JK": Decimal("10")}
 
     out, excluded = price_from_bloomberg(ask, limits, refused)
@@ -780,10 +790,14 @@ def self_test() -> int:
     check("and its venue is the computed one", cout[0]["Venue"], "JKT-MAIN")
     mixed = idn + [row("600001.SS", "600001 CG", "600001.CN", "SHA-MAIN")]
     asked, computed = cfg.by_source(mixed)
-    check("the shipped config sends only Indonesia down the computed path",
-          sorted({r.venue_id for r in computed}), ["JKT-MAIN"])
-    check("and China to Bloomberg",
-          [r.venue_id for r in asked], ["SHA-MAIN"])
+    check("the shipped config computes China too, not just Indonesia",
+          sorted({r.venue_id for r in computed}), ["JKT-MAIN", "SHA-MAIN"])
+    check("and asks Bloomberg for nothing outside Japan",
+          [r.venue_id for r in asked], [])
+    japan = [row("7203.T", "7203 JT", "7203.JP", "TYO-MAIN")]
+    asked2, computed2 = cfg.by_source(japan)
+    check("Japan is the one that still goes to Bloomberg",
+          ([r.venue_id for r in asked2], computed2), (["TYO-MAIN"], []))
 
     print("\nprices are written plainly, never in exponent form")
     check("a big round number", _plain(D("1E+3")), "1000")
