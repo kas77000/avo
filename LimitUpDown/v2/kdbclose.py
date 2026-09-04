@@ -49,7 +49,20 @@ from decimal import Decimal, InvalidOperation
 #  for one column keeps the response small enough to read in a log.
 CLOSE_FIELD = "PX_LAST"
 
-MAXDATE_Q = "{[d] exec max date from equity_master where date<=d}"
+#  TWO WAYS TO ASK FOR THE PARTITION, because the type of equity_master's
+#  `date` column is NOT established and a 2026-09-04 run died on 'type here.
+#
+#    client   the bound is a python date, converted by pykx on the way out
+#    server   the bound is computed IN q from .z.D, so no date crosses the
+#             wire at all - only an integer, which cannot be mis-converted
+#
+#  If the first fails on type, the second removes the conversion from the
+#  picture entirely.  If BOTH fail, the column is not a date and no amount
+#  of client-side work will fix it: that is a schema question, and the error
+#  says so and names the probe that answers it.
+MAXDATE_CLIENT_Q = "{[d] exec max date from equity_master where date<=d}"
+MAXDATE_SERVER_Q = ("{[n] exec max date from equity_master "
+                    "where date<=.z.D-n}")
 
 #  `$s casts the python list of strings to the symbol vector `sym` is.
 FETCH_Q = ("{[d;s] select " + CLOSE_FIELD + " by sym from equity_master "
@@ -116,18 +129,52 @@ def sym_candidates(row, venue) -> list:
     return out
 
 
-def resolve_date(conn, requested):
-    """The most recent partition on or before `requested`."""
-    got = conn(MAXDATE_Q, requested)
+def _py(value):
+    """The python form of a q value, or the value itself if it has none."""
     try:
-        got = got.py()
+        return value.py()
     except AttributeError:
-        pass
-    if got is None:
-        raise KdbError(
-            f"equity_master has no rows on or before {requested}. Check the "
-            f"server and the date.")
-    return got
+        return value
+
+
+def date_text(value) -> str:
+    got = _py(value)
+    return "unknown" if got is None else str(got)
+
+
+def resolve_date(conn, requested, days_back=1):
+    """(date, how).  The most recent partition on or before the bound.
+
+    THE DATE COMES BACK RAW, not converted to a python object, because it
+    is passed straight back to q in the fetch.  Round-tripping it through
+    python would reintroduce exactly the conversion this is working around.
+
+    Tries both forms and reports which answered, the way the previous-close
+    fields and the sym candidates do - one real run then settles it."""
+    errors = []
+    attempts = ((f"client date {requested}", MAXDATE_CLIENT_Q, requested),
+                (f"server .z.D-{days_back}", MAXDATE_SERVER_Q,
+                 int(days_back)))
+    for how, query, arg in attempts:
+        try:
+            got = conn(query, arg)
+        except Exception as e:                              # noqa: BLE001
+            errors.append(f"{how}: {type(e).__name__}: {e}")
+            continue
+        if _py(got) is None:
+            errors.append(f"{how}: no partition on or before the bound")
+            continue
+        return got, how
+
+    NL = chr(10)
+    raise KdbError(NL.join(
+        ["equity_master: could not resolve a partition date."]
+        + ["    " + e for e in errors]
+        + ["  BOTH ways of asking failed, so this is most likely the SCHEMA",
+           "  rather than the client: `date` may not be a q date column at",
+           "  all. Run",
+           "      python ../other/em_probe.py --server HOST:PORT --meta",
+           "  and check what type `date` actually is."]))
 
 
 def _to_decimal(value):
@@ -291,6 +338,61 @@ def self_test() -> int:
           _to_decimal(True), None)
 
     print()
+    print("resolving the partition date, which is where a live run died")
+
+    class Conn:
+        """A kdb that raises on one query shape and answers the other."""
+        def __init__(self, fails, answer="2026.09.03"):
+            self.fails, self.answer, self.asked = fails, answer, []
+
+        def __call__(self, query, *args):
+            self.asked.append(query)
+            if self.fails in query:
+                raise RuntimeError("type")
+            return self.answer
+
+    c = Conn(fails="nothing matches this")
+    check("the client-side bound is tried FIRST, because it asks for the "
+          "date we actually want rather than the server's idea of it",
+          resolve_date(c, "2026-09-03")[1].startswith("client date"), True)
+    check("and when it works the server form is never sent", len(c.asked), 1)
+
+    c = Conn(fails="where date<=d")
+    got, how = resolve_date(c, "2026-09-03")
+    check("a 'type error on the python date falls back to computing the "
+          "bound IN q, where no date crosses the wire at all",
+          how.startswith("server .z.D"), True)
+    check("and the date still comes back", got, "2026.09.03")
+
+    c = Conn(fails="equity_master")
+    try:
+        resolve_date(c, "2026-09-03")
+        got = "no error"
+    except KdbError as e:
+        got = str(e)
+    check("when BOTH fail it is reported as a SCHEMA question rather than a "
+          "bare QError", "most likely the SCHEMA" in got, True)
+    check("and the error names the exact command that answers it",
+          "em_probe.py" in got and "--meta" in got, True)
+    check("both attempts are listed, so what was tried is not a mystery",
+          got.count("RuntimeError") >= 2, True)
+
+    class Empty:
+        def __call__(self, query, *args):
+            return None
+    try:
+        resolve_date(Empty(), "2026-09-03")
+        got = "no error"
+    except KdbError as e:
+        got = str(e)
+    check("a table with no partition on or before the bound is a DIFFERENT "
+          "failure and says so", "no partition on or before" in got, True)
+
+    check("a raw q value prints for the report", date_text("2026.09.03"),
+          "2026.09.03")
+    check("and a null one does not pretend to be a date",
+          date_text(None), "unknown")
+
     print("resolving a universe against what kdb returned")
     rows = [Row("600001.SS", "600001 CG", "600001", "SHA-MAIN"),
             Row("BBCA.JK", "BBCA IJ", "BBCA", "JKT-MAIN"),

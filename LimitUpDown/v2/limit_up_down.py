@@ -458,13 +458,13 @@ def run(envs_spec: str) -> int:
             print()
 
         closes, sym_hits, unresolved = {}, {}, []
-        date_asked = date_used = None
+        date_asked = date_used = date_how = None
         if compute:
             host, port = kdbclose.parse_server(EQUITY_MASTER_SERVER)
             conn = kdbclose.connect(host, port)
             print(f"connected to kdb {host}:{port} for equity_master")
             date_asked = dt.date.today() - dt.timedelta(days=1)
-            date_used = kdbclose.resolve_date(conn, date_asked)
+            date_used, date_how = kdbclose.resolve_date(conn, date_asked)
             #  Every candidate for every name, in ONE round trip.  The
             #  wasted candidates cost a longer symbol list, not a second
             #  query; a per-name query would not finish before the open.
@@ -475,7 +475,8 @@ def run(envs_spec: str) -> int:
             fetched = kdbclose.fetch(conn, date_used, sorted(set(wanted)))
             closes, sym_hits, unresolved = kdbclose.closes_for(
                 compute, cfg.venues, fetched)
-            print(f"  equity_master {date_used}: {len(closes)} closes for "
+            print(f"  equity_master {kdbclose.date_text(date_used)} "
+                  f"({date_how}): {len(closes)} closes for "
                   f"{len(compute)} names")
     except Exception as e:                           # noqa: BLE001
         mailer.send("LimitUpDown FAILED", f"{type(e).__name__}: {e}", *mail)
@@ -528,10 +529,10 @@ def run(envs_spec: str) -> int:
     #  stale partition is otherwise invisible, and a holiday is the normal
     #  way that happens.
     if date_used is not None:
-        stale = " <- NOT the day asked for" if str(date_used) != str(
-            date_asked) else ""
-        report.append(f"  close from        equity_master {date_used} "
-                      f"(asked {date_asked}){stale}")
+        shown = kdbclose.date_text(date_used)
+        stale = " <- NOT the day asked for" if shown != str(date_asked) else ""
+        report.append(f"  close from        equity_master {shown} "
+                      f"(asked {date_asked}, via {date_how}){stale}")
     #  And which symbol suffix resolved.  The day a market stops matching is
     #  the day its count here goes to zero.
     for suffix, count in sorted(sym_hits.items(), key=lambda kv: -kv[1]):

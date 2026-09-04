@@ -53,7 +53,15 @@ NAME_CANDIDATES = ("NAME", "SECURITY_NAME", "SHORT_NAME", "LONG_COMP_NAME",
 CHINA_SUFFIXES = ("CH", "C1", "C2", "CG", "CS")
 
 COLUMNS_Q = "{cols equity_master}"
-MAXDATE_Q = "{[d] exec max date from equity_master where date<=d}"
+#  meta gives the TYPE of every column, which is the decisive evidence when a
+#  date comparison dies on 'type.
+META_Q = "{meta equity_master}"
+#  Two ways to bound the partition, for the same reason kdbclose has two: the
+#  python date may not convert to whatever `date` actually is.
+MAXDATE_CLIENT_Q = "{[d] exec max date from equity_master where date<=d}"
+MAXDATE_SERVER_Q = ("{[n] exec max date from equity_master "
+                    "where date<=.z.D-n}")
+LATEST_Q = "{exec max date from equity_master}"
 
 
 def _pykx():
@@ -160,6 +168,9 @@ def main(argv=None) -> int:
     p.add_argument("--server", default="", help="kdb as host:port")
     p.add_argument("--date", default="", help="YYYY.MM.DD; default today")
     p.add_argument("--columns", action="store_true")
+    p.add_argument("--meta", action="store_true",
+                   help="every column AND its q type - run this first when a "
+                        "date comparison dies on 'type")
     p.add_argument("--st", action="store_true")
     p.add_argument("--sample", default="", help="one sym, every column")
     p.add_argument("--self-test", action="store_true")
@@ -167,28 +178,42 @@ def main(argv=None) -> int:
 
     if args.self_test:
         return self_test()
-    if not (args.columns or args.st or args.sample):
+    if not (args.columns or args.meta or args.st or args.sample):
         p.print_help()
         return 2
 
     host, port = parse_server(args.server)
     conn = _pykx().SyncQConnection(host=host, port=port)
 
-    import datetime as dt
-    asked = args.date or dt.date.today().strftime("%Y.%m.%d")
-    date_used = conn(MAXDATE_Q, asked)
-    try:
-        date_used = date_used.py()
-    except AttributeError:
-        pass
-    print(f"equity_master partition {date_used} (asked {asked})")
-    print()
-
-    found = columns(conn)
+    #  SCHEMA QUESTIONS ARE ANSWERED WITHOUT A DATE, deliberately.  This
+    #  probe exists partly because a date comparison died on 'type, and a
+    #  probe that needs the date to work before it can tell you about the
+    #  date is no use at all.
+    if args.meta:
+        print(conn(META_Q))
+        return 0
     if args.columns:
-        for line in report_columns(found):
+        for line in report_columns(columns(conn)):
             print(line)
         return 0
+
+    found = columns(conn)
+    date_used = None
+    for how, query, arg in (("client date", MAXDATE_CLIENT_Q,
+                             args.date or "2026.01.01"),
+                            ("server .z.D-1", MAXDATE_SERVER_Q, 1),
+                            ("latest partition", LATEST_Q, None)):
+        try:
+            date_used = conn(query) if arg is None else conn(query, arg)
+        except Exception as e:                              # noqa: BLE001
+            print(f"  {how}: {type(e).__name__}: {e}")
+            continue
+        print(f"equity_master partition {date_used} (via {how})")
+        break
+    if date_used is None:
+        print("  could not resolve any partition date - run --meta")
+        return 1
+    print()
 
     if args.sample:
         got = conn("{[d;s] select from equity_master where date=d, "

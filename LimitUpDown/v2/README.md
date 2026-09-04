@@ -30,7 +30,15 @@ The alternatives were worse:
 
 Two things it gets right that a naive version would not. **The date** rolls back
 to the most recent partition with rows, because yesterday is a Sunday every
-Monday, and both dates are printed so a stale close is visible. **The symbol**
+Monday, and both dates are printed so a stale close is visible. It is asked
+for **two ways** — a Python date converted by pykx, then a bound computed in q
+from `.z.D` so no date crosses the wire at all — because a 2026-09-04 run died
+on `QError: type` here. The report says which one answered. If both fail, the
+error says it is a schema question and names the probe:
+
+```
+python ../other/em_probe.py --server HOST:PORT --meta
+``` **The symbol**
 gets up to two candidates — the crosscode's own suffix first, then the venue's
 `BBGComposite` — because Shanghai is `600001 CG` in the crosscode and
 `600001.CH` in equity_master. The run reports which suffix hit.
