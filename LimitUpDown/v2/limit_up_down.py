@@ -152,6 +152,50 @@ def _out_row(r, low, high):
 SHOW_NAMES = 5
 
 
+#  Written beside OUT_TEMP.  Not published to Test/Pilot/Prod - it is a
+#  diagnostic for whoever owns the B-PIPE contract, not something the ATS
+#  reads.
+ENTITLEMENT_CSV = "entitlement_refused.csv"
+ENTITLEMENT_HEADER = ["ReutersCode", "BloombergCode", "Venue", "EIDs",
+                      "Message"]
+
+
+def entitlement_rows(excluded):
+    """Every name B-PIPE refused for want of an entitlement.
+
+    Kept apart from the other exclusions because the fix is different in
+    kind: no code change reaches these names.  Either the identity making
+    the request is the wrong one, or the EIDs are not on the contract."""
+    rows = []
+    for e in excluded:
+        if bpipe.ENTITLEMENT_MARKER not in e.reason:
+            continue
+        eids = " ".join(bpipe.eids_in(e.reason))
+        for d in e.rows:
+            rows.append({"ReutersCode": d.ric, "BloombergCode": d.bbg,
+                         "Venue": d.venue_id, "EIDs": eids,
+                         "Message": e.reason})
+    rows.sort(key=lambda r: (r["Venue"], r["EIDs"], r["BloombergCode"]))
+    return rows
+
+
+def write_entitlement_csv(path, excluded):
+    """Returns (path, count), or (None, 0) when nothing was refused - in
+    which case no file is written and no stale one is left behind."""
+    rows = entitlement_rows(excluded)
+    path = Path(path)
+    if not rows:
+        if path.exists():
+            path.unlink()
+        return None, 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=ENTITLEMENT_HEADER)
+        writer.writeheader()
+        writer.writerows(rows)
+    return path, len(rows)
+
+
 def _venue_summary(cfg, out, excluded):
     """One line per venue: published, excluded, and where its band comes from.
 
@@ -452,6 +496,12 @@ def run(envs_spec: str) -> int:
               f"published to {', '.join(envs) if envs else 'nowhere'}"]
     report.extend(_venue_summary(cfg, out, excluded))
     report.extend(_exclusion_lines(excluded))
+
+    eid_path, eid_count = write_entitlement_csv(
+        Path(OUT_TEMP).parent / ENTITLEMENT_CSV, excluded)
+    if eid_count:
+        report.append(f"  entitlement {eid_count:6d}  refused names written "
+                      f"to {eid_path}")
 
     #  Which previous-close field answered is not yet known, so say it out
     #  loud every run until it is.
@@ -786,6 +836,40 @@ def self_test() -> int:
           ["A.T LimitUpPrice: old 3833, new 3900"])
     check("the same price written differently is not a difference",
           compare(old, [dict(old[0], LimitUpPrice="3833.0"), old[1]]), [])
+
+    print("\nthe entitlement csv")
+    eid_reason = ("Bloomberg refused the security: Security Entitlement "
+                  "Check Failed! EID(s) needed: 64487 or 64488")
+    mixed = [crosscode.Excluded(reason=eid_reason,
+                                rows=[crosscode.Dropped("B.KL", "B MK",
+                                                        "KLS-MAIN"),
+                                      crosscode.Dropped("A.KL", "A MK",
+                                                        "KLS-MAIN")]),
+             crosscode.Excluded(reason="no MIN_LIMIT",
+                                rows=[crosscode.Dropped("C.T", "C JT",
+                                                        "TYO-MAIN")])]
+    got = entitlement_rows(mixed)
+    check("only the entitlement refusals are written, not every exclusion",
+          [r["BloombergCode"] for r in got], ["A MK", "B MK"])
+    check("the EIDs are pulled out into their own column - they are what a "
+          "market-data team acts on", got[0]["EIDs"], "64487 64488")
+    check("and the venue rides along, so the CSV says which market needs "
+          "them", got[0]["Venue"], "KLS-MAIN")
+    check("nothing entitlement-related means no rows",
+          entitlement_rows([mixed[1]]), [])
+    with tempfile.TemporaryDirectory() as d:
+        target = Path(d) / "sub" / "entitlement_refused.csv"
+        path, n = write_entitlement_csv(target, mixed)
+        check("the file is written under a directory that did not exist",
+              (path is not None, n, target.is_file()), (True, 2, True))
+        with target.open(encoding="utf-8") as fh:
+            body = list(csv.DictReader(fh))
+        check("and reads back with the header we promised",
+              (body[0]["ReutersCode"], body[0]["EIDs"]), ("A.KL", "64487 64488"))
+        path, n = write_entitlement_csv(target, [mixed[1]])
+        check("a clean run REMOVES the file rather than leaving yesterday's "
+              "refusals looking like today's", (path, n, target.exists()),
+              (None, 0, False))
 
     print("\nthe venue summary")
     cfg2 = marketcfg.load(Path(__file__).resolve().parent / "config",

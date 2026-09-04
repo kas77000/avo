@@ -118,6 +118,25 @@ has vanished**; split by venue, it says so at a glance. Both codes are shown
 because the Bloomberg one is what you paste into a terminal to check a name by
 hand, and the RIC is what you match against the published file.
 
+### The entitlement CSV
+
+Names B-PIPE refused for want of an entitlement are also written to
+`entitlement_refused.csv`, beside `OUT_TEMP`:
+
+```csv
+ReutersCode,BloombergCode,Venue,EIDs,Message
+MAYBANK.KL,MAYBANK MK,KLS-MAIN,64487 64488,Bloomberg refused the security: Security Entitlement Check Failed! ...
+```
+
+They are separated from every other exclusion because the fix is different in
+kind: no code change reaches these names. The `EIDs` column is the part a
+market-data team acts on. A run with no entitlement refusals **deletes** the
+file rather than leaving yesterday's looking like today's. It is never
+published to Test/Pilot/Prod — the ATS does not read it.
+
+Run `../other/bpipe_auth.py` to find out whether a different identity on the
+same machine already holds those EIDs.
+
 ## v1 or v2?
 
 | | v1 | v2 |

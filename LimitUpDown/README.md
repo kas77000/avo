@@ -56,9 +56,18 @@ found in the real-time family, and sometimes there is no equivalent.
 | `bpipe_probe.py` | one name, three ways: does B-PIPE serve its limits, and when? |
 | `bpipe_fields.py` | every real-time field B-PIPE will serve, as a CSV |
 | `bpipe_history.py` | can we get back the session that just finished? |
+| `bpipe_auth.py` | which identity do we have, and does it hold the EIDs we were refused? |
 
 Connection settings live at the top of `bpipe_probe.py` and are shared by all
 three. They ship empty.
+
+`bpipe_auth.py` exists because a refusal reading *"EID(s) needed: 64487 or
+64488"* is not a bug and no code change reaches it. It tries three
+authentication modes — application-only (what the job uses), user-only by OS
+logon, and both — and reports which authorize and which hold the EIDs. The
+question it settles first is whether a **user** account is reachable from the
+machine at all, since an application login is usually narrower than a person's,
+and switching identity costs nothing where buying an entitlement does not.
 
 `bpipe_history.py` asks the same entitlement question one layer up. The field
 list above says which *fields* we are served; it says nothing about whether we

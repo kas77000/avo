@@ -178,6 +178,32 @@ def status_tally(values, fields=None):
 _NID = re.compile(r"\s*\[nid:\d+\]\s*$")
 
 
+#  B-PIPE gates market data per exchange with Entitlement IDs.  A refusal
+#  naming EIDs is NOT a bug and no retry, ticker form or field substitution
+#  gets past it - the identity making the request simply does not hold that
+#  exchange.  It is worth separating from every other refusal because the
+#  fix is administrative, and the EID numbers are what a market-data team
+#  acts on.
+ENTITLEMENT_MARKER = "Entitlement Check Failed"
+
+#  Written without backslash escapes on purpose: this file is edited through
+#  a shell that mangles them.
+_EID_AFTER = re.compile(re.escape("EID(s)") + "[^:]*:[ ]*([0-9 ,]*[0-9])")
+
+
+def eids_in(message) -> list:
+    """The EID numbers out of a refusal message, in the order given.
+
+    'Security Entitlement Check Failed! EID(s) needed: 64487 or 64488'
+    -> ['64487', '64488'].  These are the numbers to quote to whoever owns
+    the B-PIPE contract; 'or' means either one suffices."""
+    text = (message or "").replace(" or ", " ").replace(" and ", " ")
+    found = _EID_AFTER.search(text)
+    if not found:
+        return []
+    return re.findall("[0-9]+", found.group(1))
+
+
 def clean_message(message) -> str:
     """Bloomberg tags a security error with a [nid:NNNNN] that varies from
     one response to the next.
