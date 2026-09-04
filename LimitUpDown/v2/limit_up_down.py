@@ -146,6 +146,29 @@ def _out_row(r, low, high):
             "Venue": r.venue_id}
 
 
+#  Names shown per venue per reason before the line is truncated.  Enough to
+#  paste one into a terminal and check it by hand; not so many that a report
+#  about 3000 excluded names becomes unreadable.
+SHOW_NAMES = 5
+
+
+def _exclusion_lines(excluded):
+    """One line per reason, then one per venue underneath it.
+
+    The venue breakdown is the point.  "excluded 412 no MIN_LIMIT" does not
+    tell you a whole market has vanished; the same count split by venue
+    does, immediately."""
+    lines = []
+    for e in excluded:
+        lines.append(f"  excluded {len(e.rows):6d}  {e.reason}")
+        for venue, dropped in sorted(e.by_venue().items()):
+            shown = ", ".join(str(d) for d in dropped[:SHOW_NAMES])
+            more = (f" (+{len(dropped) - SHOW_NAMES} more)"
+                    if len(dropped) > SHOW_NAMES else "")
+            lines.append(f"    {venue:<12} {len(dropped):6d}  {shown}{more}")
+    return lines
+
+
 def _excluded(by_reason):
     return [crosscode.Excluded(reason=k, rows=v)
             for k, v in sorted(by_reason.items())]
@@ -157,21 +180,21 @@ def price_from_bloomberg(rows, values, refused=None):
     refused = refused or {}
     out, by_reason = [], {}
 
-    def drop(reason, ric):
-        by_reason.setdefault(reason, []).append(ric)
+    def drop(reason, r):
+        by_reason.setdefault(reason, []).append(
+            crosscode.Dropped(ric=r.ric, bbg=r.bbg, venue_id=r.venue_id))
 
     for r in rows:
         if r.security in refused:
-            drop(f"Bloomberg refused the security: {refused[r.security]}",
-                 r.ric)
+            drop(f"Bloomberg refused the security: {refused[r.security]}", r)
             continue
         fields = values.get(r.security)
         if fields is None:
-            drop("no answer from Bloomberg", r.ric)
+            drop("no answer from Bloomberg", r)
             continue
         band, reason = bpipe.band_from(fields)
         if band is None:
-            drop(reason, r.ric)
+            drop(reason, r)
             continue
         out.append(_out_row(r, band[0], band[1]))
 
@@ -194,23 +217,23 @@ def price_computed(cfg, rows, closes, refused=None):
     out, by_reason = [], {}
     ref_fields = {}
 
-    def drop(reason, ric):
-        by_reason.setdefault(reason, []).append(ric)
+    def drop(reason, r):
+        by_reason.setdefault(reason, []).append(
+            crosscode.Dropped(ric=r.ric, bbg=r.bbg, venue_id=r.venue_id))
 
     for r in rows:
         venue = cfg.venues[r.venue_id]
         if r.security in refused:
-            drop(f"Bloomberg refused the security: {refused[r.security]}",
-                 r.ric)
+            drop(f"Bloomberg refused the security: {refused[r.security]}", r)
             continue
         fields = closes.get(r.security)
         if fields is None:
-            drop("no answer from Bloomberg", r.ric)
+            drop("no answer from Bloomberg", r)
             continue
 
         ref, which = bpipe.prev_close_from(fields)
         if ref is None:
-            drop("no previous close", r.ric)
+            drop("no previous close", r)
             continue
         ref_fields[which] = ref_fields.get(which, 0) + 1
 
@@ -218,13 +241,13 @@ def price_computed(cfg, rows, closes, refused=None):
         if venue.rounding != "none":
             tick = ticks.tick_for(cfg.ticks[r.venue_id], ref)
             if tick is None:
-                drop("no tick tier for the previous close", r.ric)
+                drop("no tick tier for the previous close", r)
                 continue
         try:
             high, low = bands.compute(cfg.bands[r.venue_id], r.ticker, ref,
                                       tick, venue.min_price, venue.rounding)
         except bands.BandError as e:
-            drop(e.reason, r.ric)
+            drop(e.reason, r)
             continue
         out.append(_out_row(r, low, high))
 
@@ -332,8 +355,8 @@ def run(envs_spec: str) -> int:
 
         if not rows:
             print("no venue has reached its cutoff yet - nothing to publish")
-            for e in excluded:
-                print(f"  excluded {len(e.rows):6d}  {e.reason}")
+            for line in _exclusion_lines(excluded):
+                print(line)
             return 0
 
         #  Indonesia is computed, the rest is asked for.  Two batched
@@ -360,7 +383,7 @@ def run(envs_spec: str) -> int:
         if compute:
             closes, close_refused, close_problems = bpipe.fetch(
                 session, identity, [r.security for r in compute],
-                fields=bpipe.PREV_CLOSE_FIELDS + bpipe.PREV_CLOSE_DIAGNOSTIC,
+                fields=bpipe.PREV_CLOSE_FIELDS,
                 progress=progress("closes"))
             print()
     except Exception as e:                           # noqa: BLE001
@@ -408,8 +431,7 @@ def run(envs_spec: str) -> int:
     for venue, count in sorted(by_venue.items()):
         report.append(f"  {venue:<12} {count:6d}  "
                       f"{cfg.venues[venue].source}")
-    for e in excluded:
-        report.append(f"  excluded {len(e.rows):6d}  {e.reason}")
+    report.extend(_exclusion_lines(excluded))
 
     #  Which previous-close field answered is not yet known, so say it out
     #  loud every run until it is.
@@ -499,8 +521,8 @@ def demo() -> int:
           file=sys.stderr)
     for field, count in sorted(ref_fields.items()):
         print(f"  close from {count}  {field}", file=sys.stderr)
-    for e in list(excluded) + list(computed_excluded):
-        print(f"  {len(e.rows)}  {e.reason}  {e.rows}", file=sys.stderr)
+    for line in _exclusion_lines(list(excluded) + list(computed_excluded)):
+        print(line, file=sys.stderr)
     return 0
 
 
@@ -599,11 +621,18 @@ def self_test() -> int:
     check("the date is today", out[0]["LimitDate"], dt.date.today().isoformat())
 
     reasons = {e.reason: e.rows for e in excl}
-    check("half a band is reported", reasons["no MIN_LIMIT"], ["HALF.T"])
+    check("half a band is reported",
+          [d.ric for d in reasons["no MIN_LIMIT"]], ["HALF.T"])
+    check("and it names the BLOOMBERG code and venue, so a whole market "
+          "going missing is visible in the report itself",
+          [(d.bbg, d.venue_id) for d in reasons["no MIN_LIMIT"]],
+          [("HALF JT", "TYO-MAIN")])
     check("a name Bloomberg said nothing about",
-          reasons["no answer from Bloomberg"], ["NONE.T"])
+          [d.ric for d in reasons["no answer from Bloomberg"]],
+          ["NONE.T"])
     check("a name Bloomberg refused, with its own words",
-          reasons["Bloomberg refused the security: Unknown/Invalid Security"],
+          [d.ric for d in reasons[
+              "Bloomberg refused the security: Unknown/Invalid Security"]],
           ["GONE.T"])
 
     print("\ncomputing Indonesia from the tier table")
@@ -640,9 +669,10 @@ def self_test() -> int:
     creasons = {e.reason: e.rows for e in cexcl}
     check("a name under Rp 50 matches no tier and is REPORTED rather than "
           "quietly lost",
-          creasons["no band tier for price 10"], ["TINY.JK"])
+          [d.ric for d in creasons["no band tier for price 10"]],
+          ["TINY.JK"])
     check("a name Bloomberg gave no close for",
-          creasons["no previous close"], ["NOCL.JK"])
+          [d.ric for d in creasons["no previous close"]], ["NOCL.JK"])
     check("the run knows which field supplied each close - counting every "
           "close resolved, including TINY's, which was dropped afterwards "
           "for a reason that had nothing to do with the close",

@@ -69,10 +69,33 @@ class Row:
     status: str
 
 
+@dataclass(frozen=True)
+class Dropped:
+    """One name that did not make the file.
+
+    Carries the BLOOMBERG code as well as the RIC.  A report that says only
+    "412 no MIN_LIMIT" cannot be acted on: the code you paste into a
+    terminal to check the name by hand is the Bloomberg one, and the venue
+    is what tells you a whole market has gone missing rather than a
+    scattering of names."""
+    ric: str
+    bbg: str = ""
+    venue_id: str = ""
+
+    def __str__(self) -> str:
+        return f"{self.ric} ({self.bbg or '?'})"
+
+
 @dataclass
 class Excluded:
     reason: str
     rows: list = field(default_factory=list)
+
+    def by_venue(self) -> dict:
+        out = {}
+        for d in self.rows:
+            out.setdefault(d.venue_id or "(unknown)", []).append(d)
+        return out
 
 
 def security_name(bbg: str) -> str:
@@ -123,7 +146,8 @@ def dedupe(rows):
             seen.add(r.bbg)
 
     kept = [r for r in rows if id(r) not in doomed]
-    removed = [r.ric for r in rows if id(r) in doomed]
+    removed = [Dropped(ric=r.ric, bbg=r.bbg, venue_id=r.venue_id)
+               for r in rows if id(r) in doomed]
     return kept, removed
 
 
@@ -135,8 +159,9 @@ def load(path, venues: dict, now: time):
     kept = []
     by_reason = {}
 
-    def drop(reason, ric):
-        by_reason.setdefault(reason, []).append(ric)
+    def drop(reason, ric, bbg="", venue_id=""):
+        by_reason.setdefault(reason, []).append(
+            Dropped(ric=ric, bbg=bbg, venue_id=venue_id))
 
     with path.open(newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
@@ -151,8 +176,11 @@ def load(path, venues: dict, now: time):
             ric = (r.get("RicCode") or "").strip()
             sec_type = (r.get("Type") or "").strip()
             venue_id = (r.get("FidessaMarket") or "").strip()
+            #  read up front: every drop below should be able to name the
+            #  Bloomberg code, not just the RIC
+            bbg = (r.get("BloombergCode") or "").strip()
             if sec_type not in KEEP_TYPES:
-                drop("security type not Equity/ETF", ric)
+                drop("security type not Equity/ETF", ric, bbg, venue_id)
                 continue
             venue = venues.get(venue_id)
             if venue is None:
@@ -160,14 +188,15 @@ def load(path, venues: dict, now: time):
                 #  that nobody configured announces itself - it is what
                 #  would have said "TYO-MAIN" the first time Japan was
                 #  looked for.  One report line per unknown venue.
-                drop(f"venue {venue_id or '(blank)'} not in markets.csv", ric)
+                drop(f"venue {venue_id or '(blank)'} not in markets.csv", ric,
+                     bbg, venue_id)
                 continue
             if now < venue.cutoff:
-                drop("cutoff not reached", ric)
+                drop("cutoff not reached", ric, bbg, venue_id)
                 continue
-            bbg = (r.get("BloombergCode") or "").strip()
             if not bbg:
-                drop("no BloombergCode to ask Bloomberg about", ric)
+                drop("no BloombergCode to ask Bloomberg about", ric, bbg,
+                     venue_id)
                 continue
             kept.append(Row(ric=ric, bbg=bbg, ticker=ticker_of(bbg),
                             security=security_name(bbg),
@@ -190,7 +219,8 @@ def load(path, venues: dict, now: time):
         if not status or status.upper() in ACTIVE_STATUS:
             live.append(r)
         else:
-            drop(f"BloombergStatus is {status}, not ACTV", r.ric)
+            drop(f"BloombergStatus is {status}, not ACTV", r.ric, r.bbg,
+                 r.venue_id)
     kept = live
 
     if not kept and not by_reason:
@@ -272,16 +302,18 @@ def self_test() -> int:
               ["600001 CG Equity", "7203 JT Equity"])
         reasons = {e.reason: e.rows for e in excl}
         check("the warrant is reported, not vanished",
-              reasons["security type not Equity/ETF"], ["9999.T"])
+              [d.ric for d in reasons["security type not Equity/ETF"]],
+          ["9999.T"])
         check("the venue nobody configured is named, so one report line "
               "says which market is missing rather than just how many rows",
-              reasons["venue KSC-MAIN not in markets.csv"], ["ABC.KS"])
+              [d.ric for d in
+               reasons["venue KSC-MAIN not in markets.csv"]], ["ABC.KS"])
 
         rows, excl = load(cc, V, time(8, 30))
         check("at 08:30 Shanghai has not opened yet",
               [r.ric for r in rows], ["7203.T"])
-        check("and says so", {e.reason: e.rows for e in
-                              excl}["cutoff not reached"], ["600001.SS"])
+        check("and says so", [d.ric for d in {e.reason: e.rows for e in
+              excl}["cutoff not reached"]], ["600001.SS"])
 
         rows, _ = load(cc, V, time(7, 30))
         check("a cutoff is reached AT its time, not after",
@@ -303,8 +335,8 @@ def self_test() -> int:
               "first would publish a delisted line",
               sorted(r.ric for r in rows), ["B.T", "C.T"])
         check("and the loser is named",
-              {e.reason: e.rows for e in excl}["duplicate BloombergCode"],
-              ["A.T"])
+              [d.ric for d in {e.reason: e.rows for e in
+                               excl}["duplicate BloombergCode"]], ["A.T"])
 
         cc.write_text(HDR +
                       "A.T,DUP JT,A.JP,TYO-MAIN,Equity,ACTV\n"
@@ -325,7 +357,8 @@ def self_test() -> int:
               "worse than no band",
               [r.ric for r in rows], ["C.T"])
         check("both losers named",
-              {e.reason: e.rows for e in excl}["duplicate BloombergCode"],
+              [d.ric for d in {e.reason: e.rows for e in
+                               excl}["duplicate BloombergCode"]],
               ["A.T", "B.T"])
 
         cc.write_text(HDR +
@@ -349,8 +382,15 @@ def self_test() -> int:
               "dropped - the case dedupe alone never saw",
               [r.ric for r in rows], ["A.T"])
         check("and it is named by its status, not miscounted as a duplicate",
-              {e.reason: e.rows for e in excl}["BloombergStatus is DLST, "
-                                              "not ACTV"], ["B.T"])
+              [d.ric for d in {e.reason: e.rows for e in excl}[
+                  "BloombergStatus is DLST, not ACTV"]], ["B.T"])
+        d = {e.reason: e.rows for e in excl}[
+            "BloombergStatus is DLST, not ACTV"][0]
+        check("a dropped name carries its BLOOMBERG code, which is what "
+              "you paste into a terminal to check it by hand",
+              (d.bbg, d.venue_id), ("B JT", "TYO-MAIN"))
+        check("and prints as both codes together",
+              str(d), "B.T (B JT)")
 
         cc.write_text(HDR +
                       "A.T,A JT,A.JP,TYO-MAIN,Equity,ACTV\n"

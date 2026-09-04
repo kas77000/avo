@@ -32,11 +32,12 @@ that answers per name, and prints the tally every run:
 
 ```
   close from   412  PREV_CLOSE_VALUE_REALTIME
-  field        412  PX_YEST_CLOSE: Field not permitted to datafeed users
 ```
 
-`PX_YEST_CLOSE` rides along purely as a diagnostic. The first real run tells you
-which candidate to keep — then delete the others from `bpipe.PREV_CLOSE_FIELDS`.
+The first real run tells you which candidate to keep — then delete the others
+from `bpipe.PREV_CLOSE_FIELDS`. `PX_YEST_CLOSE` is **not** requested: it is
+static and confirmed unavailable on this subscription, so asking would cost a
+refusal per name and buy nothing.
 
 ## The status filter
 
@@ -81,6 +82,23 @@ one run shows what they carry:
 ```
 
 When the values are known, set `bpipe.STATUS_FIELD` and `STATUS_ACTIVE`.
+
+## Reading the run report
+
+Every exclusion is named, counted **and broken down by venue**:
+
+```
+  excluded    412  no MIN_LIMIT
+    KLS-MAIN       412  MAYBANK.KL (MAYBANK MK), PBBANK.KL (PBBANK MK) (+410 more)
+  excluded     18  last price outside the limits
+    TYO-MAIN        18  6501.T (6501 JT), 7011.T (7011 JT) (+16 more)
+```
+
+The venue line is the point. A bare `excluded 412 no MIN_LIMIT` cannot tell you
+whether 412 names are scattered across the region or whether **one whole market
+has vanished**; split by venue, it says so at a glance. Both codes are shown
+because the Bloomberg one is what you paste into a terminal to check a name by
+hand, and the RIC is what you match against the published file.
 
 ## v1 or v2?
 

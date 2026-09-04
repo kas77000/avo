@@ -69,21 +69,18 @@ FIELDS = (["MIN_LIMIT", "MAX_LIMIT", "LAST_PRICE", STATUS_FIELD]
           + STATUS_DIAGNOSTIC)
 
 #  The computed side needs yesterday's close.  The obvious name for it,
-#  PX_YEST_CLOSE, is STATIC and so almost certainly barred to us - PX_LAST
-#  already was.  These are the real-time candidates, in the order they are
-#  preferred, taken from field lists this desk already subscribes to in the
-#  ai3 B-PIPE code.
+#  PX_YEST_CLOSE, is STATIC and CONFIRMED unavailable on this subscription,
+#  so it is not requested at all - asking would cost a refusal per name and
+#  buy nothing.  These are the real-time candidates, in the order they are
+#  preferred.
 #
 #  WHICH ONE ANSWERS IS NOT YET KNOWN.  Rather than guess a single mnemonic
 #  and get an empty Indonesia, ask for all of them, use the first that
 #  answers per name, and REPORT the tally - the first real run then tells us
-#  which to keep.  PX_YEST_CLOSE rides along purely as a diagnostic: if it
-#  turns out to be permitted after all, that is worth knowing too.
+#  which to keep.
 PREV_CLOSE_FIELDS = ["PREV_CLOSE_VALUE_REALTIME",
                      "PRICE_PREVIOUS_CLOSE_RT",
                      "ADJUSTED_PREV_LAST_PRICE_RT"]
-
-PREV_CLOSE_DIAGNOSTIC = ["PX_YEST_CLOSE"]
 
 #  Securities per //blp/refdata request.  Bloomberg accepts more; 100 keeps
 #  a single failure small and the responses readable in a log.
@@ -349,7 +346,7 @@ def _one_request(session, identity, securities, fields):
                     entry.getElement("fieldData"))
                 #  A field that is real but not served to us says so here,
                 #  once per security.  Collapsed to one line per field by
-                #  the caller: "PX_YEST_CLOSE: not permitted (2143 names)"
+                #  the caller: "MAX_LIMIT: not permitted (2143 names)"
                 #  is the sentence that explains an empty column.
                 if entry.hasElement("fieldExceptions"):
                     exceptions = entry.getElement("fieldExceptions")
