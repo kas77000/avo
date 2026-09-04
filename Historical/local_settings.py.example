@@ -1,0 +1,54 @@
+# Copy to local_settings.py and fill in.  local_settings.py is gitignored.
+#
+# STRICT: an unknown name here is a hard error.  A typo'd OUTPUT_DIRR fails
+# loudly rather than sitting here doing nothing while the run writes
+# somewhere else.
+
+# -----------------------------------------------------------------------------
+# CONNECTIONS - host:port, no login.  Two different servers.
+#
+#   equity_master is on the order side in kdb-queries' layout (:5010), NOT
+#   with qatt.  Ask whoever runs kdb if these two look interchangeable.
+#
+#   QATT_SERVER must be the HDB - the one partitioned by date.  The RDB
+#   (:5013 there) holds today only and has no date column to constrain, and
+#   every day this job asks for is a day that has finished.
+# -----------------------------------------------------------------------------
+
+EQUITY_MASTER_SERVER = "CHANGEME:5010"
+QATT_SERVER = "CHANGEME:5011"
+
+# qatt_time_probe.py reads QATT_SERVER from here too, and needs nothing
+# else - so this file is usable for the probe before the rest is filled in.
+
+# -----------------------------------------------------------------------------
+# PATHS
+# -----------------------------------------------------------------------------
+
+CROSSCODE_PATH = r"CHANGEME\CrossCode.csv"
+
+# One raw-<code>-<YYYYMMDD>.csv per name per day lands here, and this
+# directory is HALF the job's memory: a date with no file is a date not yet
+# fetched.  Point it somewhere permanent.
+OUTPUT_DIR = r"CHANGEME\ticks"
+
+# The other half: every (name, date) kdb was asked about and had nothing
+# for, so it is never asked again.  Without it, a crosscode name qatt has
+# never carried is re-queried for every backfill day on every run, forever.
+# Empty means <OUTPUT_DIR>\_no_data.csv, which is usually what you want.
+# MISS_CACHE_PATH = ""
+
+# -----------------------------------------------------------------------------
+# SIZING - all optional, all with defaults in settings.py
+# -----------------------------------------------------------------------------
+
+# The window every name is kept up to date over.  Capped by the partitions
+# qatt actually holds, so a number larger than the store has is harmless.
+# BACKFILL_DAYS = 60
+
+# Syms per qatt round trip.  A day of the whole universe in one object is
+# millions of rows; this is the dial for that.
+# SYM_CHUNK = 200
+
+# Codes per equity_master round trip.
+# MASTER_CHUNK = 5000
