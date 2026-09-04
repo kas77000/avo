@@ -32,8 +32,9 @@ TWO THINGS THIS GETS RIGHT AND A NAIVE VERSION WOULD NOT.
   Every name therefore gets up to two candidates, its own suffix first, and
   the run reports which one hit.  Neither is hardcoded.
 
-  ITS TYPE.  The candidates go out as CHAR VECTORS, because `$ casts those
-  and pykx would otherwise send symbol atoms that `$ refuses.  See FETCH_Q.
+  ITS TYPE.  Handing kdb a list of symbols is where two live runs died,
+  differently - 'type then 'rank - so it is tried three ways and the run
+  reports which worked.  See FETCH_STRATEGIES.
 
 ONE ROUND TRIP.  A universe is tens of thousands of names; a per-symbol
 query would not finish inside the window before the open.
@@ -67,22 +68,35 @@ MAXDATE_CLIENT_Q = "{[d] exec max date from equity_master where date<=d}"
 MAXDATE_SERVER_Q = ("{[n] exec max date from equity_master "
                     "where date<=.z.D-n}")
 
-#  THE SYM ARGUMENT IS SENT AS CHAR VECTORS, and this is not a detail.
-#
-#  `$s casts CHAR VECTORS to symbols.  pykx turns a python list[str] into a
-#  GENERIC LIST OF SYMBOL ATOMS - the 2026-09-04 log read `list -> List (q
-#  type 0)`, not the symbol vector (11h) a first guess would assume - and `$
-#  applied to something already symbolic is itself 'type.  That is the error
-#  the fetch died on, twice.
-#
-#  So syms_for_q encodes each name to bytes, which pykx maps to a q char
-#  vector, and `$ then does what it says.  The query still guards for a real
-#  symbol vector so a future pykx that sends 11h also works.
-#
 #  The same unguarded `$s sits in TradingData/equitymaster.py and
-#  Historical/qattsource.py.
-FETCH_Q = ("{[d;s] select " + CLOSE_FIELD + " by sym from equity_master "
-           "where date=d, sym in $[11h=type s; s; `$s]}")
+#  Historical/qattsource.py, and the same two failures are waiting there.
+_SELECT = ("{[d;s] select " + CLOSE_FIELD + " by sym from equity_master "
+           "where date=d, sym in ")
+
+#  THREE WAYS, because two live runs each died differently on this one
+#  argument and neither guess survived contact:
+#
+#    2026-09-04  sym in `$s              'type
+#                pykx sent symbol ATOMS; `$ on a symbol is 'type.
+#    2026-09-04  sym in $[11h=type s;s;`$s]   'rank
+#                the guard was the new fault - a cond in a where clause is
+#                one construct too many, and 'rank is an arity error.
+#
+#  So: no conditional, no cleverness, and the simplest form first.
+#
+#    plain      s is already a symbol vector - nothing for q to do
+#    cast       s is a list of char vectors, which is what `$ is FOR
+#    split      s is ONE char vector; q splits it. No list crosses the wire
+#               at all, so no list conversion can be wrong.
+#
+#  The last one cannot fail on argument type, which is what makes it the
+#  backstop rather than a fourth guess.
+FETCH_STRATEGIES = [
+    ("plain", _SELECT + "s}", lambda syms: list(syms)),
+    ("cast", _SELECT + "`$s}", lambda syms: syms_for_q(syms)),
+    ("split", _SELECT + '`$" " vs s}',
+     lambda syms: " ".join(syms).encode("utf-8")),
+]
 
 
 class KdbError(Exception):
@@ -203,12 +217,19 @@ def q_type_of(value) -> str:
     #  A bare "List (q type 0)" hid this very bug: the container was right
     #  and its CONTENTS were symbols where char vectors were needed.
     if kind == 0:
-        try:
-            first = converted[0]
+        first = None
+        for get in (lambda c: c[0], lambda c: list(c)[0],
+                    lambda c: c.py()[0]):
+            try:
+                first = get(converted)
+                break
+            except Exception:                               # noqa: BLE001
+                continue
+        if first is None:
+            inside = " of ?"
+        else:
             inside = (f" of {type(first).__name__} "
                       f"(q type {getattr(first, 't', '?')})")
-        except Exception:                                   # noqa: BLE001
-            inside = " of ?"
     return (f"{type(value).__name__} -> {type(converted).__name__} "
             f"(q type {kind}){inside}")
 
@@ -306,13 +327,35 @@ def fetch(conn, date, syms, log=None) -> dict:
     """sym -> Decimal close, for the syms that had one.
 
     A sym with no row, or a null close, is simply absent; the caller reports
-    it rather than guessing a price."""
+    it rather than guessing a price.
+
+    THREE WAYS TO HAND KDB A LIST OF SYMBOLS, tried in order and reported.
+    Two live runs each died differently on this one argument - 'type, then
+    'rank - so it is no longer guessed at.  See FETCH_STRATEGIES."""
     say = log or (lambda line: None)
     if not syms:
         return {}
     say(f"      {len(syms)} syms, first few {list(syms)[:5]}")
-    result = ask(conn, "fetch closes", FETCH_Q,
-                 (date, syms_for_q(syms)), log)
+
+    errors, result = [], None
+    for name, query, build in FETCH_STRATEGIES:
+        try:
+            result = ask(conn, f"fetch closes/{name}", query,
+                         (date, build(syms)), log)
+            say(f"      strategy {name!r} worked")
+            break
+        except KdbError as e:
+            errors.append(str(e).splitlines()[0])
+    else:
+        NL = chr(10)
+        raise KdbError(NL.join(
+            ["equity_master: no way of sending the symbol list worked."]
+            + ["    " + e for e in errors]
+            + ["  All three forms failed, so the argument is not the "
+               "problem any more.",
+               "  Check the query itself against the schema in "
+               "kdb-queries/no_git/kdb/equity_master.csv."]))
+
     if result is None:
         say("      got nothing back")
         return {}
@@ -461,6 +504,24 @@ def self_test() -> int:
     check("and when pykx is absent it SAYS so rather than reporting a "
           "wrong q type", ("pykx not installed" in got) or ("->" in got),
           True)
+
+    print("three ways to hand kdb a symbol list")
+    names = ["600001.CH", "BBCA.IJ"]
+    built = {n: b(names) for n, q, b in FETCH_STRATEGIES}
+    check("plain sends them untouched, for a pykx that makes a symbol vector",
+          built["plain"], names)
+    check("cast sends CHAR VECTORS, which is what `$ is for",
+          built["cast"], [b"600001.CH", b"BBCA.IJ"])
+    check("split sends ONE char vector, so no list conversion can be wrong",
+          built["split"], b"600001.CH BBCA.IJ")
+    queries = {n: q for n, q, b in FETCH_STRATEGIES}
+    check("and NONE of them contains a conditional - the cond was the "
+          "'rank error, not a fix for it",
+          [n for n, q in queries.items() if "$[" in q], [])
+    check("the split query does the splitting in q",
+          "vs s" in queries["split"], True)
+    check("the strategies are ordered simplest first",
+          [n for n, q, b in FETCH_STRATEGIES], ["plain", "cast", "split"])
 
     print("sending the syms in a form `$ can actually cast")
     check("names go out as CHAR VECTORS, not str - pykx turns str into "
