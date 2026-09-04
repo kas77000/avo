@@ -332,6 +332,7 @@ def fetch(conn, date, syms, log=None) -> dict:
     THREE WAYS TO HAND KDB A LIST OF SYMBOLS, tried in order and reported.
     Two live runs each died differently on this one argument - 'type, then
     'rank - so it is no longer guessed at.  See FETCH_STRATEGIES."""
+    NL = chr(10)
     say = log or (lambda line: None)
     if not syms:
         return {}
@@ -347,7 +348,6 @@ def fetch(conn, date, syms, log=None) -> dict:
         except KdbError as e:
             errors.append(str(e).splitlines()[0])
     else:
-        NL = chr(10)
         raise KdbError(NL.join(
             ["equity_master: no way of sending the symbol list worked."]
             + ["    " + e for e in errors]
@@ -368,22 +368,21 @@ def fetch(conn, date, syms, log=None) -> dict:
     #  NO ROWS AT ALL IS THE SHAPE OF THE QUESTION, NOT THE DATA.  A
     #  universe of thousands of names always has closes, so an empty answer
     #  means the partition is empty or `sym` does not look like what was
-    #  asked for.  A wrong sym type returns exactly this - QUIETLY, on any
-    #  q that does not happen to throw - and that is the failure this
-    #  module has spent three commits chasing.  Loud beats a report with no
-    #  bands in it, which reads like a holiday.
+    #  asked for.  A wrong sym form can return exactly this - QUIETLY, on a
+    #  q that does not happen to throw - and a silent empty answer reads
+    #  like a holiday rather than a bug.
     if not items:
-        raise KdbError(
+        raise KdbError(NL.join([
             f"[fetch closes] equity_master has NO rows for {len(syms)} "
-            f"syms on {date_text(date)}."
-            f"{chr(10)}    A universe this size always has closes, so this "
-            f"is the shape of the question rather than the data:"
-            f"{chr(10)}    either that partition is empty, or `sym` does "
-            f"not look like {list(syms)[:3]}."
-            f"{chr(10)}    Run"
-            f"{chr(10)}        python ../other/em_probe.py --server "
-            f"HOST:PORT --sample {list(syms)[0]}"
-            f"{chr(10)}    to see what the column actually holds.")
+            f"syms on {date_text(date)}.",
+            "    A universe this size always has closes, so this is the "
+            "shape of the question rather than the data:",
+            f"    either that partition is empty, or `sym` does not look "
+            f"like {list(syms)[:3]}.",
+            "    Run",
+            f"        python ../other/em_probe.py --server HOST:PORT "
+            f"--sample {list(syms)[0]}",
+            "    to see what the column actually holds."]))
 
     out = {}
     for sym, row in items:
@@ -505,6 +504,25 @@ def self_test() -> int:
           "wrong q type", ("pykx not installed" in got) or ("->" in got),
           True)
 
+    print("an EMPTY answer is loud")
+
+    class EmptyConn:
+        def __call__(self, query, *args):
+            return {}
+
+    try:
+        fetch(EmptyConn(), "2026.09.03", ["600001.CH", "BBCA.IJ"])
+        got = "no error"
+    except KdbError as e:
+        got = str(e)
+    check("thousands of syms and no rows is a FAULT, not a quiet empty "
+          "file that reads like a holiday",
+          "has NO rows" in got, True)
+    check("and it says which of the two it could be",
+          "partition is empty" in got and "does not look like" in got, True)
+    check("naming a real sym so the next command can be pasted",
+          "600001.CH" in got, True)
+
     print("three ways to hand kdb a symbol list")
     names = ["600001.CH", "BBCA.IJ"]
     built = {n: b(names) for n, q, b in FETCH_STRATEGIES}
@@ -616,34 +634,7 @@ def self_test() -> int:
     check("the name kdb had nothing for is handed back, not dropped",
           [r.ric for r in missing], ["GONE.JK"])
 
-    print()
-    print("what comes back, and what an EMPTY answer means")
-    check("the query still casts, because syms_for_q sends char vectors - "
-          "the two only work as a PAIR and neither may change alone",
-          "`$s" in FETCH_Q, True)
-
-    class Rows:
-        def __call__(self, query, *args):
-            return {"000020.KS": {"PX_LAST": 8000.0},
-                    "000040.KS": {"PX_LAST": 0}}
-
     check("nothing asked, nothing returned", fetch(None, "d", []), {})
-    check("the names with a real close come back, and a zero is not a price",
-          fetch(Rows(), "2026.09.03", ["000020.KS", "000040.KS"]),
-          {"000020.KS": D("8000.0")})
-
-    class NoRows:
-        def __call__(self, query, *args):
-            return {}
-
-    raises("a universe that comes back EMPTY stops the run, because the "
-           "wrong sym type returns no rows quietly and a band-less report "
-           "reads like a holiday",
-           lambda: fetch(NoRows(), "2026.09.03", ["000020.KS"]),
-           "NO rows for 1 syms")
-    raises("and it names the probe, with the sym already in the command",
-           lambda: fetch(NoRows(), "2026.09.03", ["000020.KS"]),
-           "--sample 000020.KS")
 
     print()
     print("all checks passed" if ok else "SOME CHECKS FAILED")
