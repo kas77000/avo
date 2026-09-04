@@ -7,3 +7,4 @@ no_git/
 *.tsr
 !LimitUpDown/*/config/spol_JKT.tsr
 docs/
+.claude/

@@ -32,6 +32,9 @@ TWO THINGS THIS GETS RIGHT AND A NAIVE VERSION WOULD NOT.
   Every name therefore gets up to two candidates, its own suffix first, and
   the run reports which one hit.  Neither is hardcoded.
 
+  ITS TYPE.  The candidates go out as CHAR VECTORS, because `$ casts those
+  and pykx would otherwise send symbol atoms that `$ refuses.  See FETCH_Q.
+
 ONE ROUND TRIP.  A universe is tens of thousands of names; a per-symbol
 query would not finish inside the window before the open.
 
@@ -64,14 +67,20 @@ MAXDATE_CLIENT_Q = "{[d] exec max date from equity_master where date<=d}"
 MAXDATE_SERVER_Q = ("{[n] exec max date from equity_master "
                     "where date<=.z.D-n}")
 
-#  THE SYM CAST HAS TO WORK BOTH WAYS.  `$s casts CHAR VECTORS to symbols,
-#  but pykx turns a python list[str] into a SYMBOL VECTOR already - and `$
-#  applied to a symbol is itself a 'type error.  Which of the two arrives
-#  depends on the pykx version and on how the list was built, so the query
-#  asks q what it got: 11h is a symbol vector, anything else gets cast.
+#  THE SYM ARGUMENT IS SENT AS CHAR VECTORS, and this is not a detail.
 #
-#  The same `$s appears in TradingData/equitymaster.py and in
-#  Historical/qattsource.py, unguarded.
+#  `$s casts CHAR VECTORS to symbols.  pykx turns a python list[str] into a
+#  GENERIC LIST OF SYMBOL ATOMS - the 2026-09-04 log read `list -> List (q
+#  type 0)`, not the symbol vector (11h) a first guess would assume - and `$
+#  applied to something already symbolic is itself 'type.  That is the error
+#  the fetch died on, twice.
+#
+#  So syms_for_q encodes each name to bytes, which pykx maps to a q char
+#  vector, and `$ then does what it says.  The query still guards for a real
+#  symbol vector so a future pykx that sends 11h also works.
+#
+#  The same unguarded `$s sits in TradingData/equitymaster.py and
+#  Historical/qattsource.py.
 FETCH_Q = ("{[d;s] select " + CLOSE_FIELD + " by sym from equity_master "
            "where date=d, sym in $[11h=type s; s; `$s]}")
 
@@ -136,6 +145,16 @@ def sym_candidates(row, venue) -> list:
     return out
 
 
+def syms_for_q(syms):
+    """Symbol names as CHAR VECTORS, which is what `$ can cast.
+
+    Sent as python str, pykx makes symbol atoms and `$ fails on them with
+    'type.  Sent as bytes, pykx makes char vectors and the cast works.  One
+    encode() is the whole difference between a working fetch and a run that
+    dies after the universe is already loaded."""
+    return [s.encode("utf-8") if isinstance(s, str) else s for s in syms]
+
+
 def ask(conn, label, query, args=(), log=None):
     """Send one query, having said exactly what is being sent.
 
@@ -180,8 +199,18 @@ def q_type_of(value) -> str:
         return (f"{type(value).__name__} -> will not convert: "
                 f"{type(e).__name__}: {e}")
     kind = getattr(converted, "t", "?")
+    inside = ""
+    #  A bare "List (q type 0)" hid this very bug: the container was right
+    #  and its CONTENTS were symbols where char vectors were needed.
+    if kind == 0:
+        try:
+            first = converted[0]
+            inside = (f" of {type(first).__name__} "
+                      f"(q type {getattr(first, 't', '?')})")
+        except Exception:                                   # noqa: BLE001
+            inside = " of ?"
     return (f"{type(value).__name__} -> {type(converted).__name__} "
-            f"(q type {kind})")
+            f"(q type {kind}){inside}")
 
 
 def _py(value):
@@ -282,7 +311,8 @@ def fetch(conn, date, syms, log=None) -> dict:
     if not syms:
         return {}
     say(f"      {len(syms)} syms, first few {list(syms)[:5]}")
-    result = ask(conn, "fetch closes", FETCH_Q, (date, list(syms)), log)
+    result = ask(conn, "fetch closes", FETCH_Q,
+                 (date, syms_for_q(syms)), log)
     if result is None:
         say("      got nothing back")
         return {}
@@ -411,6 +441,17 @@ def self_test() -> int:
     check("and when pykx is absent it SAYS so rather than reporting a "
           "wrong q type", ("pykx not installed" in got) or ("->" in got),
           True)
+
+    print("sending the syms in a form `$ can actually cast")
+    check("names go out as CHAR VECTORS, not str - pykx turns str into "
+          "symbol atoms and `$ on a symbol is the 'type the fetch died on",
+          syms_for_q(["600001.CH", "BBCA.IJ"]),
+          [b"600001.CH", b"BBCA.IJ"])
+    check("anything already encoded is left alone",
+          syms_for_q([b"600001.CH"]), [b"600001.CH"])
+    check("an empty universe stays empty", syms_for_q([]), [])
+    check("unicode survives the trip",
+          syms_for_q(["ABC"])[0].decode("utf-8"), "ABC")
 
     print("resolving the partition date, which is where a live run died")
 
