@@ -152,6 +152,30 @@ def _out_row(r, low, high):
 SHOW_NAMES = 5
 
 
+def _venue_summary(cfg, out, excluded):
+    """One line per venue: published, excluded, and where its band comes from.
+
+    EVERY CONFIGURED VENUE GETS A LINE, including one that published nothing.
+    A venue used to appear only if it had output rows, so a market that lost
+    its whole universe - the single thing most worth seeing - was the one
+    thing the report could not say. A row of zeroes is the alarm."""
+    published, dropped = {}, {}
+    for r in out:
+        published[r["Venue"]] = published.get(r["Venue"], 0) + 1
+    for e in excluded:
+        for venue, rows in e.by_venue().items():
+            dropped[venue] = dropped.get(venue, 0) + len(rows)
+
+    lines = [f"  {'venue':<12} {'published':>9} {'excluded':>9}  source"]
+    for v in sorted(set(cfg.venues) | set(published) | set(dropped)):
+        src = cfg.venues[v].source if v in cfg.venues else "not configured"
+        flag = "   <- nothing published" if (published.get(v, 0) == 0
+                                             and dropped.get(v, 0)) else ""
+        lines.append(f"  {v:<12} {published.get(v, 0):9d} "
+                     f"{dropped.get(v, 0):9d}  {src}{flag}")
+    return lines
+
+
 def _exclusion_lines(excluded):
     """One line per reason, then one per venue underneath it.
 
@@ -426,12 +450,7 @@ def run(envs_spec: str) -> int:
 
     report = [f"{len(out)} rows -> {OUT_TEMP}",
               f"published to {', '.join(envs) if envs else 'nowhere'}"]
-    by_venue = {}
-    for r in out:
-        by_venue[r["Venue"]] = by_venue.get(r["Venue"], 0) + 1
-    for venue, count in sorted(by_venue.items()):
-        report.append(f"  {venue:<12} {count:6d}  "
-                      f"{cfg.venues[venue].source}")
+    report.extend(_venue_summary(cfg, out, excluded))
     report.extend(_exclusion_lines(excluded))
 
     #  Which previous-close field answered is not yet known, so say it out
@@ -522,7 +541,10 @@ def demo() -> int:
           file=sys.stderr)
     for field, count in sorted(ref_fields.items()):
         print(f"  close from {count}  {field}", file=sys.stderr)
-    for line in _exclusion_lines(list(excluded) + list(computed_excluded)):
+    every = list(excluded) + list(computed_excluded)
+    for line in _venue_summary(cfg, out + computed, every):
+        print(line, file=sys.stderr)
+    for line in _exclusion_lines(every):
         print(line, file=sys.stderr)
     return 0
 
@@ -764,6 +786,28 @@ def self_test() -> int:
           ["A.T LimitUpPrice: old 3833, new 3900"])
     check("the same price written differently is not a difference",
           compare(old, [dict(old[0], LimitUpPrice="3833.0"), old[1]]), [])
+
+    print("\nthe venue summary")
+    cfg2 = marketcfg.load(Path(__file__).resolve().parent / "config",
+                          Path(__file__).resolve().parent / "config")
+    rows = [{"Venue": "TYO-MAIN"}, {"Venue": "TYO-MAIN"}]
+    gone = [crosscode.Excluded(
+        reason="Bloomberg refused the security: Security Entitlement Check "
+               "Failed! EID(s) needed: 64487 or 64488",
+        rows=[crosscode.Dropped("A.KL", "A MK", "KLS-MAIN"),
+              crosscode.Dropped("B.KL", "B MK", "KLS-MAIN")])]
+    lines = _venue_summary(cfg2, rows, gone)
+    kls = [l for l in lines if "KLS-MAIN" in l]
+    check("a venue that published NOTHING still gets a line - it is the one "
+          "thing the report most needs to be able to say",
+          len(kls), 1)
+    check("with its excluded count on it", "2" in kls[0], True)
+    check("and flagged, so a whole market going missing is not just a zero "
+          "in a column", "nothing published" in kls[0], True)
+    tyo = [l for l in lines if "TYO-MAIN" in l][0]
+    check("a healthy venue is not flagged", "nothing published" in tyo, False)
+    check("every configured venue appears, published or not",
+          len([l for l in lines if "-MAIN" in l]), len(cfg2.venues))
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

@@ -91,7 +91,19 @@ The 2026-09-04 run carried:
 
 ## Reading the run report
 
-Every exclusion is named, counted **and broken down by venue**:
+It opens with one line per venue — published, excluded, and where the band
+comes from. **Every configured venue appears, including one that published
+nothing**, because a market losing its whole universe is the thing most worth
+seeing and the thing a published-only table cannot say:
+
+```
+  venue        published  excluded  source
+  JKT-MAIN           842        42  computed
+  KLS-MAIN             0       905  bloomberg   <- nothing published
+  TYO-MAIN          3421        18  bloomberg
+```
+
+Then every exclusion, named, counted **and broken down by venue**:
 
 ```
   excluded    412  no MIN_LIMIT
