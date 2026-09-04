@@ -19,6 +19,11 @@ BPIPE_HOST = "CHANGEME"
 BPIPE_PORT = 8194
 BPIPE_APP = "CHANGEME"
 
+#  host:port of the kdb holding equity_master.  Only needed if some venue in
+#  markets.csv has Source=computed - a config where Bloomberg prices
+#  everything never opens a kdb connection.
+EQUITY_MASTER_SERVER = "CHANGEME:5010"
+
 CROSSCODE_PATH = r""
 
 TSR_DIR = r""

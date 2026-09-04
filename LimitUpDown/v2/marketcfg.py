@@ -53,6 +53,7 @@ class Venue:
     tick_source: str
     min_price: Optional[Decimal]
     rounding: str
+    bbg_composite: str = ""
 
     @property
     def computed(self) -> bool:
@@ -130,32 +131,32 @@ def load(config_dir, tsr_dir=None) -> Config:
         raw_min = (r.get("MinPrice") or "").strip()
         rounding = (r.get("Rounding") or "").strip()
 
-        if source == "bloomberg":
-            set_anyway = [c for c in COMPUTED_ONLY if (r.get(c) or "").strip()]
-            if set_anyway:
-                raise ConfigError(
-                    f"markets.csv {vid}: Source=bloomberg but "
-                    f"{', '.join(set_anyway)} {'is' if len(set_anyway) == 1 else 'are'} "
-                    f"set. Bloomberg supplies the band, so there is nothing "
-                    f"here to round or floor - one of the two is a mistake.")
-        else:
-            if rounding not in VALID_ROUNDING:
-                raise ConfigError(
-                    f"markets.csv {vid}: Rounding {rounding!r} is not one of "
-                    f"{VALID_ROUNDING}")
-            if rounding == "none" and tick_source:
-                raise ConfigError(
-                    f"markets.csv {vid}: Rounding=none but TickSource is "
-                    f"{tick_source!r}. A venue that does not round must not "
-                    f"name a tick table.")
-            if rounding != "none" and not tick_source:
-                raise ConfigError(
-                    f"markets.csv {vid}: Rounding={rounding} needs a "
-                    f"TickSource, which is blank")
+        #  EVERY VENUE IS SWITCHABLE.  Flipping Source to computed must be a
+        #  one-word edit, so the rounding and tick settings are allowed to
+        #  sit on a bloomberg venue unused, ready for the day it flips.
+        #  They are still VALIDATED - a latent setting that is wrong is a
+        #  trap that springs on whoever makes the switch, months later.
+        if rounding and rounding not in VALID_ROUNDING:
+            raise ConfigError(
+                f"markets.csv {vid}: Rounding {rounding!r} is not one of "
+                f"{VALID_ROUNDING}")
+        #  Blank means none, which is what most markets want: a percentage
+        #  band and no tick to land on.
+        effective = rounding or "none"
+        if effective == "none" and tick_source:
+            raise ConfigError(
+                f"markets.csv {vid}: Rounding=none but TickSource is "
+                f"{tick_source!r}. A venue that does not round must not name "
+                f"a tick table.")
+        if effective != "none" and not tick_source:
+            raise ConfigError(
+                f"markets.csv {vid}: Rounding={rounding} needs a TickSource, "
+                f"which is blank")
 
         venues[vid] = Venue(
             country=(r.get("Country") or "").strip(),
             venue_id=vid, cutoff=cutoff, source=source,
+            bbg_composite=(r.get("BBGComposite") or "").strip(),
             tick_source=tick_source,
             min_price=(_decimal(raw_min, f"markets.csv {vid} MinPrice")
                        if raw_min else None),
@@ -164,11 +165,11 @@ def load(config_dir, tsr_dir=None) -> Config:
     if not venues:
         raise ConfigError(f"{config_dir / 'markets.csv'} defines no venues")
 
-    #  bands.csv is only read if some venue computes.  A config where
-    #  Bloomberg prices everything needs no tiers and no file.
+    #  ALWAYS read, even when Bloomberg prices everything today.  The tiers
+    #  for a bloomberg venue are what make it switchable, and validating
+    #  them now means the switch cannot fail on a typo written months ago.
     band_map = {}
-    computed = [v for v in venues.values() if v.computed]
-    if computed:
+    if (config_dir / "bands.csv").is_file():
         for r in _rows(config_dir / "bands.csv"):
             vid = (r.get("FidessaVenueID") or "").strip()
             if not vid:
@@ -176,11 +177,6 @@ def load(config_dir, tsr_dir=None) -> Config:
             if vid not in venues:
                 raise ConfigError(
                     f"bands.csv: venue {vid} is not defined in markets.csv")
-            if not venues[vid].computed:
-                raise ConfigError(
-                    f"bands.csv: {vid} has band tiers but Source is "
-                    f"{venues[vid].source}. Tiers for a venue Bloomberg "
-                    f"prices would never be used.")
             kind = (r.get("Kind") or "").strip()
             if kind not in VALID_KIND:
                 raise ConfigError(
@@ -196,12 +192,12 @@ def load(config_dir, tsr_dir=None) -> Config:
 
     tick_map = {}
     for vid, v in venues.items():
-        if not v.computed:
-            continue
-        if vid not in band_map:
+        if v.computed and vid not in band_map:
             raise ConfigError(
-                f"{vid} has Source=computed but no band tiers in bands.csv")
-        if v.rounding == "none":
+                f"{vid} has Source=computed but no band tiers in bands.csv. "
+                f"Add its tiers, or leave it on Source=bloomberg - a market "
+                f"whose rule nobody has written down cannot be computed.")
+        if v.rounding == "none" or not v.tick_source:
             continue
         path = tsr_dir / v.tick_source
         if not path.is_file():
@@ -284,25 +280,29 @@ def self_test() -> int:
 
     print("\nhalf configured venues, which are all somebody's half done edit")
     with tempfile.TemporaryDirectory() as d:
-        raises("a bloomberg venue carrying a tick file",
+        raises("a tick file with no Rounding to use it - naming a ladder "
+               "and not saying how to land on it is a half-finished edit",
                lambda: load(write(d, mk=HDR + IDN +
                                   "China,SHA-MAIN,09:03:00,bloomberg,"
                                   "spol_JKT.tsr,,\n")),
-               "nothing here to round")
+               "must not name a tick table")
     with tempfile.TemporaryDirectory() as d:
-        raises("a bloomberg venue with a MinPrice",
-               lambda: load(write(d, mk=HDR + IDN +
-                                  "China,SHA-MAIN,09:03:00,bloomberg,,50,\n")),
-               "nothing here to round")
+        cfg = load(write(d, mk=HDR + IDN +
+                         "China,SHA-MAIN,09:03:00,bloomberg,,50,\n"))
+        check("a MinPrice on a bloomberg venue is LATENT, not an "
+              "error - it is what makes the venue switchable in one "
+              "word", cfg.venues["SHA-MAIN"].min_price, Decimal("50"))
     with tempfile.TemporaryDirectory() as d:
         raises("a computed venue with no tiers",
                lambda: load(write(d, bd="FidessaVenueID,Kind,SymPrefix,"
                                         "FloorFrom,Up,Down\n")),
                "no band tiers")
     with tempfile.TemporaryDirectory() as d:
-        raises("tiers for a venue Bloomberg prices, which would never be used",
-               lambda: load(write(d, bd=BD + "SHA-MAIN,pct,,0,0.1,0.1\n")),
-               "would never be used")
+        cfg = load(write(d, bd=BD + "SHA-MAIN,pct,,0,0.1,0.1\n"))
+        check("tiers for a venue Bloomberg prices today are LOADED "
+              "and VALIDATED, not rejected - they are the switch, and "
+              "a typo found now beats one found by whoever flips it",
+              [t.up for t in cfg.bands["SHA-MAIN"]], [Decimal("0.1")])
     with tempfile.TemporaryDirectory() as d:
         raises("a computed venue that rounds but names no tick file",
                lambda: load(write(d, mk=HDR +

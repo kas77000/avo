@@ -1,13 +1,51 @@
-# LimitUpDown v2 — ask Bloomberg, except Indonesia
+# LimitUpDown v2 — ask Bloomberg, or compute it
 
 Builds `limitUpDown.csv`, the daily price-band file the Nova ATS uses to bound
-orders. **Bloomberg supplies the band for every market except Indonesia, which
-is computed** from a tier table and a tick ladder. The split is declared in
-`config/markets.csv`, not written into the code.
+orders. **Every venue names its own source, and any of them can be switched by
+editing one word** in `config/markets.csv`:
 
 ```
 Source=bloomberg   MIN_LIMIT / MAX_LIMIT off B-PIPE
 Source=computed    band = f(previous close, tiers), rounded to the tick
+                   previous close from kdb's equity_master
+```
+
+Each source is opened **only if it has work**. Switch every venue to computed
+and the job never touches B-PIPE; leave them all on bloomberg and it never
+touches kdb. That is what makes a market B-PIPE will not serve us — an
+entitlement refusal, say — still publishable.
+
+### Where a computed close comes from
+
+`equity_master` in kdb is the Bloomberg **Data Licence** feed, so its `PX_LAST`
+on the previous partition is a close of the same lineage as `PX_YEST_CLOSE`,
+**adjusted for corporate actions**, reached without a real-time entitlement.
+The alternatives were worse:
+
+| candidate | why not |
+|---|---|
+| `PX_YEST_CLOSE` | static, and confirmed refused to this subscription |
+| `PREV_CLOSE_VALUE_REALTIME` | only served for names the plant serves at all — exactly the set that fails |
+| **`equity_master.PX_LAST`** | **this** |
+
+Two things it gets right that a naive version would not. **The date** rolls back
+to the most recent partition with rows, because yesterday is a Sunday every
+Monday, and both dates are printed so a stale close is visible. **The symbol**
+gets up to two candidates — the crosscode's own suffix first, then the venue's
+`BBGComposite` — because Shanghai is `600001 CG` in the crosscode and
+`600001.CH` in equity_master. The run reports which suffix hit.
+
+### Which venues can be switched
+
+Twelve of the fifteen. **Japan cannot**, and that is deliberate: TSE limits are
+an absolute price-step table nobody has written down here, and a percentage
+tier would be a plausible-looking wrong answer. Switching `TYO-MAIN` is refused
+outright:
+
+```
+TYO-MAIN has Source=computed but no band tiers in bands.csv. Add its tiers,
+or leave it on Source=bloomberg - a market whose rule nobody has written
+down cannot be computed.
 ```
 
 ## One substitution in each branch
@@ -25,19 +63,6 @@ request where the **real-time** names answered:
 
 `7203 JT Equity` returned `MIN_LIMIT` 2433.0 / `MAX_LIMIT` 3833.0. See
 `../other/bpipe_probe.py`.
-
-**Which previous-close field answers is not yet known.** Rather than guess one
-mnemonic and get an empty Indonesia, the job asks for all three, uses the first
-that answers per name, and prints the tally every run:
-
-```
-  close from   412  PREV_CLOSE_VALUE_REALTIME
-```
-
-The first real run tells you which candidate to keep — then delete the others
-from `bpipe.PREV_CLOSE_FIELDS`. `PX_YEST_CLOSE` is **not** requested: it is
-static and confirmed unavailable on this subscription, so asking would cost a
-refusal per name and buy nothing.
 
 ## The status filter
 
@@ -174,7 +199,9 @@ pip install --index-url=https://blpapi.bloomberg.com/repository/releases/python/
 copy local_settings.py.example local_settings.py
 ```
 
-Fill in `BPIPE_HOST`, `BPIPE_PORT`, `BPIPE_APP`, `TSR_DIR` and the SMTP host.
+Fill in `BPIPE_HOST`, `BPIPE_PORT`, `BPIPE_APP`, `EQUITY_MASTER_SERVER`,
+`TSR_DIR` and the SMTP host. `EQUITY_MASTER_SERVER` is only read when some
+venue is `computed`.
 The B-PIPE three have no defaults — the job refuses to start rather than connect
 somewhere you did not mean.
 
@@ -186,13 +213,14 @@ finishes last is the file that gets published.
 | | |
 |---|---|
 | `bpipe.py` | session, authorization, batched fetch. The only module that imports blpapi. |
+| `kdbclose.py` | the previous close out of equity_master. The only module that imports pykx. |
 | `bands.py` | tier selection, band arithmetic, tick rounding. Pure. Copied from v1. |
 | `ticks.py` | tick ladders from a `.tsr` file. Pure. Copied from v1. |
 | `marketcfg.py` | loads the config **and enforces the split** |
 | `crosscode.py` | CrossCode.csv → the universe, filtered and deduplicated |
 | `limit_up_down.py` | orchestration, validation, environment copy |
 | `config/markets.csv` | one row per venue: cutoff, and which side of the split |
-| `config/bands.csv` | tiers, for computed venues only — today, Indonesia |
+| `config/bands.csv` | tiers per venue. Present for twelve; they are what make a venue switchable |
 | `config/spol_JKT.tsr` | **placeholder.** Point `TSR_DIR` at the ATS share. |
 
 `marketcfg` refuses a half-configured venue: a `bloomberg` venue carrying a tick

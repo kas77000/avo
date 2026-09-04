@@ -1,35 +1,42 @@
 #!/usr/bin/env python3
-"""Build limitUpDown.csv: ask Bloomberg for the band, except for Indonesia,
-which we compute.
+"""Build limitUpDown.csv: ask Bloomberg for the band, or compute it.
 
-THE SPLIT.  Indonesia is pulled out of the universe and its band computed
-from a tier table and a tick ladder; everything else comes from Bloomberg.
-The division is declared in config/markets.csv, not written into this file:
+THE SPLIT IS CONFIG, NOT CODE.  Every venue names its own source in
+config/markets.csv, and any of them can be switched by editing one word:
 
   Source=bloomberg   MIN_LIMIT / MAX_LIMIT off B-PIPE
   Source=computed    band = f(previous close, tiers), rounded to the tick
 
-BOTH BRANCHES USE THE REAL-TIME FIELD FAMILY, and they have to.  Our B-PIPE
-entitlement does not serve the static reference fields - a probe on
+EACH SOURCE IS OPENED ONLY IF IT HAS WORK.  Switch every venue to computed
+and this never touches B-PIPE; leave them all on bloomberg and it never
+touches kdb.  That is what makes a market B-PIPE will not serve us - an
+entitlement refusal, say - still publishable.
+
+WHERE THE COMPUTED CLOSE COMES FROM, and why not Bloomberg.  equity_master
+in kdb is the Bloomberg Data Licence feed, so its PX_LAST on the previous
+partition is a close of the same lineage as PX_YEST_CLOSE and ADJUSTED for
+corporate actions - reached without a real-time entitlement.  The real-time
+alternatives were worse: PX_YEST_CLOSE is static and refused to this
+subscription, and PREV_CLOSE_VALUE_REALTIME is only served for names the
+plant will serve at all, which is exactly the set that fails.
+
+THE ASKED SIDE USES THE REAL-TIME FIELD FAMILY, and has to.  A probe on
 2026-09-03 got "Field not permitted to datafeed users" for PX_MIN_LIMIT,
 PX_MAX_LIMIT and PX_LAST while the real-time names answered on the same
 request:
 
   wanted       barred (static)     used here
   the limits   PX_MAX/MIN_LIMIT    MAX_LIMIT / MIN_LIMIT
-  the close    PX_YEST_CLOSE       PREV_CLOSE_VALUE_REALTIME, or the next
-                                   candidate that answers
   last trade   PX_LAST             LAST_PRICE
 
   CrossCode.csv + markets.csv  ->  the universe, filtered by type, venue,
                                    cutoff and BloombergStatus, deduplicated
                                    on BloombergCode
-  split by Source              ->  ask Bloomberg | compute
+  split by Source              ->  ask Bloomberg | compute from kdb
   temp file -> validate -> Test / Pilot / Prod
 
-HOW THIS DIFFERS FROM v1.  v1 removes Bloomberg entirely and computes EVERY
-market from rules against a kdb reference price.  v2 computes one market and
-asks Bloomberg for the rest, so its bands.csv holds a single market and a
+HOW THIS DIFFERS FROM v1.  v1 computes EVERY market and has no Bloomberg at
+all.  v2 can do the same - switch every venue - but does not have to, so a
 market whose rule nobody has written down is still publishable.
 
     python limit_up_down.py --self-test        arithmetic, no Bloomberg
@@ -40,7 +47,7 @@ market whose rule nobody has written down is still publishable.
 
 REPORT, NEVER SILENTLY DROP, and NOTHING PARTIALLY PUBLISHED - both carried
 from v1, and both worth more here than there: when the numbers come from
-outside, the count of names Bloomberg would not price IS the health check.
+outside, the count of names a source would not price IS the health check.
 """
 
 from __future__ import annotations
@@ -55,6 +62,7 @@ from pathlib import Path
 import bands
 import bpipe
 import crosscode
+import kdbclose
 import mailer
 import marketcfg
 import ticks
@@ -68,6 +76,9 @@ VALID_ENVS = ("Test", "Pilot", "Prod")
 BPIPE_HOST = ""
 BPIPE_PORT = ""
 BPIPE_APP = ""
+#  host:port of the kdb holding equity_master.  Only a run with a computed
+#  venue needs it; a config where Bloomberg prices everything never connects.
+EQUITY_MASTER_SERVER = "CHANGEME:5010"
 CROSSCODE_PATH = r"CHANGEME\CrossCode.csv"
 #  Where spol_JKT.tsr lives.  Defaults to the copy shipped in config/ so the
 #  job runs offline; point it at the ATS share so Indonesia's ladder cannot
@@ -269,21 +280,22 @@ def price_from_bloomberg(rows, values, refused=None):
     return out, _excluded(by_reason)
 
 
-def price_computed(cfg, rows, closes, refused=None):
-    """The band computed from a tier table, for a venue Bloomberg does not
-    price for us.
+def price_computed(cfg, rows, closes):
+    """The band computed from a tier table and a close out of equity_master.
+
+    `closes` is keyed on the RIC, because that is unique per row where an
+    equity_master sym is not - two listings of one name resolve to the same
+    composite.
+
+    NO BLOOMBERG.  The close comes from kdb, which is what lets a market
+    B-PIPE will not price for us be published anyway, and what makes every
+    venue switchable by editing one word in markets.csv.
 
     Order matters: pick the tier from the previous close, take the band,
     floor the down leg at MinPrice, and only THEN round to the tick.
     Rounding before flooring would move prices near a tier boundary.  The
-    tick too is chosen from the close, not from the limit being rounded.
-
-    Returns the rows, the exclusions, and a tally of which previous-close
-    field actually answered - the run report prints it because which of the
-    candidates works is not yet known."""
-    refused = refused or {}
+    tick too is chosen from the close, not from the limit being rounded."""
     out, by_reason = [], {}
-    ref_fields = {}
 
     def drop(reason, r, detail=""):
         by_reason.setdefault(reason, []).append(
@@ -292,25 +304,16 @@ def price_computed(cfg, rows, closes, refused=None):
 
     for r in rows:
         venue = cfg.venues[r.venue_id]
-        if r.security in refused:
-            drop(f"Bloomberg refused the security: {refused[r.security]}", r)
-            continue
-        fields = closes.get(r.security)
-        if fields is None:
-            drop("no answer from Bloomberg", r)
-            continue
-
-        ref, which = bpipe.prev_close_from(fields)
+        ref = closes.get(r.ric)
         if ref is None:
-            drop("no previous close", r)
+            drop("no previous close in equity_master", r)
             continue
-        ref_fields[which] = ref_fields.get(which, 0) + 1
 
         tick = None
         if venue.rounding != "none":
             tick = ticks.tick_for(cfg.ticks[r.venue_id], ref)
             if tick is None:
-                drop("no tick tier for the previous close", r)
+                drop("no tick tier for the previous close", r, f"price {ref}")
                 continue
         try:
             high, low = bands.compute(cfg.bands[r.venue_id], r.ticker, ref,
@@ -320,7 +323,7 @@ def price_computed(cfg, rows, closes, refused=None):
             continue
         out.append(_out_row(r, low, high))
 
-    return out, _excluded(by_reason), ref_fields
+    return out, _excluded(by_reason)
 
 
 def validate(out_rows):
@@ -428,8 +431,8 @@ def run(envs_spec: str) -> int:
                 print(line)
             return 0
 
-        #  Indonesia is computed, the rest is asked for.  Two batched
-        #  fetches, because the two halves want different fields.
+        #  The split is markets.csv's, not this file's.  Whether that means
+        #  one computed venue or fifteen is a config question.
         ask, compute = cfg.by_source(rows)
 
         def progress(what):
@@ -438,23 +441,42 @@ def run(envs_spec: str) -> int:
                       end="\r")
             return report
 
-        session, identity = bpipe.connect(BPIPE_HOST, BPIPE_PORT, BPIPE_APP)
-        print(f"connected to {BPIPE_HOST}:{BPIPE_PORT} as {BPIPE_APP}")
         print(f"{len(ask)} from Bloomberg, {len(compute)} computed")
 
+        #  EACH SOURCE IS OPENED ONLY IF IT HAS WORK.  Switch every venue to
+        #  computed and this never touches B-PIPE - which is the point of
+        #  being able to switch them.  Leave them all on bloomberg and it
+        #  never touches kdb.
         limits, refused, field_problems = {}, {}, {}
         if ask:
+            session, identity = bpipe.connect(BPIPE_HOST, BPIPE_PORT,
+                                              BPIPE_APP)
+            print(f"connected to {BPIPE_HOST}:{BPIPE_PORT} as {BPIPE_APP}")
             limits, refused, field_problems = bpipe.fetch(
                 session, identity, [r.security for r in ask],
                 progress=progress("limits"))
             print()
-        closes, close_refused, close_problems = {}, {}, {}
+
+        closes, sym_hits, unresolved = {}, {}, []
+        date_asked = date_used = None
         if compute:
-            closes, close_refused, close_problems = bpipe.fetch(
-                session, identity, [r.security for r in compute],
-                fields=bpipe.PREV_CLOSE_FIELDS,
-                progress=progress("closes"))
-            print()
+            host, port = kdbclose.parse_server(EQUITY_MASTER_SERVER)
+            conn = kdbclose.connect(host, port)
+            print(f"connected to kdb {host}:{port} for equity_master")
+            date_asked = dt.date.today() - dt.timedelta(days=1)
+            date_used = kdbclose.resolve_date(conn, date_asked)
+            #  Every candidate for every name, in ONE round trip.  The
+            #  wasted candidates cost a longer symbol list, not a second
+            #  query; a per-name query would not finish before the open.
+            wanted = []
+            for r in compute:
+                wanted.extend(kdbclose.sym_candidates(
+                    r, cfg.venues.get(r.venue_id)))
+            fetched = kdbclose.fetch(conn, date_used, sorted(set(wanted)))
+            closes, sym_hits, unresolved = kdbclose.closes_for(
+                compute, cfg.venues, fetched)
+            print(f"  equity_master {date_used}: {len(closes)} closes for "
+                  f"{len(compute)} names")
     except Exception as e:                           # noqa: BLE001
         mailer.send("LimitUpDown FAILED", f"{type(e).__name__}: {e}", *mail)
         print(f"FATAL {type(e).__name__}: {e}", file=sys.stderr)
@@ -464,8 +486,7 @@ def run(envs_spec: str) -> int:
             session.stop()
 
     out, more = price_from_bloomberg(ask, limits, refused)
-    computed_out, computed_excluded, ref_fields = price_computed(
-        cfg, compute, closes, close_refused)
+    computed_out, computed_excluded = price_computed(cfg, compute, closes)
     out = out + computed_out
     excluded = list(excluded) + list(more) + list(computed_excluded)
 
@@ -503,10 +524,18 @@ def run(envs_spec: str) -> int:
         report.append(f"  entitlement {eid_count:6d}  refused names written "
                       f"to {eid_path}")
 
-    #  Which previous-close field answered is not yet known, so say it out
-    #  loud every run until it is.
-    for field, count in sorted(ref_fields.items(), key=lambda kv: -kv[1]):
-        report.append(f"  close from {count:6d}  {field}")
+    #  WHICH DATE the closes came from, always - a run that quietly used a
+    #  stale partition is otherwise invisible, and a holiday is the normal
+    #  way that happens.
+    if date_used is not None:
+        stale = " <- NOT the day asked for" if str(date_used) != str(
+            date_asked) else ""
+        report.append(f"  close from        equity_master {date_used} "
+                      f"(asked {date_asked}){stale}")
+    #  And which symbol suffix resolved.  The day a market stops matching is
+    #  the day its count here goes to zero.
+    for suffix, count in sorted(sym_hits.items(), key=lambda kv: -kv[1]):
+        report.append(f"  sym hit    {count:6d}  .{suffix}")
 
     #  Same for the status fields: MARKET_STATUS is static and may not be
     #  served at all, and the real-time candidates have unknown values.  One
@@ -516,8 +545,7 @@ def run(envs_spec: str) -> int:
     for field, seen in sorted(bpipe.status_tally(limits).items()):
         for value, count in sorted(seen.items(), key=lambda kv: -kv[1]):
             report.append(f"  status     {count:6d}  {field} = {value}")
-    for field, (message, count) in sorted({**field_problems,
-                                           **close_problems}.items()):
+    for field, (message, count) in sorted(field_problems.items()):
         report.append(f"  field      {count:6d}  {field}: {message}")
 
     text = "\n".join(report)
@@ -571,14 +599,13 @@ def demo() -> int:
                                  "MARKET_STATUS": "DLST"}}
     refused = {"NOPX CG Equity": "Unknown/Invalid Security"}
 
-    closes = {"BBCA IJ Equity": {"PREV_CLOSE_VALUE_REALTIME": 8000.0},
-              "TLKM IJ Equity": {"PRICE_PREVIOUS_CLOSE_RT": 3000.0},
-              "TINY IJ Equity": {"PREV_CLOSE_VALUE_REALTIME": 10.0},
-              "NOCL IJ Equity": {}}
+    #  What kdbclose.closes_for returns: keyed on the RIC, already Decimal.
+    #  NOCL has no row in equity_master at all.
+    closes = {"BBCA.JK": Decimal("8000"), "TLKM.JK": Decimal("3000"),
+              "TINY.JK": Decimal("10")}
 
     out, excluded = price_from_bloomberg(ask, limits, refused)
-    computed, computed_excluded, ref_fields = price_computed(cfg, compute,
-                                                             closes)
+    computed, computed_excluded = price_computed(cfg, compute, closes)
     out = out + computed
 
     buf = io.StringIO()
@@ -589,8 +616,6 @@ def demo() -> int:
 
     print(f"--- {len(ask)} asked, {len(compute)} computed ---",
           file=sys.stderr)
-    for field, count in sorted(ref_fields.items()):
-        print(f"  close from {count}  {field}", file=sys.stderr)
     every = list(excluded) + list(computed_excluded)
     for line in _venue_summary(cfg, out + computed, every):
         print(line, file=sys.stderr)
@@ -719,12 +744,9 @@ def self_test() -> int:
            row("MIDS.JK", "MIDS IJ", "MIDS.ID", "JKT-MAIN"),
            row("TINY.JK", "TINY IJ", "TINY.ID", "JKT-MAIN"),
            row("NOCL.JK", "NOCL IJ", "NOCL.ID", "JKT-MAIN")]
-    closes = {"BBCA IJ Equity": {"PREV_CLOSE_VALUE_REALTIME": 8000.0},
-              "TLKM IJ Equity": {"PRICE_PREVIOUS_CLOSE_RT": 3000.0},
-              "MIDS IJ Equity": {"PREV_CLOSE_VALUE_REALTIME": 100.0},
-              "TINY IJ Equity": {"PREV_CLOSE_VALUE_REALTIME": 10.0},
-              "NOCL IJ Equity": {}}
-    cout, cexcl, ref_fields = price_computed(cfg, idn, closes)
+    closes = {"BBCA.JK": Decimal("8000"), "TLKM.JK": Decimal("3000"),
+              "MIDS.JK": Decimal("100"), "TINY.JK": Decimal("10")}
+    cout, cexcl = price_computed(cfg, idn, closes)
 
     check("the names with a previous close",
           [r["#ReutersCode"] for r in cout],
@@ -748,13 +770,9 @@ def self_test() -> int:
           "Rp 50 are one reason with forty names, not forty reasons",
           str(creasons["no band tier for the previous close"][0]),
           "TINY.JK (TINY IJ) price 10")
-    check("a name Bloomberg gave no close for",
-          [d.ric for d in creasons["no previous close"]], ["NOCL.JK"])
-    check("the run knows which field supplied each close - counting every "
-          "close resolved, including TINY's, which was dropped afterwards "
-          "for a reason that had nothing to do with the close",
-          ref_fields, {"PREV_CLOSE_VALUE_REALTIME": 3,
-                       "PRICE_PREVIOUS_CLOSE_RT": 1})
+    check("a name equity_master had no close for",
+          [d.ric for d in creasons["no previous close in equity_master"]],
+          ["NOCL.JK"])
 
     print("\nthe two branches meet the same output contract")
     check("a computed row has the same seven columns as an asked one",
@@ -870,6 +888,43 @@ def self_test() -> int:
         check("a clean run REMOVES the file rather than leaving yesterday's "
               "refusals looking like today's", (path, n, target.exists()),
               (None, 0, False))
+
+    print("\nswitching a venue between sources")
+    import tempfile as _tf
+    real = Path(__file__).resolve().parent / "config"
+    header = (real / "markets.csv").read_text(encoding="utf-8")
+    with _tf.TemporaryDirectory() as d:
+        (Path(d) / "bands.csv").write_text(
+            (real / "bands.csv").read_text(encoding="utf-8"),
+            encoding="utf-8")
+        (Path(d) / "spol_JKT.tsr").write_text(
+            (real / "spol_JKT.tsr").read_text(encoding="utf-8"),
+            encoding="utf-8")
+        flipped = header.replace(",bloomberg,", ",computed,")
+        keep_japan = "".join(
+            line if line.startswith("Japan,") else
+            line.replace(",bloomberg,", ",computed,")
+            for line in header.splitlines(keepends=True))
+        (Path(d) / "markets.csv").write_text(keep_japan, encoding="utf-8")
+        cfg2 = marketcfg.load(Path(d), Path(d))
+        check("every venue with tiers flips to computed by editing ONE word "
+              "in markets.csv, with no code change",
+              len([v for v in cfg2.venues.values() if v.computed]), 12)
+        check("and the ones without tiers are left alone",
+              sorted(v.venue_id for v in cfg2.venues.values()
+                     if not v.computed),
+              ["CHJ-MAIN", "JNX-MAIN", "TYO-MAIN"])
+
+        (Path(d) / "markets.csv").write_text(flipped, encoding="utf-8")
+        try:
+            marketcfg.load(Path(d), Path(d))
+            got = "loaded"
+        except marketcfg.ConfigError as e:
+            got = str(e)
+        check("switching a venue that has NO tiers is refused loudly rather "
+              "than publishing a made-up band - Tokyo's limits are an "
+              "absolute step table nobody has written down here",
+              "no band tiers in bands.csv" in got, True)
 
     print("\nthe venue summary")
     cfg2 = marketcfg.load(Path(__file__).resolve().parent / "config",
