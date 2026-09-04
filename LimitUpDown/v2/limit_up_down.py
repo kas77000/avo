@@ -217,9 +217,10 @@ def price_computed(cfg, rows, closes, refused=None):
     out, by_reason = [], {}
     ref_fields = {}
 
-    def drop(reason, r):
+    def drop(reason, r, detail=""):
         by_reason.setdefault(reason, []).append(
-            crosscode.Dropped(ric=r.ric, bbg=r.bbg, venue_id=r.venue_id))
+            crosscode.Dropped(ric=r.ric, bbg=r.bbg, venue_id=r.venue_id,
+                              detail=detail))
 
     for r in rows:
         venue = cfg.venues[r.venue_id]
@@ -247,7 +248,7 @@ def price_computed(cfg, rows, closes, refused=None):
             high, low = bands.compute(cfg.bands[r.venue_id], r.ticker, ref,
                                       tick, venue.min_price, venue.rounding)
         except bands.BandError as e:
-            drop(e.reason, r)
+            drop(e.reason, r, e.detail)
             continue
         out.append(_out_row(r, low, high))
 
@@ -669,8 +670,12 @@ def self_test() -> int:
     creasons = {e.reason: e.rows for e in cexcl}
     check("a name under Rp 50 matches no tier and is REPORTED rather than "
           "quietly lost",
-          [d.ric for d in creasons["no band tier for price 10"]],
+          [d.ric for d in creasons["no band tier for the previous close"]],
           ["TINY.JK"])
+    check("the PRICE rides along as per-name detail, so forty names under "
+          "Rp 50 are one reason with forty names, not forty reasons",
+          str(creasons["no band tier for the previous close"][0]),
+          "TINY.JK (TINY IJ) price 10")
     check("a name Bloomberg gave no close for",
           [d.ric for d in creasons["no previous close"]], ["NOCL.JK"])
     check("the run knows which field supplied each close - counting every "

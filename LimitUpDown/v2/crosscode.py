@@ -81,9 +81,11 @@ class Dropped:
     ric: str
     bbg: str = ""
     venue_id: str = ""
+    detail: str = ""
 
     def __str__(self) -> str:
-        return f"{self.ric} ({self.bbg or '?'})"
+        shown = f"{self.ric} ({self.bbg or '?'})"
+        return f"{shown} {self.detail}" if self.detail else shown
 
 
 @dataclass

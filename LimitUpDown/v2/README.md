@@ -47,10 +47,12 @@ file we read to build the universe, and `dedupe` already trusts it to choose
 between two rows claiming one code. The filter applies it once more, to the
 case dedupe never sees: a delisted name that had no competitor to lose to.
 
-That removes a dependency rather than adding one. `MARKET_STATUS` is a
-**static** field, from the same family as `PX_LAST` — the one our
-entitlement refused. It is still requested and still honoured as a
-cross-check when it is served, but nothing depends on it any more.
+It also means the file no longer hangs on `MARKET_STATUS`, a **static**
+field from the same family as `PX_LAST`. **The 2026-09-04 run settled that
+question: `MARKET_STATUS` IS served to us** — 21,869 names came back
+`ACTV` — so it is kept as a cross-check and the two filters agree. The
+CrossCode column stays primary because it costs nothing and cannot be
+withdrawn by an entitlement change.
 
 Two rules keep the filter from emptying the file:
 
@@ -67,21 +69,25 @@ model has two status axes, visible as two `MKTDATA_EVENT_SUBTYPE` values:
 | `MARKETSTATUS` | `RT_EXCH_MARKET_STATUS` | what **session phase** is the exchange in — open, closed, auction, halt |
 | `SECURITYSTATUS` | `RT_SIMP_SEC_STATUS` | this **instrument's** own state |
 
-This job runs **07:30–09:03 Hong Kong**, which is pre-open or closed for every
-market in scope. Filtering on a session field would read "not open" for the
-entire universe and publish an empty file, every day. `RT_SIMP_SEC_STATUS` is
-the axis worth testing.
+**What the 2026-09-04 run actually showed, which is not what was predicted
+here:** `RT_EXCH_MARKET_STATUS` came back `ACTV` for 21,863 names — it
+tracks the listing, not the session phase, and it did **not** read "closed"
+for the universe. The reasoning that follows was wrong on the facts; the
+conclusion survives for a different reason. `RT_SIMP_SEC_STATUS` *is* the
+session-shaped one — 11,309 `TMOC`, 8,032 `TRAD`, 2,391 `CLOS`, 129
+`AUCT` — so filtering on **that** at 07:30 would drop most of the file.
+Neither is used.
 
-Both real-time candidates are requested and **tallied but never filtered on**, so
-one run shows what they carry:
+Both real-time candidates are requested and **tallied but never filtered on**.
+The 2026-09-04 run carried:
 
 ```
-  status      2841  RT_SIMP_SEC_STATUS = TRADING
-  status        17  RT_SIMP_SEC_STATUS = HALTED
-  status      2858  RT_EXCH_MARKET_STATUS = CLOSED     <- why it cannot be the filter
+  status     21869  MARKET_STATUS = ACTV            <- served after all
+  status     21863  RT_EXCH_MARKET_STATUS = ACTV    <- the listing, not the session
+  status     11309  RT_SIMP_SEC_STATUS = TMOC       <- this is the session-shaped one
+  status      8032  RT_SIMP_SEC_STATUS = TRAD
+  status      2391  RT_SIMP_SEC_STATUS = CLOS
 ```
-
-When the values are known, set `bpipe.STATUS_FIELD` and `STATUS_ACTIVE`.
 
 ## Reading the run report
 
@@ -211,7 +217,9 @@ must not have them.
 
 ## Before this goes anywhere near Prod
 
-1. **Confirm which previous-close field answers**, then prune the candidates.
+1. ~~Confirm which previous-close field answers.~~ **Done** —
+   `PREV_CLOSE_VALUE_REALTIME` answered for all 884 Indonesian names on
+   2026-09-04. The other two stay as a free fallback.
 2. **Coverage per venue against the file in production today.**
    `--compare` exists for this. A market Bloomberg will not price is a
    market this version cannot publish, and the row count is where that

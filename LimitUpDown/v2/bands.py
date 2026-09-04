@@ -53,9 +53,16 @@ class Tier(NamedTuple):
 
 
 class BandError(Exception):
-    def __init__(self, reason: str):
-        super().__init__(reason)
+    """A band that could not be computed.
+
+    `reason` GROUPS - the run report counts by it, so it must not carry a
+    price or any other per-name value, or one cause fragments into a line
+    per name.  Anything name-specific goes in `detail`."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(reason if not detail else f"{reason}: {detail}")
         self.reason = reason
+        self.detail = detail
 
 
 def select_tier(tiers, ticker: str, ref: Decimal) -> Optional[Tier]:
@@ -110,7 +117,8 @@ def compute(tiers, ticker: str, ref: Decimal, tick,
         raise BandError("reference price is not positive")
     tier = select_tier(tiers, ticker, ref)
     if tier is None:
-        raise BandError(f"no band tier for price {ref}")
+        raise BandError("no band tier for the previous close",
+                        detail=f"price {ref}")
     up, down = raw_band(tier, ref)
     if min_price is not None:
         down = max(down, min_price)      # floor first, THEN round
@@ -238,7 +246,7 @@ def self_test() -> int:
           (D("81"), D("39")))
     raises("a price under every tier is refused, not guessed",
            lambda: compute(IDN, "BBCA", D("49"), D("1"), D("50"), "inward"),
-           "no band tier for price 49")
+           "no band tier for the previous close")
     raises("a zero reference price is refused",
            lambda: compute(IDN, "BBCA", D("0"), D("1"), None, "inward"),
            "reference price is not positive")

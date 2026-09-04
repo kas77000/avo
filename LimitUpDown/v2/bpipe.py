@@ -29,6 +29,7 @@ machine with no Bloomberg at all.
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal, InvalidOperation
 
 #  MIN_LIMIT and MAX_LIMIT are the file.  LAST_PRICE is the sanity check: a
@@ -172,6 +173,20 @@ def status_tally(values, fields=None):
                 seen = out.setdefault(field, {})
                 seen[text] = seen.get(text, 0) + 1
     return out
+
+
+_NID = re.compile(r"\s*\[nid:\d+\]\s*$")
+
+
+def clean_message(message) -> str:
+    """Bloomberg tags a security error with a [nid:NNNNN] that varies from
+    one response to the next.
+
+    Left in, ONE cause becomes eighty report lines - the run report groups
+    by the reason string, so "Unknown/Invalid Security [nid:24700]" and
+    "...[nid:24723]" are counted as two unrelated problems.  Stripping it
+    collapses them back into the single fact they represent."""
+    return _NID.sub("", (message or "").strip())
 
 
 def band_from(values: dict, status_field=None, active=None):
@@ -340,7 +355,7 @@ def _one_request(session, identity, securities, fields):
                     error = entry.getElement("securityError")
                     message = (error.getElementAsString("message")
                                if error.hasElement("message") else str(error))
-                    refused[security] = message
+                    refused[security] = clean_message(message)
                     continue
                 values[security] = _element_to_dict(
                     entry.getElement("fieldData"))
@@ -454,6 +469,23 @@ def self_test() -> int:
     check("a zero limit is missing data, not a floor of zero",
           band_from({"MIN_LIMIT": 0.0, "MAX_LIMIT": 3833.0}),
           (None, "no MIN_LIMIT"))
+
+    print("\ngrouping bloomberg's refusal messages")
+    check("the volatile nid is stripped, so one cause is one report line",
+          clean_message("Unknown/Invalid Security [nid:24700]"),
+          "Unknown/Invalid Security")
+    check("two responses about the same cause now group together",
+          clean_message("Unknown/Invalid Security [nid:24700]")
+          == clean_message("Unknown/Invalid Security [nid:161665]"), True)
+    check("an entitlement refusal keeps the EIDs - those identify WHICH "
+          "entitlement is missing and must survive grouping",
+          clean_message("Security Entitlement Check Failed! EID(s) needed: "
+                        "64487 or 64488 [nid:58106]"),
+          "Security Entitlement Check Failed! EID(s) needed: 64487 or 64488")
+    check("a message with no nid is untouched",
+          clean_message("Field not permitted to datafeed users"),
+          "Field not permitted to datafeed users")
+    check("nothing in, empty string out", clean_message(None), "")
 
     print("\nthe market status filter")
     live = {"MIN_LIMIT": 2433.0, "MAX_LIMIT": 3833.0, "LAST_PRICE": 3130.0}
