@@ -57,6 +57,7 @@ found in the real-time family, and sometimes there is no equivalent.
 | `bpipe_fields.py` | every real-time field B-PIPE will serve, as a CSV |
 | `bpipe_history.py` | can we get back the session that just finished? |
 | `bpipe_auth.py` | which identity do we have, and does it hold the EIDs we were refused? |
+| `em_probe.py` | what does equity_master carry, and can it identify a Chinese ST name? |
 
 Connection settings live at the top of `bpipe_probe.py` and are shared by all
 three. They ship empty.
