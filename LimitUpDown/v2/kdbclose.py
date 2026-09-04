@@ -32,9 +32,9 @@ TWO THINGS THIS GETS RIGHT AND A NAIVE VERSION WOULD NOT.
   Every name therefore gets up to two candidates, its own suffix first, and
   the run reports which one hit.  Neither is hardcoded.
 
-  ITS TYPE.  Handing kdb a list of symbols is where two live runs died,
-  differently - 'type then 'rank - so it is tried three ways and the run
-  reports which worked.  See FETCH_STRATEGIES.
+  ITS TYPE.  The syms go across as they are.  pykx already makes symbols of
+  them, so the `$ cast that looks obvious is what breaks it.  See FETCH_Q,
+  which records the three ways that was learned the hard way.
 
 ONE ROUND TRIP.  A universe is tens of thousands of names; a per-symbol
 query would not finish inside the window before the open.
@@ -68,35 +68,20 @@ MAXDATE_CLIENT_Q = "{[d] exec max date from equity_master where date<=d}"
 MAXDATE_SERVER_Q = ("{[n] exec max date from equity_master "
                     "where date<=.z.D-n}")
 
-#  The same unguarded `$s sits in TradingData/equitymaster.py and
-#  Historical/qattsource.py, and the same two failures are waiting there.
-_SELECT = ("{[d;s] select " + CLOSE_FIELD + " by sym from equity_master "
-           "where date=d, sym in ")
-
-#  THREE WAYS, because two live runs each died differently on this one
-#  argument and neither guess survived contact:
+#  ONE QUERY, and every decoration on it was a mistake:
 #
-#    2026-09-04  sym in `$s              'type
-#                pykx sent symbol ATOMS; `$ on a symbol is 'type.
-#    2026-09-04  sym in $[11h=type s;s;`$s]   'rank
-#                the guard was the new fault - a cond in a where clause is
-#                one construct too many, and 'rank is an arity error.
+#    2026-09-04  sym in `$s                 'type    - pykx sends SYMBOL
+#                atoms, and `$ applied to a symbol is itself a type error.
+#    2026-09-04  sym in $[11h=type s;s;`$s] 'rank    - the guard was worse
+#                than the bug; a cond in a where clause is an arity error.
+#    2026-09-04  select PX_LAST BY sym      licence - a KEYED table has to
+#                be unkeyed by local q, and this box has no q licence. IPC
+#                needs none; running q code does.
 #
-#  So: no conditional, no cleverness, and the simplest form first.
-#
-#    plain      s is already a symbol vector - nothing for q to do
-#    cast       s is a list of char vectors, which is what `$ is FOR
-#    split      s is ONE char vector; q splits it. No list crosses the wire
-#               at all, so no list conversion can be wrong.
-#
-#  The last one cannot fail on argument type, which is what makes it the
-#  backstop rather than a fourth guess.
-FETCH_STRATEGIES = [
-    ("plain", _SELECT + "s}", lambda syms: list(syms)),
-    ("cast", _SELECT + "`$s}", lambda syms: syms_for_q(syms)),
-    ("split", _SELECT + '`$" " vs s}',
-     lambda syms: " ".join(syms).encode("utf-8")),
-]
+#  A plain select of two columns, read back through pandas, needs neither a
+#  cast nor a licence.  It is what Historical/qattsource.py does.
+FETCH_Q = ("{[d;s] select sym, " + CLOSE_FIELD +
+           " from equity_master where date=d, sym in s}")
 
 
 class KdbError(Exception):
@@ -157,16 +142,6 @@ def sym_candidates(row, venue) -> list:
     if composite and f"{ticker}.{composite}" not in out:
         out.append(f"{ticker}.{composite}")
     return out
-
-
-def syms_for_q(syms):
-    """Symbol names as CHAR VECTORS, which is what `$ can cast.
-
-    Sent as python str, pykx makes symbol atoms and `$ fails on them with
-    'type.  Sent as bytes, pykx makes char vectors and the cast works.  One
-    encode() is the whole difference between a working fetch and a run that
-    dies after the universe is already loaded."""
-    return [s.encode("utf-8") if isinstance(s, str) else s for s in syms]
 
 
 def ask(conn, label, query, args=(), log=None):
@@ -323,46 +298,49 @@ def _cell(row, field):
         return None
 
 
+def _rows(result):
+    """A pykx table -> a list of dicts, whatever the build hands back.
+
+    Copied from Historical/qattsource.py, which has been reading
+    equity_master this way without trouble.  pandas first because it does
+    not need a q licence; .py() and plain iteration are the fallbacks."""
+    if result is None:
+        return []
+    try:
+        return result.pd().to_dict("records")
+    except AttributeError:
+        pass
+    try:
+        return list(result.py())
+    except AttributeError:
+        return list(result)
+
+
 def fetch(conn, date, syms, log=None) -> dict:
     """sym -> Decimal close, for the syms that had one.
 
     A sym with no row, or a null close, is simply absent; the caller reports
     it rather than guessing a price.
 
-    THREE WAYS TO HAND KDB A LIST OF SYMBOLS, tried in order and reported.
-    Two live runs each died differently on this one argument - 'type, then
-    'rank - so it is no longer guessed at.  See FETCH_STRATEGIES."""
+    THE SIMPLEST QUERY THAT WORKS, and it took three live runs to stop
+    decorating it:
+
+      sym in `$s              'type   - pykx sends symbol ATOMS, `$ refuses
+      $[11h=type s;s;`$s]     'rank   - a cond in a where clause
+      select ... BY sym       licence - a keyed table needs local q to unkey
+
+    So: no cast, because the syms arrive as symbols already; and no `by`,
+    because a plain table reads back through pandas without a q licence.
+    That is what Historical/qattsource.py does, and it has never had any of
+    these problems."""
     NL = chr(10)
     say = log or (lambda line: None)
     if not syms:
         return {}
     say(f"      {len(syms)} syms, first few {list(syms)[:5]}")
 
-    errors, result = [], None
-    for name, query, build in FETCH_STRATEGIES:
-        try:
-            result = ask(conn, f"fetch closes/{name}", query,
-                         (date, build(syms)), log)
-            say(f"      strategy {name!r} worked")
-            break
-        except KdbError as e:
-            errors.append(str(e).splitlines()[0])
-    else:
-        raise KdbError(NL.join(
-            ["equity_master: no way of sending the symbol list worked."]
-            + ["    " + e for e in errors]
-            + ["  All three forms failed, so the argument is not the "
-               "problem any more.",
-               "  Check the query itself against the schema in "
-               "kdb-queries/no_git/kdb/equity_master.csv."]))
-
-    if result is None:
-        say("      got nothing back")
-        return {}
-    try:
-        items = list(result.items())
-    except AttributeError:
-        items = list(dict(result).items())
+    result = ask(conn, "fetch closes", FETCH_Q, (date, list(syms)), log)
+    items = _rows(result)
     say(f"      got {len(items)} rows")
 
     #  NO ROWS AT ALL IS THE SHAPE OF THE QUESTION, NOT THE DATA.  A
@@ -385,10 +363,11 @@ def fetch(conn, date, syms, log=None) -> dict:
             "    to see what the column actually holds."]))
 
     out = {}
-    for sym, row in items:
+    for row in items:
+        sym = _text(_cell(row, "sym"))
         close = _to_decimal(_cell(row, CLOSE_FIELD))
-        if close is not None:
-            out[_text(sym)] = close
+        if sym and close is not None:
+            out[sym] = close
     return out
 
 
@@ -523,34 +502,55 @@ def self_test() -> int:
     check("naming a real sym so the next command can be pasted",
           "600001.CH" in got, True)
 
-    print("three ways to hand kdb a symbol list")
-    names = ["600001.CH", "BBCA.IJ"]
-    built = {n: b(names) for n, q, b in FETCH_STRATEGIES}
-    check("plain sends them untouched, for a pykx that makes a symbol vector",
-          built["plain"], names)
-    check("cast sends CHAR VECTORS, which is what `$ is for",
-          built["cast"], [b"600001.CH", b"BBCA.IJ"])
-    check("split sends ONE char vector, so no list conversion can be wrong",
-          built["split"], b"600001.CH BBCA.IJ")
-    queries = {n: q for n, q, b in FETCH_STRATEGIES}
-    check("and NONE of them contains a conditional - the cond was the "
-          "'rank error, not a fix for it",
-          [n for n, q in queries.items() if "$[" in q], [])
-    check("the split query does the splitting in q",
-          "vs s" in queries["split"], True)
-    check("the strategies are ordered simplest first",
-          [n for n, q, b in FETCH_STRATEGIES], ["plain", "cast", "split"])
+    print("an EMPTY answer is loud")
 
-    print("sending the syms in a form `$ can actually cast")
-    check("names go out as CHAR VECTORS, not str - pykx turns str into "
-          "symbol atoms and `$ on a symbol is the 'type the fetch died on",
-          syms_for_q(["600001.CH", "BBCA.IJ"]),
-          [b"600001.CH", b"BBCA.IJ"])
-    check("anything already encoded is left alone",
-          syms_for_q([b"600001.CH"]), [b"600001.CH"])
-    check("an empty universe stays empty", syms_for_q([]), [])
-    check("unicode survives the trip",
-          syms_for_q(["ABC"])[0].decode("utf-8"), "ABC")
+    class EmptyConn:
+        def __call__(self, query, *args):
+            return {}
+
+    try:
+        fetch(EmptyConn(), "2026.09.03", ["600001.CH", "BBCA.IJ"])
+        got = "no error"
+    except KdbError as e:
+        got = str(e)
+    check("thousands of syms and no rows is a FAULT, not a quiet empty "
+          "file that reads like a holiday",
+          "has NO rows" in got, True)
+    check("and it says which of the two it could be",
+          "partition is empty" in got and "does not look like" in got, True)
+    check("naming a real sym so the next command can be pasted",
+          "600001.CH" in got, True)
+
+    print("the query itself, kept plain")
+    check("no cast - pykx sends symbol atoms and `$ refuses them",
+          "`$" in FETCH_Q, False)
+    check("no conditional - a cond in a where clause was the 'rank",
+          "$[" in FETCH_Q, False)
+    check("and NO `by`, because a keyed table needs local q to unkey and "
+          "this box has no q licence", " by " in FETCH_Q, False)
+    check("it selects the key column explicitly instead",
+          "select sym, PX_LAST" in FETCH_Q, True)
+
+    print("reading what kdb hands back")
+
+    class Table:
+        """A pykx table that only offers .pd(), as an unlicensed one does."""
+        def __init__(self, rows):
+            self._rows = rows
+
+        def pd(self):
+            class DF:
+                def __init__(self, rows):
+                    self._rows = rows
+
+                def to_dict(self, how):
+                    return self._rows
+            return DF(self._rows)
+
+    check("a table read through pandas, which needs no q licence",
+          _rows(Table([{"sym": "A", "PX_LAST": 1.0}])),
+          [{"sym": "A", "PX_LAST": 1.0}])
+    check("nothing at all", _rows(None), [])
 
     print("resolving the partition date, which is where a live run died")
 
