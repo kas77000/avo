@@ -12,6 +12,10 @@ and this never touches B-PIPE; leave them all on bloomberg and it never
 touches kdb.  That is what makes a market B-PIPE will not serve us - an
 entitlement refusal, say - still publishable.
 
+KDB RUNS FIRST.  The Bloomberg fetch is the long part, sixteen thousand
+names and minutes of it, so putting it ahead of kdb meant every kdb fault
+cost a whole run to see once.  The cheap, fragile side fails fast now.
+
 WHERE THE COMPUTED CLOSE COMES FROM, and why not Bloomberg.  equity_master
 in kdb is the Bloomberg Data Licence feed, so its PX_LAST on the previous
 partition is a close of the same lineage as PX_YEST_CLOSE and ADJUSTED for
@@ -44,6 +48,7 @@ market whose rule nobody has written down is still publishable.
     python limit_up_down.py ""                 real run, publish nowhere
     python limit_up_down.py "Test|Pilot|Prod"  real run, publish
     python limit_up_down.py --compare OLD.csv  diff against another file
+    python limit_up_down.py --kdb-check        only the kdb path, verbosely
 
 REPORT, NEVER SILENTLY DROP, and NOTHING PARTIALLY PUBLISHED - both carried
 from v1, and both worth more here than there: when the numbers come from
@@ -441,12 +446,42 @@ def run(envs_spec: str) -> int:
                       end="\r")
             return report
 
-        print(f"{len(ask)} from Bloomberg, {len(compute)} computed")
+        print(f"{len(compute)} computed, then {len(ask)} from Bloomberg")
 
         #  EACH SOURCE IS OPENED ONLY IF IT HAS WORK.  Switch every venue to
         #  computed and this never touches B-PIPE - which is the point of
         #  being able to switch them.  Leave them all on bloomberg and it
         #  never touches kdb.
+        #
+        #  KDB GOES FIRST, DELIBERATELY.  The Bloomberg fetch is the long
+        #  part - sixteen thousand names, minutes - and running it ahead of
+        #  kdb meant every kdb fault cost a whole run to see once. The
+        #  cheap, fragile side now fails fast; the expensive side is only
+        #  started once the other has worked.
+        closes, sym_hits, unresolved = {}, {}, []
+        date_asked = date_used = date_how = None
+        if compute:
+            host, port = kdbclose.parse_server(EQUITY_MASTER_SERVER)
+            conn = kdbclose.connect(host, port)
+            print(f"connected to kdb {host}:{port} for equity_master")
+            date_asked = dt.date.today() - dt.timedelta(days=1)
+            date_used, date_how = kdbclose.resolve_date(
+                conn, date_asked, log=print)
+            #  Every candidate for every name, in ONE round trip.  The
+            #  wasted candidates cost a longer symbol list, not a second
+            #  query; a per-name query would not finish before the open.
+            wanted = []
+            for r in compute:
+                wanted.extend(kdbclose.sym_candidates(
+                    r, cfg.venues.get(r.venue_id)))
+            fetched = kdbclose.fetch(conn, date_used, sorted(set(wanted)),
+                                     log=print)
+            closes, sym_hits, unresolved = kdbclose.closes_for(
+                compute, cfg.venues, fetched)
+            print(f"  equity_master {kdbclose.date_text(date_used)} "
+                  f"({date_how}): {len(closes)} closes for "
+                  f"{len(compute)} names")
+
         limits, refused, field_problems = {}, {}, {}
         if ask:
             session, identity = bpipe.connect(BPIPE_HOST, BPIPE_PORT,
@@ -456,31 +491,14 @@ def run(envs_spec: str) -> int:
                 session, identity, [r.security for r in ask],
                 progress=progress("limits"))
             print()
-
-        closes, sym_hits, unresolved = {}, {}, []
-        date_asked = date_used = date_how = None
-        if compute:
-            host, port = kdbclose.parse_server(EQUITY_MASTER_SERVER)
-            conn = kdbclose.connect(host, port)
-            print(f"connected to kdb {host}:{port} for equity_master")
-            date_asked = dt.date.today() - dt.timedelta(days=1)
-            date_used, date_how = kdbclose.resolve_date(conn, date_asked)
-            #  Every candidate for every name, in ONE round trip.  The
-            #  wasted candidates cost a longer symbol list, not a second
-            #  query; a per-name query would not finish before the open.
-            wanted = []
-            for r in compute:
-                wanted.extend(kdbclose.sym_candidates(
-                    r, cfg.venues.get(r.venue_id)))
-            fetched = kdbclose.fetch(conn, date_used, sorted(set(wanted)))
-            closes, sym_hits, unresolved = kdbclose.closes_for(
-                compute, cfg.venues, fetched)
-            print(f"  equity_master {kdbclose.date_text(date_used)} "
-                  f"({date_how}): {len(closes)} closes for "
-                  f"{len(compute)} names")
     except Exception as e:                           # noqa: BLE001
-        mailer.send("LimitUpDown FAILED", f"{type(e).__name__}: {e}", *mail)
-        print(f"FATAL {type(e).__name__}: {e}", file=sys.stderr)
+        #  A KdbError already names the query, the label and the q type of
+        #  every argument. Printing only type(e).__name__ threw all of that
+        #  away, which is how a live run produced a bare "QError: type".
+        detail = str(e)
+        mailer.send("LimitUpDown FAILED", f"{type(e).__name__}: {detail}",
+                    *mail)
+        print(f"FATAL {type(e).__name__}: {detail}", file=sys.stderr)
         return 1
     finally:
         if session is not None:

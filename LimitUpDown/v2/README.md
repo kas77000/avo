@@ -215,7 +215,12 @@ python limit_up_down.py --demo             both branches on canned data
 python limit_up_down.py ""                 real run, publish nowhere
 python limit_up_down.py "Test|Pilot|Prod"  real run, publish
 python limit_up_down.py --compare OLD.csv  diff the last output against another
+python limit_up_down.py --kdb-check        only the kdb path, verbosely
 ```
+
+**kdb runs before Bloomberg.** The Bloomberg fetch is sixteen thousand names
+and minutes of it, so running it first meant every kdb fault cost a whole run
+to see once. The cheap, fragile side now fails fast.
 
 `--self-test` and `--demo` need nothing but Python. Every module has its own:
 

@@ -64,9 +64,16 @@ MAXDATE_CLIENT_Q = "{[d] exec max date from equity_master where date<=d}"
 MAXDATE_SERVER_Q = ("{[n] exec max date from equity_master "
                     "where date<=.z.D-n}")
 
-#  `$s casts the python list of strings to the symbol vector `sym` is.
+#  THE SYM CAST HAS TO WORK BOTH WAYS.  `$s casts CHAR VECTORS to symbols,
+#  but pykx turns a python list[str] into a SYMBOL VECTOR already - and `$
+#  applied to a symbol is itself a 'type error.  Which of the two arrives
+#  depends on the pykx version and on how the list was built, so the query
+#  asks q what it got: 11h is a symbol vector, anything else gets cast.
+#
+#  The same `$s appears in TradingData/equitymaster.py and in
+#  Historical/qattsource.py, unguarded.
 FETCH_Q = ("{[d;s] select " + CLOSE_FIELD + " by sym from equity_master "
-           "where date=d, sym in `$s}")
+           "where date=d, sym in $[11h=type s; s; `$s]}")
 
 
 class KdbError(Exception):
@@ -129,6 +136,32 @@ def sym_candidates(row, venue) -> list:
     return out
 
 
+def ask(conn, label, query, args=(), log=None):
+    """Send one query, having said exactly what is being sent.
+
+    EVERY QUERY IS LABELLED.  A run that dies on 'type with no other context
+    tells you nothing - there are three different queries here and they fail
+    for different reasons.  On failure the label, the query text and the q
+    type of every argument travel with the error."""
+    say = log or (lambda line: None)
+    say(f"    [{label}]")
+    say(f"      q   {query}")
+    for i, arg in enumerate(args):
+        shown = repr(arg)
+        if len(shown) > 90:
+            shown = shown[:87] + "..."
+        say(f"      a{i}  {shown}  {q_type_of(arg)}")
+    try:
+        return conn(query, *args)
+    except Exception as e:                                  # noqa: BLE001
+        say(f"      ERR {type(e).__name__}: {e}")
+        types = "; ".join(f"a{i}={q_type_of(a)}" for i, a in enumerate(args))
+        raise KdbError(
+            f"[{label}] {type(e).__name__}: {e}"
+            f"{chr(10)}    query: {query}"
+            f"{chr(10)}    args:  {types or 'none'}") from e
+
+
 def q_type_of(value) -> str:
     """What pykx turns this into, and what q calls it.
 
@@ -182,14 +215,10 @@ def resolve_date(conn, requested, days_back=1, log=None):
                 (f"server .z.D-{days_back}", MAXDATE_SERVER_Q,
                  int(days_back)))
     for how, query, arg in attempts:
-        say(f"    try {how}")
-        say(f"      q   {query}")
-        say(f"      arg {arg!r}  {q_type_of(arg)}")
         try:
-            got = conn(query, arg)
-        except Exception as e:                              # noqa: BLE001
-            errors.append(f"{how}: {type(e).__name__}: {e}")
-            say(f"      ERR {type(e).__name__}: {e}")
+            got = ask(conn, f"maxdate/{how}", query, (arg,), log)
+        except KdbError as e:
+            errors.append(str(e).splitlines()[0])
             continue
         if _py(got) is None:
             errors.append(f"{how}: no partition on or before the bound")
@@ -252,14 +281,8 @@ def fetch(conn, date, syms, log=None) -> dict:
     say = log or (lambda line: None)
     if not syms:
         return {}
-    say(f"    q   {FETCH_Q}")
-    say(f"      date {date!r}  {q_type_of(date)}")
-    say(f"      syms {len(syms)}, first few {list(syms)[:5]}")
-    try:
-        result = conn(FETCH_Q, date, list(syms))
-    except Exception as e:                                  # noqa: BLE001
-        say(f"      ERR {type(e).__name__}: {e}")
-        raise
+    say(f"      {len(syms)} syms, first few {list(syms)[:5]}")
+    result = ask(conn, "fetch closes", FETCH_Q, (date, list(syms)), log)
     if result is None:
         say("      got nothing back")
         return {}
@@ -411,13 +434,14 @@ def self_test() -> int:
     c = Conn(fails="where date<=d")
     lines = []
     got, how = resolve_date(c, "2026-09-03", log=lines.append)
-    check("the log shows BOTH attempts, so a failure is not a mystery",
-          sum(1 for l in lines if l.strip().startswith("try")), 2)
+    check("the log shows BOTH attempts, each LABELLED, so there is no "
+          "question which query failed",
+          sum(1 for l in lines if "[maxdate/" in l), 2)
     check("it prints the query that was actually sent",
           any("exec max date" in l for l in lines), True)
     check("and what the argument became on the q side, which IS the "
           "question when a comparison dies on type",
-          any("arg " in l for l in lines), True)
+          any(l.strip().startswith("a0 ") for l in lines), True)
     check("the failure is logged with its message",
           any("ERR RuntimeError: type" in l for l in lines), True)
     check("a 'type error on the python date falls back to computing the "
