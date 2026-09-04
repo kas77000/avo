@@ -635,6 +635,78 @@ def demo() -> int:
     return 0
 
 
+def kdb_check(sample: int = 5) -> int:
+    """Exercise ONLY the kdb path, verbosely, on a handful of names.
+
+    A real run spends its first minutes fetching sixteen thousand names from
+    Bloomberg and only then touches kdb, so a kdb fault costs a whole run to
+    see once.  This reaches the same code in seconds and prints what was
+    sent, what pykx made of it, and what came back.
+
+    Nothing is written and Bloomberg is never opened."""
+    def say(line):
+        print(line)
+
+    here = Path(__file__).resolve().parent
+    cfg = marketcfg.load(here / "config", Path(TSR_DIR))
+    computed = [v for v in cfg.venues.values() if v.computed]
+    print(f"{len(computed)} computed venues: "
+          f"{', '.join(sorted(v.venue_id for v in computed))}")
+    if not computed:
+        print("nothing computes, so there is no kdb path to check")
+        return 0
+
+    host, port = kdbclose.parse_server(EQUITY_MASTER_SERVER)
+    print(f"\nconnecting to {host}:{port}")
+    conn = kdbclose.connect(host, port)
+    print("  connected")
+
+    asked = dt.date.today() - dt.timedelta(days=1)
+    print(f"\nresolving the partition date (asked {asked})")
+    try:
+        date_used, how = kdbclose.resolve_date(conn, asked, log=say)
+    except kdbclose.KdbError as e:
+        print(f"\nFAILED\n{e}")
+        return 1
+    print(f"  resolved via {how}: {kdbclose.date_text(date_used)}")
+
+    #  Real rows, not invented ones: the symbol candidates are the whole
+    #  question and a made-up ticker would not exercise them.
+    now = dt.time(23, 59, 59)
+    rows, _ = crosscode.load(CROSSCODE_PATH, cfg.venues, now)
+    _, to_compute = cfg.by_source(rows)
+    if not to_compute:
+        print("\nno computed rows in the crosscode")
+        return 1
+    chosen = to_compute[:max(1, sample)]
+    print(f"\n{len(to_compute)} computed rows; using {len(chosen)}")
+
+    wanted = []
+    for r in chosen:
+        cands = kdbclose.sym_candidates(r, cfg.venues.get(r.venue_id))
+        print(f"  {r.ric:<14} {r.bbg:<16} {r.venue_id:<10} -> {cands}")
+        wanted.extend(cands)
+
+    print("\nfetching")
+    try:
+        fetched = kdbclose.fetch(conn, date_used, sorted(set(wanted)),
+                                 log=say)
+    except Exception as e:                                  # noqa: BLE001
+        print(f"\nFAILED on the fetch: {type(e).__name__}: {e}")
+        return 1
+
+    print(f"\n{len(fetched)} of {len(set(wanted))} candidates answered")
+    for sym, close in sorted(fetched.items())[:20]:
+        print(f"  {sym:<18} {close}")
+
+    closes, hits, missing = kdbclose.closes_for(chosen, cfg.venues, fetched)
+    print(f"\n{len(closes)} of {len(chosen)} names resolved to a close")
+    print(f"  suffix hits: {hits or 'none'}")
+    if missing:
+        print(f"  unresolved: {[r.ric for r in missing]}")
+    return 0 if closes else 1
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description="Build limitUpDown.csv from Bloomberg limits over "
@@ -647,6 +719,11 @@ def main(argv=None) -> int:
                    help="run the whole pipeline on canned data and exit")
     p.add_argument("--compare", metavar="OLD_CSV",
                    help="diff the last output against another file")
+    p.add_argument("--kdb-check", action="store_true",
+                   help="exercise ONLY the kdb path, verbosely, on a few "
+                        "names. No Bloomberg, no files written.")
+    p.add_argument("--sample", type=int, default=5,
+                   help="how many names --kdb-check uses (default 5)")
     a = p.parse_args(argv)
 
     if a.self_test:
@@ -655,6 +732,9 @@ def main(argv=None) -> int:
         return demo()
 
     _apply_local_settings()
+
+    if a.kdb_check:
+        return kdb_check(a.sample)
 
     if a.compare:
         def read(path):

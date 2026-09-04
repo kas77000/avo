@@ -188,6 +188,25 @@ same machine already holds those EIDs.
 
 They are alternatives, not stages.
 
+## Investigating a kdb fault
+
+A real run spends its first minutes on sixteen thousand Bloomberg names and
+only then touches kdb, so a kdb fault costs a whole run to see once. This
+reaches the same code in seconds:
+
+```
+python limit_up_down.py --kdb-check          five real names, verbosely
+python limit_up_down.py --kdb-check --sample 50
+```
+
+It prints the query sent, the argument **and what pykx turned it into**, and
+what came back — then the symbol candidates per name and which of them
+answered. Nothing is written and Bloomberg is never opened.
+
+The schema (`kdb-queries/no_git/kdb/equity_master.csv`) says `date` is a q
+date, so a `'type` here is the client's conversion, not the column. That is
+what the `arg ... -> ... (q type N)` line settles.
+
 ## Running
 
 ```

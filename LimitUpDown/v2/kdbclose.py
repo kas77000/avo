@@ -129,6 +129,28 @@ def sym_candidates(row, venue) -> list:
     return out
 
 
+def q_type_of(value) -> str:
+    """What pykx turns this into, and what q calls it.
+
+    THIS IS THE WHOLE QUESTION when a comparison dies on 'type.  The schema
+    says equity_master.date is a q date (type d, -14 as an atom), so if a
+    python date arrives as anything else - a timestamp, most likely - then
+    `date<=d` is comparing two different types and q refuses.  Printing it
+    beats reasoning about it."""
+    try:
+        import pykx
+    except ImportError:
+        return f"{type(value).__name__} (pykx not installed, cannot convert)"
+    try:
+        converted = pykx.toq(value)
+    except Exception as e:                                  # noqa: BLE001
+        return (f"{type(value).__name__} -> will not convert: "
+                f"{type(e).__name__}: {e}")
+    kind = getattr(converted, "t", "?")
+    return (f"{type(value).__name__} -> {type(converted).__name__} "
+            f"(q type {kind})")
+
+
 def _py(value):
     """The python form of a q value, or the value itself if it has none."""
     try:
@@ -142,7 +164,7 @@ def date_text(value) -> str:
     return "unknown" if got is None else str(got)
 
 
-def resolve_date(conn, requested, days_back=1):
+def resolve_date(conn, requested, days_back=1, log=None):
     """(date, how).  The most recent partition on or before the bound.
 
     THE DATE COMES BACK RAW, not converted to a python object, because it
@@ -150,20 +172,30 @@ def resolve_date(conn, requested, days_back=1):
     python would reintroduce exactly the conversion this is working around.
 
     Tries both forms and reports which answered, the way the previous-close
-    fields and the sym candidates do - one real run then settles it."""
+    fields and the sym candidates do - one real run then settles it.
+
+    `log` receives a line per attempt: the query, the argument, and what
+    pykx made of it.  That is the evidence, not the guess."""
+    say = log or (lambda line: None)
     errors = []
     attempts = ((f"client date {requested}", MAXDATE_CLIENT_Q, requested),
                 (f"server .z.D-{days_back}", MAXDATE_SERVER_Q,
                  int(days_back)))
     for how, query, arg in attempts:
+        say(f"    try {how}")
+        say(f"      q   {query}")
+        say(f"      arg {arg!r}  {q_type_of(arg)}")
         try:
             got = conn(query, arg)
         except Exception as e:                              # noqa: BLE001
             errors.append(f"{how}: {type(e).__name__}: {e}")
+            say(f"      ERR {type(e).__name__}: {e}")
             continue
         if _py(got) is None:
             errors.append(f"{how}: no partition on or before the bound")
+            say("      got null - no partition on or before the bound")
             continue
+        say(f"      got {got!r}  ({date_text(got)})")
         return got, how
 
     NL = chr(10)
@@ -212,21 +244,32 @@ def _cell(row, field):
         return None
 
 
-def fetch(conn, date, syms) -> dict:
+def fetch(conn, date, syms, log=None) -> dict:
     """sym -> Decimal close, for the syms that had one.
 
     A sym with no row, or a null close, is simply absent; the caller reports
     it rather than guessing a price."""
+    say = log or (lambda line: None)
     if not syms:
         return {}
-    result = conn(FETCH_Q, date, list(syms))
+    say(f"    q   {FETCH_Q}")
+    say(f"      date {date!r}  {q_type_of(date)}")
+    say(f"      syms {len(syms)}, first few {list(syms)[:5]}")
+    try:
+        result = conn(FETCH_Q, date, list(syms))
+    except Exception as e:                                  # noqa: BLE001
+        say(f"      ERR {type(e).__name__}: {e}")
+        raise
     if result is None:
+        say("      got nothing back")
         return {}
     try:
         items = result.items()
     except AttributeError:
         items = dict(result).items()
     out = {}
+    say(f"      got {len(list(items))} rows" if hasattr(items, "__len__")
+        else "      got rows")
     for sym, row in items:
         close = _to_decimal(_cell(row, CLOSE_FIELD))
         if close is not None:
@@ -338,6 +381,14 @@ def self_test() -> int:
           _to_decimal(True), None)
 
     print()
+    print("saying what a value becomes on the q side")
+    got = q_type_of("2026-09-03")
+    check("the answer names the python type either way",
+          got.startswith("str"), True)
+    check("and when pykx is absent it SAYS so rather than reporting a "
+          "wrong q type", ("pykx not installed" in got) or ("->" in got),
+          True)
+
     print("resolving the partition date, which is where a live run died")
 
     class Conn:
@@ -358,7 +409,17 @@ def self_test() -> int:
     check("and when it works the server form is never sent", len(c.asked), 1)
 
     c = Conn(fails="where date<=d")
-    got, how = resolve_date(c, "2026-09-03")
+    lines = []
+    got, how = resolve_date(c, "2026-09-03", log=lines.append)
+    check("the log shows BOTH attempts, so a failure is not a mystery",
+          sum(1 for l in lines if l.strip().startswith("try")), 2)
+    check("it prints the query that was actually sent",
+          any("exec max date" in l for l in lines), True)
+    check("and what the argument became on the q side, which IS the "
+          "question when a comparison dies on type",
+          any("arg " in l for l in lines), True)
+    check("the failure is logged with its message",
+          any("ERR RuntimeError: type" in l for l in lines), True)
     check("a 'type error on the python date falls back to computing the "
           "bound IN q, where no date crosses the wire at all",
           how.startswith("server .z.D"), True)
