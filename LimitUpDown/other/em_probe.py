@@ -216,8 +216,13 @@ def main(argv=None) -> int:
     print()
 
     if args.sample:
+        #  .encode() FOR THE SAME REASON AS v2/kdbclose.syms_for_q: pykx
+        #  turns a python str into a SYMBOL ATOM, and `$ on a symbol is
+        #  'type.  As bytes it is a char vector and `$ does what it says.
+        #  This is the tool the fetch error now tells people to reach for,
+        #  so it has to survive the fault it is used to diagnose.
         got = conn("{[d;s] select from equity_master where date=d, "
-                   "sym=`$s}", date_used, args.sample)
+                   "sym=`$s}", date_used, args.sample.encode("utf-8"))
         print(got)
         return 0
 

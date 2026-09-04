@@ -317,12 +317,32 @@ def fetch(conn, date, syms, log=None) -> dict:
         say("      got nothing back")
         return {}
     try:
-        items = result.items()
+        items = list(result.items())
     except AttributeError:
-        items = dict(result).items()
+        items = list(dict(result).items())
+    say(f"      got {len(items)} rows")
+
+    #  NO ROWS AT ALL IS THE SHAPE OF THE QUESTION, NOT THE DATA.  A
+    #  universe of thousands of names always has closes, so an empty answer
+    #  means the partition is empty or `sym` does not look like what was
+    #  asked for.  A wrong sym type returns exactly this - QUIETLY, on any
+    #  q that does not happen to throw - and that is the failure this
+    #  module has spent three commits chasing.  Loud beats a report with no
+    #  bands in it, which reads like a holiday.
+    if not items:
+        raise KdbError(
+            f"[fetch closes] equity_master has NO rows for {len(syms)} "
+            f"syms on {date_text(date)}."
+            f"{chr(10)}    A universe this size always has closes, so this "
+            f"is the shape of the question rather than the data:"
+            f"{chr(10)}    either that partition is empty, or `sym` does "
+            f"not look like {list(syms)[:3]}."
+            f"{chr(10)}    Run"
+            f"{chr(10)}        python ../other/em_probe.py --server "
+            f"HOST:PORT --sample {list(syms)[0]}"
+            f"{chr(10)}    to see what the column actually holds.")
+
     out = {}
-    say(f"      got {len(list(items))} rows" if hasattr(items, "__len__")
-        else "      got rows")
     for sym, row in items:
         close = _to_decimal(_cell(row, CLOSE_FIELD))
         if close is not None:
@@ -535,7 +555,34 @@ def self_test() -> int:
     check("the name kdb had nothing for is handed back, not dropped",
           [r.ric for r in missing], ["GONE.JK"])
 
+    print()
+    print("what comes back, and what an EMPTY answer means")
+    check("the query still casts, because syms_for_q sends char vectors - "
+          "the two only work as a PAIR and neither may change alone",
+          "`$s" in FETCH_Q, True)
+
+    class Rows:
+        def __call__(self, query, *args):
+            return {"000020.KS": {"PX_LAST": 8000.0},
+                    "000040.KS": {"PX_LAST": 0}}
+
     check("nothing asked, nothing returned", fetch(None, "d", []), {})
+    check("the names with a real close come back, and a zero is not a price",
+          fetch(Rows(), "2026.09.03", ["000020.KS", "000040.KS"]),
+          {"000020.KS": D("8000.0")})
+
+    class NoRows:
+        def __call__(self, query, *args):
+            return {}
+
+    raises("a universe that comes back EMPTY stops the run, because the "
+           "wrong sym type returns no rows quietly and a band-less report "
+           "reads like a holiday",
+           lambda: fetch(NoRows(), "2026.09.03", ["000020.KS"]),
+           "NO rows for 1 syms")
+    raises("and it names the probe, with the sym already in the command",
+           lambda: fetch(NoRows(), "2026.09.03", ["000020.KS"]),
+           "--sample 000020.KS")
 
     print()
     print("all checks passed" if ok else "SOME CHECKS FAILED")
