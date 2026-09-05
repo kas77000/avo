@@ -129,6 +129,49 @@ def _apply_local_settings():
     return changed
 
 
+#  Everything this script calls on its sibling modules.  Checked at startup,
+#  never at the end.
+REQUIRED = {
+    "bpipe": ("band_from", "connect", "eids_in", "ENTITLEMENT_MARKER",
+              "fetch", "status_tally"),
+    "kdbclose": ("connect", "parse_server", "resolve_date", "fetch",
+                 "closes_for", "sym_candidates", "date_text", "KdbError"),
+    "crosscode": ("load", "Dropped", "Excluded"),
+    "marketcfg": ("load", "ConfigError"),
+    "bands": ("compute", "BandError"),
+    "ticks": ("tick_for",),
+    "mailer": ("send",),
+}
+
+
+def _check_modules():
+    """Fail in a second, not after twenty minutes.
+
+    These modules are deployed as loose files - the target machine keeps
+    them flat beside limit_up_down.py rather than in a package - so copying
+    one and forgetting another is the ordinary failure, not an exotic one.
+    A 2026-09-05 run got all the way through kdb AND a 16735 name Bloomberg
+    fetch before dying on bpipe.ENTITLEMENT_MARKER, which an older bpipe.py
+    did not have.  The work was already done and the report was lost."""
+    missing = []
+    for name, attrs in REQUIRED.items():
+        module = globals().get(name)
+        if module is None:
+            missing.append(f"{name} (not imported)")
+            continue
+        for attr in attrs:
+            if not hasattr(module, attr):
+                missing.append(f"{name}.{attr}")
+    if missing:
+        raise SystemExit(
+            f"These modules are out of step with this script:"
+            f"{chr(10)}    " + f"{chr(10)}    ".join(missing)
+            + f"{chr(10)}  They are deployed as loose files, so this is "
+              f"almost always one that was not copied across."
+            + f"{chr(10)}  Copy the whole folder rather than the files you "
+              f"think changed.")
+
+
 def _check_connection_settings():
     missing = [name for name, value in (("BPIPE_HOST", BPIPE_HOST),
                                         ("BPIPE_PORT", BPIPE_PORT),
@@ -424,6 +467,7 @@ def run(envs_spec: str) -> int:
     session = None
     try:
         envs = parse_envs(envs_spec)
+        _check_modules()
         _check_connection_settings()
         here = Path(__file__).resolve().parent
         cfg = marketcfg.load(here / "config", Path(TSR_DIR))
@@ -537,11 +581,19 @@ def run(envs_spec: str) -> int:
     report.extend(_venue_summary(cfg, out, excluded))
     report.extend(_exclusion_lines(excluded))
 
-    eid_path, eid_count = write_entitlement_csv(
-        Path(OUT_TEMP).parent / ENTITLEMENT_CSV, excluded)
-    if eid_count:
-        report.append(f"  entitlement {eid_count:6d}  refused names written "
-                      f"to {eid_path}")
+    #  A DIAGNOSTIC MUST NOT TAKE DOWN THE REPORT.  By this point the file
+    #  is already written and published; losing the report as well would
+    #  leave the operator unable to tell whether the run worked at all.
+    #  That is exactly what happened on 2026-09-05.
+    try:
+        eid_path, eid_count = write_entitlement_csv(
+            Path(OUT_TEMP).parent / ENTITLEMENT_CSV, excluded)
+        if eid_count:
+            report.append(f"  entitlement {eid_count:6d}  refused names "
+                          f"written to {eid_path}")
+    except Exception as e:                                  # noqa: BLE001
+        report.append(f"  entitlement        NOT written: "
+                      f"{type(e).__name__}: {e}")
 
     #  WHICH DATE the closes came from, always - a run that quietly used a
     #  stale partition is otherwise invisible, and a holiday is the normal
@@ -1038,6 +1090,37 @@ def self_test() -> int:
               "than publishing a made-up band - Tokyo's limits are an "
               "absolute step table nobody has written down here",
               "no band tiers in bands.csv" in got, True)
+
+    print("\nchecking the sibling modules before doing any work")
+    check("the real modules satisfy the list, so the check cannot cry wolf",
+          _check_modules(), None)
+    check("and the list names every bpipe attribute this script uses",
+          sorted(REQUIRED["bpipe"]),
+          sorted({n.split(".", 1)[1] for n in
+                  ["bpipe.band_from", "bpipe.connect", "bpipe.eids_in",
+                   "bpipe.ENTITLEMENT_MARKER", "bpipe.fetch",
+                   "bpipe.status_tally"]}))
+
+    class Stale:
+        """bpipe as it was before the entitlement CSV was added."""
+        def __init__(self):
+            for a in REQUIRED["bpipe"]:
+                if a != "ENTITLEMENT_MARKER":
+                    setattr(self, a, True)
+
+    real, globals()["bpipe"] = globals()["bpipe"], Stale()
+    try:
+        _check_modules()
+        got = "no error"
+    except SystemExit as e:
+        got = str(e)
+    finally:
+        globals()["bpipe"] = real
+    check("a stale bpipe is caught at STARTUP, not after a twenty minute "
+          "fetch has already been paid for",
+          "bpipe.ENTITLEMENT_MARKER" in got, True)
+    check("and the message says what actually goes wrong - one loose file "
+          "not copied across", "not copied across" in got, True)
 
     print("\nthe venue summary")
     cfg2 = marketcfg.load(Path(__file__).resolve().parent / "config",
