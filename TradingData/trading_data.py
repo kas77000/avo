@@ -193,8 +193,12 @@ def report(out_rows, rows, excluded, sym_hits, date_used, date_asked,
     print(f"\n  crosscode rows      {len(rows)}")
     for e in excluded:
         print(f"  excluded            {len(e.rows):6d}  {e.reason}")
-    print(f"  equity_master date  {date_used}"
-          + ("" if date_used == date_asked else f"  (asked {date_asked})"))
+    #  date_used comes back RAW from q, so render it rather than printing the
+    #  pykx repr; comparison is on the rendered form for the same reason.
+    used_text = equitymaster.date_text(date_used)
+    print(f"  equity_master date  {used_text}"
+          + ("" if used_text == str(date_asked)
+             else f"  (asked {date_asked})"))
     print(f"  syms matched        {len(sym_hits)} / {len(rows)}")
 
     by_suffix = {}
@@ -353,7 +357,8 @@ def run(crosscode_path, server, output_path, temp_path,
     conn = equitymaster.connect(host, port)
 
     asked = date or (datetime.date.today() - datetime.timedelta(days=1))
-    used = equitymaster.resolve_date(conn, asked)
+    used, how = equitymaster.resolve_date(conn, asked)
+    print(f"  partition resolved by the {how.split()[0]} form")
 
     syms = []
     for row in rows:

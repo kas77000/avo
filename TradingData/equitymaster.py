@@ -35,12 +35,38 @@ from decimal import Decimal, InvalidOperation
 FIELDS = ("PX_LAST", "EQY_BETA", "volatility", "REL_INDEX", "CUR_MKT_CAP",
           "fx_last", "ID_ISIN", "INDUSTRY_SECTOR", "MARKET_STATUS", "CRNCY")
 
-MAXDATE_Q = "{[d] exec max date from equity_master where date<=d}"
+#  TWO WAYS TO ASK FOR THE PARTITION, because the type of equity_master's
+#  `date` column is NOT established and a LimitUpDown run on 2026-09-04 died
+#  on 'type.
+#
+#    client   the bound is a python date, converted by pykx on the way out
+#    server   the bound is computed IN q from .z.D, so no date crosses the
+#             wire at all - only an integer, which cannot be mis-converted
+#
+#  If BOTH fail, the column is not a date and no client-side work will fix
+#  it: that is a schema question, and the error says so.
+MAXDATE_CLIENT_Q = "{[d] exec max date from equity_master where date<=d}"
+MAXDATE_SERVER_Q = ("{[n] exec max date from equity_master "
+                    "where date<=.z.D-n}")
 
-# `$s casts the python list of strings to a symbol vector, which is what the
-# sym column is.
-FETCH_Q = ("{[d;s] select " + ",".join(FIELDS) + " by sym from equity_master "
-           "where date=d, sym in `$s}")
+#  ONE QUERY, and every decoration on it was a mistake.  LimitUpDown paid
+#  for these live on 2026-09-04 against this same table; see
+#  ../LimitUpDown/v2/kdbclose.py, which records them:
+#
+#    sym in `$s              'type    - pykx sends symbol ATOMS, and `$
+#                            applied to a symbol is itself a type error.
+#                            This module used to carry that cast, with a
+#                            comment claiming it made a symbol vector.
+#    sym in $[11h=type s;..] 'rank    - the guard was worse than the bug; a
+#                            cond in a where clause is an arity error.
+#    select ... BY sym       licence  - a KEYED table has to be unkeyed by
+#                            local q, and this box has no q licence.  IPC
+#                            needs none; running q code does.
+#
+#  So: no cast, because the syms arrive as symbols already; and no `by`,
+#  because a plain table reads back through pandas without a q licence.
+FETCH_Q = ("{[d;s] select sym," + ",".join(FIELDS) + " from equity_master "
+           "where date=d, sym in s}")
 
 
 def connect(host: str, port: int):
@@ -70,21 +96,53 @@ def sym_candidates(row, markets) -> list:
     return out
 
 
-def resolve_date(conn, requested):
-    got = conn(MAXDATE_Q, requested)
-    if got is None:
-        raise SystemExit(
-            f"equity_master has no rows on or before {requested}.  "
-            "Check the server and the date.")
+def _py(value):
+    """The python form of a q value, or the value itself if it has none."""
     try:
-        got = got.py()
+        return value.py()
     except AttributeError:
-        pass
-    if got is None:
-        raise SystemExit(
-            f"equity_master has no rows on or before {requested}.  "
-            "Check the server and the date.")
-    return got
+        return value
+
+
+def date_text(value) -> str:
+    got = _py(value)
+    return "unknown" if got is None else str(got)
+
+
+def resolve_date(conn, requested, days_back=1):
+    """(date, how).  The most recent partition on or before the bound.
+
+    THE DATE COMES BACK RAW, not converted to a python object, because it is
+    passed straight back to q in the fetch.  Round-tripping it through python
+    would reintroduce exactly the conversion this is working around.
+
+    Both forms are tried and the run says which answered; one real run then
+    settles it."""
+    errors = []
+    attempts = ((f"client date {requested}", MAXDATE_CLIENT_Q, requested),
+                (f"server .z.D-{days_back}", MAXDATE_SERVER_Q,
+                 int(days_back)))
+    for how, query, arg in attempts:
+        try:
+            got = conn(query, arg)
+        except Exception as e:                              # noqa: BLE001
+            errors.append(f"{how}: {type(e).__name__}: {e}")
+            continue
+        if _py(got) is None:
+            errors.append(f"{how}: no partition on or before the bound")
+            continue
+        return got, how
+
+    NL = chr(10)
+    raise SystemExit(NL.join(
+        ["equity_master: could not resolve a partition date."]
+        + ["    " + e for e in errors]
+        + ["  BOTH ways of asking failed, so this is most likely the SCHEMA",
+           "  rather than the client: `date` may not be a q date column at",
+           "  all.  Run",
+           "      python ../LimitUpDown/other/em_probe.py "
+           "--server HOST:PORT --meta",
+           "  and check what type `date` actually is."]))
 
 
 def _to_decimal(value):
@@ -116,18 +174,57 @@ def _cell(row, field):
         return None
 
 
+def _rows(result):
+    """A pykx table -> a list of dicts, whatever the build hands back.
+
+    pandas first because it does not need a q licence; .py() and plain
+    iteration are the fallbacks.  This is what
+    ../LimitUpDown/v2/kdbclose.py does, and it reads equity_master without
+    trouble."""
+    if result is None:
+        return []
+    try:
+        return result.pd().to_dict("records")
+    except AttributeError:
+        pass
+    try:
+        return list(result.py())
+    except AttributeError:
+        return list(result)
+
+
 def fetch(conn, date, syms) -> dict:
+    """sym -> {field: raw value}, for the syms that had a row."""
     if not syms:
         return {}
     result = conn(FETCH_Q, date, list(syms))
-    if result is None:
-        return {}
-    try:
-        items = result.items()
-    except AttributeError:
-        items = dict(result).items()
-    return {_text(sym): {f: _cell(row, f) for f in FIELDS}
-            for sym, row in items}
+    items = _rows(result)
+
+    #  NO ROWS AT ALL IS THE SHAPE OF THE QUESTION, NOT THE DATA.  A universe
+    #  of thousands always has reference data, so an empty answer means the
+    #  partition is empty or `sym` does not look like what was asked for.  A
+    #  wrong sym form returns exactly this - QUIETLY - and a silent empty
+    #  answer reads like a holiday rather than a bug.
+    if not items:
+        NL = chr(10)
+        raise SystemExit(NL.join([
+            f"equity_master has NO rows for {len(syms)} syms on "
+            f"{date_text(date)}.",
+            "    A universe this size always has rows, so this is the shape "
+            "of the question rather than the data:",
+            f"    either that partition is empty, or `sym` does not look "
+            f"like {list(syms)[:3]}.",
+            "    Run",
+            f"        python ../LimitUpDown/other/em_probe.py "
+            f"--server HOST:PORT --sample {list(syms)[0]}",
+            "    to see what the column actually holds."]))
+
+    out = {}
+    for row in items:
+        sym = _text(_cell(row, "sym"))
+        if sym:
+            out[sym] = {f: _cell(row, f) for f in FIELDS}
+    return out
 
 
 def self_test() -> int:
@@ -178,50 +275,84 @@ def self_test() -> int:
     print("\nrolling the date back")
 
     class Conn:
-        def __init__(self, have):
-            self.have, self.calls = have, []
+        """`client_ok=False` makes the client-side form raise the way a
+        'type error does, so the server-side fallback is exercised."""
+
+        def __init__(self, have, client_ok=True):
+            self.have, self.calls, self.client_ok = have, [], client_ok
 
         def __call__(self, q, *args):
             self.calls.append((q, args))
-            if "max date" in q:
-                return max((d for d in self.have if d <= args[0]),
-                           default=None)
-            return {}
+            if "max date" not in q:
+                return []
+            if ".z.D-" in q:
+                return max(self.have, default=None)
+            if not self.client_ok:
+                raise RuntimeError("type")
+            return max((d for d in self.have if d <= args[0]), default=None)
 
     friday = datetime.date(2026, 8, 28)
     monday = datetime.date(2026, 8, 31)
     c = Conn([friday])
-    check("a Sunday request rolls back to Friday",
-          resolve_date(c, monday - datetime.timedelta(days=1)), friday)
+    got, how = resolve_date(c, monday - datetime.timedelta(days=1))
+    check("a Sunday request rolls back to Friday", got, friday)
+    check("and the client form answered", how.startswith("client"), True)
 
     c = Conn([monday])
-    check("a date that has rows is used as-is", resolve_date(c, monday), monday)
+    check("a date that has rows is used as-is",
+          resolve_date(c, monday)[0], monday)
+
+    c = Conn([friday], client_ok=False)
+    got, how = resolve_date(c, monday)
+    check("a 'type on the client form falls to the server form", got, friday)
+    check("and the run says which answered", how.startswith("server"), True)
 
     c = Conn([])
     try:
         resolve_date(c, monday)
-        check("raised on an empty table", False, True)
+        check("raised when neither form answers", False, True)
     except SystemExit as exc:
-        check("and says the table is empty", "no rows" in str(exc), True)
+        check("and points at the schema, not the client",
+              "SCHEMA" in str(exc), True)
+
+    print("\nthe query itself")
+    check("no `$ cast - pykx sends symbols already", "`$" in FETCH_Q, False)
+    check("no `by` - a keyed table needs a q licence to unkey",
+          " by " in FETCH_Q, False)
+    check("sym is selected, because the answer is no longer keyed by it",
+          "select sym," in FETCH_Q, True)
 
     print("\nfetching")
 
     class FetchConn:
-        def __init__(self):
-            self.calls = []
+        def __init__(self, rows):
+            self.rows, self.calls = rows, []
 
         def __call__(self, q, *args):
             self.calls.append((q, args))
-            return {"BHP.AU": {"PX_LAST": 40.5, "EQY_BETA": 0.9}}
+            return self.rows
 
-    fc = FetchConn()
+    fc = FetchConn([{"sym": "BHP.AU", "PX_LAST": 40.5, "EQY_BETA": 0.9}])
     got = fetch(fc, friday, ["BHP.AU"])
     check("one round trip, not one per symbol", len(fc.calls), 1)
     check("the date and the sym list are both passed",
           fc.calls[0][1], (friday, ["BHP.AU"]))
-    check("the result is keyed by sym", sorted(got), ["BHP.AU"])
+    check("a plain table is re-keyed on its own sym column",
+          sorted(got), ["BHP.AU"])
+    check("and the fields come with it", got["BHP.AU"]["PX_LAST"], 40.5)
+    check("a field the row does not carry is None, not an error",
+          got["BHP.AU"]["ID_ISIN"], None)
     check("no syms means no round trip at all", fetch(fc, friday, []), {})
     check("and no extra call", len(fc.calls), 1)
+
+    empty = FetchConn([])
+    try:
+        fetch(empty, friday, ["BHP.AU", "005930.KS"])
+        check("an empty answer raises rather than writing an empty file",
+              False, True)
+    except SystemExit as exc:
+        check("and says it is the question, not the data",
+              "does not look like" in str(exc), True)
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1
