@@ -51,6 +51,7 @@ import csv
 import datetime
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import columns
@@ -346,27 +347,59 @@ def demo() -> int:
     return 0 if not problems else 1
 
 
+def say(line=""):
+    """Progress, flushed.
+
+    A LIVE RUN MUST NARRATE ITSELF.  Everything interesting here - the
+    connect, and a fetch of tens of thousands of syms - happens before the
+    report, so a silent run is indistinguishable from a hung one.  flush
+    because stdout block-buffers the moment it is piped to a file, which is
+    how this job is actually launched."""
+    print(line, flush=True)
+
+
 def run(crosscode_path, server, output_path, temp_path,
         mapping_path="", date=None) -> int:
+    started = time.time()
+
+    def step(label):
+        say(f"[{time.time() - started:6.1f}s] {label}")
+
+    step(f"reading crosscode {crosscode_path}")
     rows, excluded = crosscode.load(crosscode_path)
+    say(f"  {len(rows)} rows kept, {sum(len(e.rows) for e in excluded)} "
+        f"excluded")
+
     here = Path(__file__).resolve().parent
     markets = marketcfg.load(here / "config" / "markets.csv")
+    say(f"  {len(markets)} markets configured")
     mapping = msci.load(mapping_path) if mapping_path else None
+    say("  msci mapping " + ("loaded" if mapping else "not supplied"))
 
     host, _, port = server.partition(":")
-    conn = equitymaster.connect(host, port)
+    step(f"connecting to equity_master at {server}")
+    conn = equitymaster.connect(host, port, log=say)
 
     asked = date or (datetime.date.today() - datetime.timedelta(days=1))
-    used, how = equitymaster.resolve_date(conn, asked)
-    print(f"  partition resolved by the {how.split()[0]} form")
+    step(f"resolving the partition on or before {asked}")
+    used, how = equitymaster.resolve_date(conn, asked, log=say)
+    say(f"  partition {equitymaster.date_text(used)}, "
+        f"resolved by the {how.split()[0]} form")
 
     syms = []
     for row in rows:
         syms.extend(equitymaster.sym_candidates(row, markets))
-    master = equitymaster.fetch(conn, used, sorted(set(syms)))
+    syms = sorted(set(syms))
+    step(f"fetching {len(syms)} syms in one round trip - this is the slow one")
+    master = equitymaster.fetch(conn, used, syms, log=say)
+    say(f"  {len(master)} syms came back with a row")
 
+    step("building rows")
     hits = {}
     out = build_rows(rows, master, markets, mapping, hits)
+    say(f"  {len(out)} output rows, {len(hits)} matched a sym")
+
+    step("validating")
     problems = validate(out)
     report(out, rows, excluded, hits, used, asked, mapping, markets,
            topup_candidates(rows, master, markets))
@@ -408,8 +441,15 @@ def main(argv=None) -> int:
     s = _settings()
     date = datetime.date.fromisoformat(args.date) if args.date else None
 
-    rc = run(s.CROSSCODE_PATH, s.EQUITY_MASTER_SERVER, s.OUTPUT_PATH,
-             s.TEMP_PATH, getattr(s, "MSCI_MAPPING_PATH", ""), date)
+    #  A kdb failure has already said everything useful - the label, the
+    #  query and the q type of every argument.  A traceback on top of that
+    #  only buries it.
+    try:
+        rc = run(s.CROSSCODE_PATH, s.EQUITY_MASTER_SERVER, s.OUTPUT_PATH,
+                 s.TEMP_PATH, getattr(s, "MSCI_MAPPING_PATH", ""), date)
+    except equitymaster.KdbError as e:
+        say(f"\n  FAILED: {e}")
+        return 1
 
     if args.compare:
         print_compare(compare(read_output(args.compare),

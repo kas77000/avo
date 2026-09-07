@@ -69,7 +69,13 @@ FETCH_Q = ("{[d;s] select sym," + ",".join(FIELDS) + " from equity_master "
            "where date=d, sym in s}")
 
 
-def connect(host: str, port: int):
+class KdbError(Exception):
+    pass
+
+
+def connect(host: str, port: int, log=None):
+    say = log or (lambda line: None)
+    say(f"  importing pykx")
     try:
         import pykx
     except ImportError:
@@ -77,7 +83,10 @@ def connect(host: str, port: int):
             "pykx is not installed.  pip install pykx\n"
             "Every other mode of this script runs without it; only a live "
             "run needs a kdb connection.")
-    return pykx.SyncQConnection(host=host, port=int(port))
+    say(f"  connecting to {host}:{port}")
+    conn = pykx.SyncQConnection(host=host, port=int(port))
+    say(f"  connected")
+    return conn
 
 
 def sym_candidates(row, markets) -> list:
@@ -96,6 +105,72 @@ def sym_candidates(row, markets) -> list:
     return out
 
 
+def q_type_of(value) -> str:
+    """What pykx turns this into, and what q calls it.
+
+    THIS IS THE WHOLE QUESTION when a query dies on 'type: the schema says
+    equity_master.date is a q date, so if a python date arrives as anything
+    else - a timestamp, most likely - then `date<=d` compares two different
+    types and q refuses.  Printing it beats reasoning about it."""
+    try:
+        import pykx
+    except ImportError:
+        return f"{type(value).__name__} (pykx not installed, cannot convert)"
+    try:
+        converted = pykx.toq(value)
+    except Exception as e:                                  # noqa: BLE001
+        return (f"{type(value).__name__} -> will not convert: "
+                f"{type(e).__name__}: {e}")
+    kind = getattr(converted, "t", "?")
+    inside = ""
+    #  A bare "List (q type 0)" hid the sym bug: the container was right and
+    #  its CONTENTS were the wrong type.
+    if kind == 0:
+        first = None
+        for get in (lambda c: c[0], lambda c: list(c)[0],
+                    lambda c: c.py()[0]):
+            try:
+                first = get(converted)
+                break
+            except Exception:                               # noqa: BLE001
+                continue
+        inside = (" of ?" if first is None else
+                  f" of {type(first).__name__} "
+                  f"(q type {getattr(first, 't', '?')})")
+    return (f"{type(value).__name__} -> {type(converted).__name__} "
+            f"(q type {kind}){inside}")
+
+
+def ask(conn, label, query, args=(), log=None):
+    """Send one query, having said exactly what is being sent.
+
+    EVERY QUERY IS LABELLED.  A run that dies on 'type with no other context
+    tells you nothing - there are three different queries here and they fail
+    for different reasons.  On failure the label, the query text and the q
+    type of every argument travel with the error.
+
+    Unlike the sibling, the argument description is only BUILT when someone
+    is listening: q_type_of on a 30,000-element sym list is not free."""
+    if log:
+        log(f"    [{label}]")
+        log(f"      q   {query}")
+        for i, arg in enumerate(args):
+            shown = repr(arg)
+            if len(shown) > 90:
+                shown = shown[:87] + "..."
+            log(f"      a{i}  {shown}  {q_type_of(arg)}")
+    try:
+        return conn(query, *args)
+    except Exception as e:                                  # noqa: BLE001
+        if log:
+            log(f"      ERR {type(e).__name__}: {e}")
+        types = "; ".join(f"a{i}={q_type_of(a)}" for i, a in enumerate(args))
+        raise KdbError(
+            f"[{label}] {type(e).__name__}: {e}"
+            f"{chr(10)}    query: {query}"
+            f"{chr(10)}    args:  {types or 'none'}") from e
+
+
 def _py(value):
     """The python form of a q value, or the value itself if it has none."""
     try:
@@ -109,7 +184,7 @@ def date_text(value) -> str:
     return "unknown" if got is None else str(got)
 
 
-def resolve_date(conn, requested, days_back=1):
+def resolve_date(conn, requested, days_back=1, log=None):
     """(date, how).  The most recent partition on or before the bound.
 
     THE DATE COMES BACK RAW, not converted to a python object, because it is
@@ -118,19 +193,22 @@ def resolve_date(conn, requested, days_back=1):
 
     Both forms are tried and the run says which answered; one real run then
     settles it."""
+    say = log or (lambda line: None)
     errors = []
     attempts = ((f"client date {requested}", MAXDATE_CLIENT_Q, requested),
                 (f"server .z.D-{days_back}", MAXDATE_SERVER_Q,
                  int(days_back)))
     for how, query, arg in attempts:
         try:
-            got = conn(query, arg)
-        except Exception as e:                              # noqa: BLE001
-            errors.append(f"{how}: {type(e).__name__}: {e}")
+            got = ask(conn, f"maxdate/{how}", query, (arg,), log)
+        except KdbError as e:
+            errors.append(str(e).splitlines()[0])
             continue
         if _py(got) is None:
             errors.append(f"{how}: no partition on or before the bound")
+            say("      got null - no partition on or before the bound")
             continue
+        say(f"      got {date_text(got)}")
         return got, how
 
     NL = chr(10)
@@ -193,12 +271,15 @@ def _rows(result):
         return list(result)
 
 
-def fetch(conn, date, syms) -> dict:
+def fetch(conn, date, syms, log=None) -> dict:
     """sym -> {field: raw value}, for the syms that had a row."""
+    say = log or (lambda line: None)
     if not syms:
         return {}
-    result = conn(FETCH_Q, date, list(syms))
+    say(f"      {len(syms)} syms, first few {list(syms)[:5]}")
+    result = ask(conn, "fetch", FETCH_Q, (date, list(syms)), log)
     items = _rows(result)
+    say(f"      got {len(items)} rows")
 
     #  NO ROWS AT ALL IS THE SHAPE OF THE QUESTION, NOT THE DATA.  A universe
     #  of thousands always has reference data, so an empty answer means the
