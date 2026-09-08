@@ -23,7 +23,8 @@ silently:
   Volatility10D   equity_master.volatility may not be the 10-day figure
                   Bloomberg's VOLATILITY_10D returns.  It is a fraction and
                   is written out times 100, as a percentage.
-  MarketCap/Capi  assumes fx_last is a local->USD rate matching load_FXdatas
+  MarketCap/Capi  assumes fx_last is a local->USD rate matching load_FXdatas.
+                  CUR_MKT_CAP is taken to be in millions and scaled up.
   Sector          equity_master has no GICS_SECTOR_NAME, so every row takes
                   the :295 fallback and differs from the R wherever GICS had
                   a value
@@ -74,6 +75,12 @@ KEY_COLUMNS = ("Close", "Beta", "Volatility10D", "Index", "MarketCap")
 # equity_master stores volatility as a fraction; Volatility10D is a
 # percentage.
 VOL_SCALE = 100
+
+# equity_master stores CUR_MKT_CAP in millions.  The R job's Capi thresholds
+# at :165-168 are 300000000 / 2000000000 / 10000000000 in raw units, so the
+# MarketCap column is raw units too and the stored figure has to be scaled
+# up before either the column or the bucket is right.
+CAP_SCALE = 1000000
 
 # The fields the R job's dead :120 top-up would have refetched.
 TOPUP_FIELDS = ("CUR_MKT_CAP", "EQY_BETA", "volatility", "INDUSTRY_SECTOR")
@@ -131,7 +138,8 @@ def build_rows(rows, master, markets, mapping, sym_hits) -> list:
 
         cap = _D(rec.get("CUR_MKT_CAP"))
         fx = _D(rec.get("fx_last"))
-        market_cap = cap * fx if cap is not None and fx is not None else None
+        market_cap = (cap * CAP_SCALE * fx
+                      if cap is not None and fx is not None else None)
 
         rel_index = _T(rec.get("REL_INDEX"))
         #  equity_master carries Bloomberg's "N.A." verbatim; it is the
@@ -264,8 +272,9 @@ def report(out_rows, rows, excluded, sym_hits, date_used, date_asked,
     print("\n  ! UNVERIFIED SOURCES - confirm before cutover")
     print("    Volatility10D  from equity_master.volatility x100; the "
           "definition is NOT confirmed to be Bloomberg's VOLATILITY_10D")
-    print("    MarketCap/Capi CUR_MKT_CAP * fx_last; fx_last's direction is "
-          "assumed to be local->USD")
+    print("    MarketCap/Capi CUR_MKT_CAP x1e6 * fx_last; the millions "
+          "scale is read off the data, and fx_last's")
+    print("                   direction is assumed to be local->USD")
     print("    Sector         equity_master has no GICS_SECTOR_NAME, so "
           "every row takes the :295 INDUSTRY_SECTOR fallback")
 
@@ -335,12 +344,12 @@ def demo() -> int:
     ]
     master = {
         "BHP.AU": {"PX_LAST": 40.5, "EQY_BETA": 0.9, "volatility": 0.21,
-                   "REL_INDEX": "AS51", "CUR_MKT_CAP": 2.1e11,
+                   "REL_INDEX": "AS51", "CUR_MKT_CAP": 210000.0,
                    "fx_last": 0.65, "ID_ISIN": "AU000000BHP4",
                    "INDUSTRY_SECTOR": "Basic Materials",
                    "MARKET_STATUS": "ACTV", "CRNCY": "AUD"},
         "STW.AU": {"PX_LAST": 72.1, "EQY_BETA": 1.0, "volatility": 0.11,
-                   "REL_INDEX": "AS51", "CUR_MKT_CAP": 4.2e9,
+                   "REL_INDEX": "AS51", "CUR_MKT_CAP": 4200.0,
                    "fx_last": 0.65, "ID_ISIN": "AU0000STW014",
                    "INDUSTRY_SECTOR": "Financials",
                    "MARKET_STATUS": "ACTV", "CRNCY": "AUD"},
@@ -348,7 +357,7 @@ def demo() -> int:
         # which is the whole reason sym resolution tries two candidates.
         "005930.KS": {"PX_LAST": 71000.0, "EQY_BETA": 1.1,
                       "volatility": 0.28, "REL_INDEX": "KOSPI",
-                      "CUR_MKT_CAP": 4.2e14, "fx_last": 0.00072,
+                      "CUR_MKT_CAP": 4.2e8, "fx_last": 0.00072,
                       "ID_ISIN": "KR7005930003",
                       "INDUSTRY_SECTOR": "Technology",
                       "MARKET_STATUS": "ACTV", "CRNCY": "KRW"},
@@ -517,7 +526,7 @@ def self_test() -> int:
         market="ASX-MAIN", currency="AUD", is_reit=False)
     master = {"BHP.AU": {"PX_LAST": 40.5, "EQY_BETA": 0.9,
                          "volatility": 0.21, "REL_INDEX": "AS51",
-                         "CUR_MKT_CAP": 2000000.0, "fx_last": 0.65,
+                         "CUR_MKT_CAP": 200.0, "fx_last": 0.65,
                          "ID_ISIN": "AU000000BHP4",
                          "INDUSTRY_SECTOR": "Basic Materials",
                          "MARKET_STATUS": "ACTV", "CRNCY": "AUD"}}
@@ -531,8 +540,8 @@ def self_test() -> int:
     check("Volatility10D is the volatility column, as a percentage",
           r["Volatility10D"], "21")
     check("Index is REL_INDEX", r["Index"], "AS51")
-    check("MarketCap is CUR_MKT_CAP times fx_last",
-          r["MarketCap"], "1300000")
+    check("MarketCap is CUR_MKT_CAP, in millions, times fx_last",
+          r["MarketCap"], "130000000")
     check("and carries no trailing zeros, as R's write.csv does not",
           "." in r["MarketCap"], False)
     check("Capi buckets off the converted value", r["Capi"], "MICRO")
