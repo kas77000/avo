@@ -114,6 +114,74 @@ def segment(cas, market: str, isin: str) -> str:
     return "CAS" if isin in cas.get(market, ()) else ""
 
 
+# =============================================================================
+# HONG KONG  - :330-372, and only HALF of it can be done here.
+#
+#   the dico list  ->  NO_CAS   a file, so it is below
+#   TRADING_CONDITIONS_1  ->  CAS   an intraday Bloomberg call at :357, for
+#                                   HK ETFs.  equity_master has no
+#                                   equivalent and qatt.cond was ruled out,
+#                                   so this half stays unfilled and the run
+#                                   says so.  It is the one genuinely
+#                                   unavailable field in this job.
+# =============================================================================
+
+HKEX_MARKETS = ("HKG-MAIN", "HKG-GEM")
+
+#  :339.  Warrants are left alone whatever the list says.
+HKEX_EXEMPT_TYPE = "Warrant"
+
+
+def load_hkex(path) -> set:
+    """The BloombergCodes on the HKEX closing-auction list.
+
+    HEADERLESS AND ONE COLUMN (:334 reads it with header=F and names the
+    column StockCodes), so every line is a bare stock code - 5, 700, 941 -
+    and :338 pastes " HK" onto each before comparing.  That paste is done
+    here, once, so the caller compares BloombergCode against BloombergCode.
+
+    Only the first field of a line is taken, which reads a plain list and a
+    file that carries the " HK" already, and ignores anything after it."""
+    p = Path(path)
+    if not p.exists():
+        return set()
+
+    out = set()
+    with p.open(encoding="utf-8-sig", errors="replace") as fh:
+        for line in fh:
+            code = line.replace(",", " ").split()
+            if not code:
+                continue
+            first = code[0].strip()
+            if not first or first.lower() == "stockcodes":
+                #  Headerless per :334, but a file that carries the name
+                #  anyway must not turn it into a stock.
+                continue
+            out.add(first if first.upper().endswith(" HK")
+                    else f"{first} HK")
+    return out
+
+
+def segment_hkex(codes, market: str, bbg: str, sec_type: str) -> str:
+    """NO_CAS for a Hong Kong name that is NOT on the list.
+
+    THE MATCH IS INVERTED, which is easy to get backwards: :337-339 marks
+    the rows whose BloombergCode is `!is.element` of the list.  The list
+    names what DOES have a closing auction, so everything else on HKG-MAIN
+    and HKG-GEM is NO_CAS.
+
+    Two things narrow it.  Warrants are exempt (:339).  And an empty list
+    marks NOTHING - :336 skips the whole block when the read failed or the
+    file was empty - which matters far more here than for India: inverted,
+    a list that failed to load would otherwise mark EVERY Hong Kong name
+    NO_CAS."""
+    if not codes or market not in HKEX_MARKETS:
+        return ""
+    if (sec_type or "").strip() == HKEX_EXEMPT_TYPE:
+        return ""
+    return "" if (bbg or "").strip() in codes else "NO_CAS"
+
+
 def self_test() -> int:
     import tempfile
     ok = True
@@ -185,6 +253,40 @@ def self_test() -> int:
     check("no lists at all", segment({}, NSE_MARKET, "INE002A01018"), "")
     check("a row with no ISIN cannot match, and must not match everything",
           segment(cas, NSE_MARKET, ""), "")
+
+    print("\nhong kong, where the match is inverted")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "hkex.txt"
+        p.write_text("5\n700\n941\n", encoding="utf-8")
+        check("a bare stock code becomes a BloombergCode, per the paste "
+              "at :338", load_hkex(p), {"5 HK", "700 HK", "941 HK"})
+
+        p.write_text("700 HK\n5\n\n  \n", encoding="utf-8")
+        check("a file that already carries the HK is not given it twice",
+              load_hkex(p), {"700 HK", "5 HK"})
+
+        p.write_text("StockCodes\n700\n", encoding="utf-8")
+        check("the file is headerless, so a stray header is not a stock",
+              load_hkex(p), {"700 HK"})
+
+        check("no file is an empty set", load_hkex(Path(d) / "no.txt"),
+              set())
+
+    codes = {"700 HK", "5 HK"}
+    check("a Hong Kong name ON the list keeps its segment - the list is "
+          "what HAS an auction",
+          segment_hkex(codes, "HKG-MAIN", "700 HK", "Equity"), "")
+    check("one that is NOT on it is NO_CAS, which is the inverted match",
+          segment_hkex(codes, "HKG-MAIN", "1234 HK", "Equity"), "NO_CAS")
+    check("GEM is marked the same way as MAIN",
+          segment_hkex(codes, "HKG-GEM", "1234 HK", "Equity"), "NO_CAS")
+    check("a warrant is exempt however absent it is, per :339",
+          segment_hkex(codes, "HKG-MAIN", "1234 HK", "Warrant"), "")
+    check("a market that is not Hong Kong is untouched",
+          segment_hkex(codes, "TYO-MAIN", "7203 JT", "Equity"), "")
+    check("AN EMPTY LIST MARKS NOTHING - inverted, a failed read would "
+          "otherwise make every Hong Kong name NO_CAS",
+          segment_hkex(set(), "HKG-MAIN", "1234 HK", "Equity"), "")
 
     print("\nloading both")
     with tempfile.TemporaryDirectory() as d:

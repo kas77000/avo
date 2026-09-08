@@ -15,6 +15,17 @@ TEMP_PATH = r"CHANGEME\TradingData.tmp.csv"
 # says so rather than failing.
 MSCI_MAPPING_PATH = ""
 OPEN_AUCTION_OVERRIDE_PATH = ""
+# The HKEX closing-auction list from the dico: ONE STOCK CODE PER LINE, no
+# header - 5, 700, 941.
+#
+# THE MATCH IS INVERTED.  The list names what KEEPS a closing auction, so
+# every other HKG-MAIN and HKG-GEM name is marked NO_CAS, warrants aside.
+# A missing or empty file therefore marks NOTHING rather than marking
+# everything, and the run says so.
+#
+# It fills half of Hong Kong.  The other half - CAS for HK ETFs - comes
+# from an intraday Bloomberg TRADING_CONDITIONS_1 call that equity_master
+# has no equivalent for, and stays unfilled.
 HKEX_CAS_LIST_PATH = ""
 
 # The two India closing-auction lists.  A name on its own exchange's list

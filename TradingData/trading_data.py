@@ -11,8 +11,9 @@ WHAT IS NOT FILLED, AND WHY
   MsciCountryIndex, MsciSectorCountryIndex, MsciSectorIndex,
   MsciSectorRegionIndex   need msci_mapping.csv
   OpenAggressivityPct     needs the auction override CSV
-  Segment for HKG      needs the dico and the intraday Bloomberg call
+  Segment NO_CAS for HKG   fills when the HKEX dico list is supplied
   Segment CAS for NSI/BSE  fills when the two India lists are supplied
+  Segment CAS for HK ETFs  needs TRADING_CONDITIONS_1, and cannot be had
 
   Segment for HK ETFs is the one genuinely unavailable field.  It comes from
   TRADING_CONDITIONS_1 via an intraday Bloomberg call at :357 and has no
@@ -124,7 +125,8 @@ def _measure(value, scale=1) -> str:
     return _plain(d * scale)
 
 
-def build_rows(rows, master, markets, mapping, sym_hits, cas=None) -> list:
+def build_rows(rows, master, markets, mapping, sym_hits, cas=None,
+               hkex=None) -> list:
     """One output dict per crosscode row.  Missing reference data leaves a
     column blank; it never becomes zero, and a zero that came back from kdb
     is treated as missing for Beta, Close and Volatility10D."""
@@ -156,9 +158,11 @@ def build_rows(rows, master, markets, mapping, sym_hits, cas=None) -> list:
             seg = columns.segment_asx(row.ticker, row.sec_type)
         if seg is None:
             seg = columns.SEGMENT_DEFAULT
-        #  :580-581 runs AFTER the market rules and overwrites them, so a
-        #  name on its exchange's closing-auction list is CAS whatever the
-        #  bucket above decided.
+        #  :577 then :580-581, both AFTER the market rules and both
+        #  overwriting them.  Hong Kong first, India second; they touch
+        #  different markets, so the order is fidelity rather than effect.
+        seg = caslist.segment_hkex(hkex, row.market, row.bbg,
+                                   row.sec_type) or seg
         seg = caslist.segment(cas, row.market, isin) or seg
 
         out = {
@@ -444,7 +448,8 @@ def say(line=""):
 
 
 def run(crosscode_path, server, output_path, temp_path,
-        mapping_path="", date=None, nse_cas_path="", bse_cas_path="") -> int:
+        mapping_path="", date=None, nse_cas_path="", bse_cas_path="",
+        hkex_cas_path="") -> int:
     started = time.time()
 
     def step(label):
@@ -468,6 +473,17 @@ def run(crosscode_path, server, output_path, temp_path,
         else:
             say(f"  {market} cas list {len(cas.get(market, ())):6d} isins  "
                 f"{path}")
+    hkex = caslist.load_hkex(hkex_cas_path) if hkex_cas_path else set()
+    if not hkex_cas_path:
+        say("  HKEX cas list not supplied")
+    else:
+        say(f"  HKEX cas list      {len(hkex):6d} codes  {hkex_cas_path}")
+        if not hkex:
+            #  The HK match is inverted, so an empty list is the difference
+            #  between marking nothing and marking everything.  It marks
+            #  nothing, and that has to be said out loud.
+            say("  ! the HKEX list is EMPTY - no Hong Kong row will be "
+                "marked NO_CAS")
 
     host, _, port = server.partition(":")
     step(f"connecting to equity_master at {server}")
@@ -489,7 +505,7 @@ def run(crosscode_path, server, output_path, temp_path,
 
     step("building rows")
     hits = {}
-    out = build_rows(rows, master, markets, mapping, hits, cas)
+    out = build_rows(rows, master, markets, mapping, hits, cas, hkex)
     say(f"  {len(out)} output rows, {len(hits)} matched a sym")
 
     step("validating")
@@ -541,7 +557,8 @@ def main(argv=None) -> int:
         rc = run(s.CROSSCODE_PATH, s.EQUITY_MASTER_SERVER, s.OUTPUT_PATH,
                  s.TEMP_PATH, getattr(s, "MSCI_MAPPING_PATH", ""), date,
                  getattr(s, "INDIA_NSE_CAS_LIST_PATH", ""),
-                 getattr(s, "INDIA_BSE_CAS_LIST_PATH", ""))
+                 getattr(s, "INDIA_BSE_CAS_LIST_PATH", ""),
+                 getattr(s, "HKEX_CAS_LIST_PATH", ""))
     except equitymaster.KdbError as e:
         say(f"\n  FAILED: {e}")
         return 1
@@ -657,6 +674,38 @@ def self_test() -> int:
           columns.SEGMENT_DEFAULT)
     check("and a Japanese row is untouched by any of it",
           build_rows([row], master, M, None, {}, cas)[0]["Segment"], "A-B")
+
+    print("\nhong kong, where the list says who KEEPS an auction")
+    hk = crosscode.Row(
+        fidessa_code="700.HK", ric="0700.HK", bbg="700 HK", ticker="700",
+        bbg_ext="HK", sec_type="Equity", bbg_sec_type="Equity",
+        market="HKG-MAIN", currency="HKD", is_reit=False)
+    hk_off = crosscode.Row(
+        fidessa_code="1234.HK", ric="1234.HK", bbg="1234 HK",
+        ticker="1234", bbg_ext="HK", sec_type="Equity",
+        bbg_sec_type="Equity", market="HKG-MAIN", currency="HKD",
+        is_reit=False)
+    hk_warrant = crosscode.Row(
+        fidessa_code="9999.HK", ric="9999.HK", bbg="9999 HK",
+        ticker="9999", bbg_ext="HK", sec_type="Warrant",
+        bbg_sec_type="Equity", market="HKG-MAIN", currency="HKD",
+        is_reit=False)
+    codes = {"700 HK"}
+
+    check("a name ON the list keeps the default segment",
+          build_rows([hk], {}, M, None, {}, None, codes)[0]["Segment"],
+          columns.SEGMENT_DEFAULT)
+    check("one that is NOT on it is NO_CAS - the match is inverted",
+          build_rows([hk_off], {}, M, None, {}, None, codes)[0]["Segment"],
+          "NO_CAS")
+    check("a warrant is exempt, per :339",
+          build_rows([hk_warrant], {}, M, None, {}, None,
+                     codes)[0]["Segment"], columns.SEGMENT_DEFAULT)
+    check("NO LIST MARKS NOTHING, which for an inverted match is the "
+          "difference between marking none and marking every HK name",
+          [build_rows([r], {}, M, None, {})[0]["Segment"]
+           for r in (hk, hk_off)],
+          [columns.SEGMENT_DEFAULT, columns.SEGMENT_DEFAULT])
 
     print("\na row equity_master has, carrying zeros")
     zero = {"BHP.AU": dict(master["BHP.AU"], PX_LAST=0.0, EQY_BETA=0,
