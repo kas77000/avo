@@ -69,7 +69,15 @@ TICK_FIELDS = ("price", "size", "cond", "ex")
 MASTER_FIELDS = ("sym", "EQY_PRIM_EXCH_SHRT", "COMPOSITE_EXCH_CODE",
                  "ID_MIC_PRIM_EXCH")
 
-PARTITIONS_Q = "{exec distinct date from qatt}"
+#  AN EXPRESSION, NOT A LAMBDA, and it is the only query here sent with no
+#  arguments.  conn("{...}") EVALUATES the string, and a lambda literal
+#  evaluates to the unapplied function - q never runs it, and there is
+#  nothing to apply it to.  The dates that came back were the characters of
+#  the function's own text, every one of which _as_date discards, so
+#  partitions() returned [] and the run said "qatt holds no partitions at
+#  all" with no error anywhere.  Every other query here takes an argument,
+#  which is what made pykx apply them and why this was the only one wrong.
+PARTITIONS_Q = "exec distinct date from qatt"
 
 #  TWO WAYS TO ASK FOR THE PARTITION, because the type of equity_master's
 #  `date` column is NOT established and a LimitUpDown run on 2026-09-04 died
@@ -108,14 +116,19 @@ MASTER_SYM_Q = (
 
 
 def ticks_q(time_field: str = None) -> str:
-    """The tick query, with the time column named.
+    """The tick query: a plain select on the two predicates that matter.
 
-    Built rather than written out so the probe's answer reaches the query by
-    changing one constant, and so the probe itself can ask for a column the
-    job does not use."""
-    return ("{[d;s] select sym," + (time_field or TIME_FIELD) + "," +
-            ",".join(TICK_FIELDS) +
-            " from qatt where date=d, sym in s, price>0, size>0}")
+    NO COLUMN LIST AND NO price>0/size>0.  Both named columns this module
+    has never confirmed - TIME_FIELD is openly a placeholder and so are
+    TICK_FIELDS - and a select that names a column qatt does not have is a
+    hard q error, which is the worst way to discover a schema.  Taking every
+    column means the answer itself says what qatt holds; the row shaping
+    below picks by name and reports what is missing instead of dying on it.
+
+    time_field is kept in the signature because the probe passes one, but
+    the query no longer varies with it: every column comes back regardless.
+    The date and the sym are the whole question."""
+    return "{[d;s] select from qatt where date=d, sym in s}"
 
 
 def live_ticks_q(time_field: str = None) -> str:
@@ -131,9 +144,7 @@ def live_ticks_q(time_field: str = None) -> str:
     constrain and nothing to pass.  The RDB holds today and only today, so
     the table itself is the filter.  LimitUpDown/v1/kdbsource.py asks qatt
     the same undated way for the same reason."""
-    return ("{[s] select sym," + (time_field or TIME_FIELD) + "," +
-            ",".join(TICK_FIELDS) +
-            " from qatt where sym in s, price>0, size>0}")
+    return "{[s] select from qatt where sym in s}"
 
 
 def probe_q() -> str:
@@ -149,8 +160,11 @@ def probe_q() -> str:
 #  read so a diagnostic on a tick table stays cheap.
 ANY_ON_DATE_Q = "{[d] count select[1] sym from qatt where date=d}"
 SAMPLE_SYMS_Q = "{[d] select[5] sym from qatt where date=d}"
-#  Deliberately WITHOUT price>0, size>0: if this matches and ticks_q does
-#  not, the filter is what emptied the answer, not the sym.
+#  One whole row, for its COLUMN NAMES.  TIME_FIELD and TICK_FIELDS are
+#  placeholders this module has never confirmed, and now that the query names
+#  no column a wrong guess is a silent None rather than a q error.  This is
+#  what turns the guess into a fact.
+SAMPLE_ROW_Q = "{[d] select[1] from qatt where date=d}"
 ANY_SYM_Q = "{[d;s] count select[1] sym from qatt where date=d, sym in s}"
 
 
@@ -190,6 +204,12 @@ def q_type_of(value) -> str:
                   f"(q type {getattr(first, 't', '?')})")
     return (f"{type(value).__name__} -> {type(converted).__name__} "
             f"(q type {kind}){inside}")
+
+
+def sample_columns(conn, date) -> list:
+    """Every column name qatt actually has on that date, in order."""
+    rows = _rows(conn(SAMPLE_ROW_Q, date))
+    return list(rows[0].keys()) if rows else []
 
 
 def diagnose(conn, date, syms) -> list:
@@ -233,8 +253,8 @@ def diagnose(conn, date, syms) -> list:
     matched = ask("those syms on that date", ANY_SYM_Q, date, list(syms))
     if matched is not None:
         out.append(("those syms on that date",
-                    "yes, so the sym matches and price>0/size>0 is what "
-                    "emptied it" if matched else
+                    "yes - the sym matches, so the emptiness is downstream "
+                    "of the query" if matched else
                     "NONE - the sym predicate is what is empty.  Compare "
                     "the shape asked for with the sample above"))
     return out
@@ -519,14 +539,14 @@ def self_test() -> int:
     T = dt.time
 
     print("qattsource --self-test\n\nthe queries name the right columns")
-    check("the tick query asks for the configured time column",
-          "tradeTime" in ticks_q(), True)
-    check("and can be pointed at another without editing the file",
-          "srcTime" in ticks_q("srcTime"), True)
-    check("it filters to prints in q, not in python - the row count is the "
-          "whole reason",
-          "price>0, size>0" in ticks_q(), True)
-    check("it constrains on the partition", "date=d" in ticks_q(), True)
+    check("the tick query names no column at all - qatt's schema is not "
+          "confirmed, and naming a column it lacks is a hard q error",
+          "select from qatt" in ticks_q(), True)
+    check("so the time column does not reach the query, and asking for "
+          "another changes nothing",
+          ticks_q("srcTime"), ticks_q("tradeTime"))
+    check("the two predicates that matter are both there",
+          "where date=d, sym in s" in ticks_q(), True)
     check("it does NOT cast the sym list - pykx sends symbols already, "
           "and `$ on a symbol is the 'type LimitUpDown paid for",
           "sym in s" in ticks_q(), True)
@@ -538,10 +558,11 @@ def self_test() -> int:
           "date" in live_ticks_q(), False)
     check("it takes only the syms - one argument, not two",
           live_ticks_q().startswith("{[s]"), True)
-    check("it filters to prints in q, exactly as the dated one does",
-          "price>0, size>0" in live_ticks_q(), True)
-    check("and asks for the same columns, so both fill the same file",
-          all(f in live_ticks_q() for f in ("sym",) + TICK_FIELDS), True)
+    check("it names no column either, for the same reason",
+          "select from qatt" in live_ticks_q(), True)
+    check("and differs from the dated one in exactly one thing: the date",
+          live_ticks_q().replace("{[s]", "{[d;s]")
+          .replace("where sym in s", "where date=d, sym in s"), ticks_q())
     check("the dated query does name the partition, and still does",
           "date=d" in ticks_q(), True)
 
@@ -588,6 +609,38 @@ def self_test() -> int:
     check("both failing says SCHEMA, and names the probe that settles it",
           got, "schema")
 
+    print("\na query sent with no arguments must not be a lambda")
+    check("the partitions query is an expression - a lambda literal would "
+          "come back unapplied, and its characters are not dates",
+          PARTITIONS_Q.startswith("{"), False)
+    check("and it is still the only one sent bare; every other query takes "
+          "an argument, which is what makes pykx apply it",
+          [q for q in (MAXDATE_CLIENT_Q, MAXDATE_SERVER_Q, MASTER_BPIPE_Q,
+                       MASTER_MBPIPE_Q, MASTER_SYM_Q, ticks_q(),
+                       live_ticks_q(), probe_q(), ANY_ON_DATE_Q,
+                       SAMPLE_SYMS_Q, ANY_SYM_Q)
+           if not q.startswith("{[")], [])
+
+    print("\nreading qatt's real column names")
+
+    class OneRow:
+        def __call__(self, q, *args):
+            return [{"sym": "7203.JP", "tradeTime": 1, "price": 2,
+                     "size": 3, "cond": "T", "ex": "T"}]
+
+    class NoRow:
+        def __call__(self, q, *args):
+            return []
+
+    cols = sample_columns(OneRow(), dt.date(2026, 9, 4))
+    check("the names come back in order, so a placeholder can be checked "
+          "against them", cols,
+          ["sym", "tradeTime", "price", "size", "cond", "ex"])
+    check("the ones this module assumes are all there, in this sample",
+          [f for f in (TIME_FIELD,) + TICK_FIELDS if f not in cols], [])
+    check("an empty partition names nothing rather than raising",
+          sample_columns(NoRow(), dt.date(2026, 9, 4)), [])
+
     print("\nnarrowing an empty answer")
 
     class Narrow:
@@ -624,8 +677,8 @@ def self_test() -> int:
           found["syms qatt holds there"], "7203.T, 6758.T")
 
     found = dict(diagnose(Narrow(1, 1, ["7203.JP"]), day, ["7203.JP"]))
-    check("a sym that matches unfiltered leaves only price>0/size>0",
-          "price>0" in found["those syms on that date"], True)
+    check("a sym that matches clears the query and points downstream",
+          "downstream" in found["those syms on that date"], True)
 
     class Raises:
         def __call__(self, q, *args):

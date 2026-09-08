@@ -488,6 +488,24 @@ def trace(cfg, a, log=None) -> int:
     #  arrives as a timestamp it is false for every row - no error, no rows.
     log.kv("date reaches q as", qattsource.q_type_of(date))
     log.kv("syms reach q as", qattsource.q_type_of([n.sym for n in names]))
+    #  The query names no column, so a wrong TIME_FIELD is a silent None
+    #  rather than a q error.  Print what qatt actually has.
+    try:
+        cols = qattsource.sample_columns(conn, date)
+    except Exception as e:                                  # noqa: BLE001
+        cols = []
+        log.warn(f"could not read qatt's columns: {e}")
+    if cols:
+        log.kv("qatt columns", ", ".join(cols))
+        missing = [f for f in (qattsource.TIME_FIELD,) + qattsource.TICK_FIELDS
+                   if f not in cols]
+        if missing:
+            log.warn(f"qatt has no column called {', '.join(missing)} - the "
+                     f"CSV will be blank there. TIME_FIELD is a placeholder; "
+                     f"pick the right name from the list above and set it in "
+                     f"qattsource.py, or run qatt_time_probe.py.")
+        else:
+            log.kv("the assumed columns", "all present")
 
     fetched = qattsource.fetch_ticks(conn, date, [n.sym for n in names])
     for n in names:
