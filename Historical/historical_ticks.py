@@ -483,6 +483,11 @@ def trace(cfg, a, log=None) -> int:
     log.info(f"    {qattsource.ticks_q()}")
     log.kv("date", date)
     log.kv("syms", [n.sym for n in names])
+    #  WHAT q RECEIVES, not what python sent.  `where date=d` against a
+    #  partition column is a comparison between two types, and if the date
+    #  arrives as a timestamp it is false for every row - no error, no rows.
+    log.kv("date reaches q as", qattsource.q_type_of(date))
+    log.kv("syms reach q as", qattsource.q_type_of([n.sym for n in names]))
 
     fetched = qattsource.fetch_ticks(conn, date, [n.sym for n in names])
     for n in names:
@@ -490,9 +495,13 @@ def trace(cfg, a, log=None) -> int:
         log.kv("rows returned", logs.thousands(len(got)), n.sym)
         if not got:
             log.warn(f"{n.sym} had NO prints on {date}. A real run would "
-                     f"write a miss-cache line and no file. Check the sym "
-                     f"above is what kdb knows this name as, and that {date} "
-                     f"was a trading day for it.")
+                     f"write a miss-cache line and no file.")
+            #  An empty answer names no predicate, so ask again with one
+            #  removed at a time rather than leaving the reader to guess.
+            log.info("    narrowing it down:")
+            for label, finding in qattsource.diagnose(
+                    conn, date, [n.sym for n in names]):
+                log.kv(f"  {label}", finding)
             continue
         stamps = [r["time"] for r in got if r["time"]]
         log.kv("time span", f"{min(stamps)} .. {max(stamps)}" if stamps

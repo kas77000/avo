@@ -143,6 +143,103 @@ def probe_q() -> str:
             " from qatt where date=d, sym=s, price>0, size>0}")
 
 
+#  NARROWING AN EMPTY ANSWER.  ticks_q has three predicates and a silent
+#  empty result says nothing about which one emptied it.  These ask the same
+#  question with one predicate removed at a time, and `select[n]` caps the
+#  read so a diagnostic on a tick table stays cheap.
+ANY_ON_DATE_Q = "{[d] count select[1] sym from qatt where date=d}"
+SAMPLE_SYMS_Q = "{[d] select[5] sym from qatt where date=d}"
+#  Deliberately WITHOUT price>0, size>0: if this matches and ticks_q does
+#  not, the filter is what emptied the answer, not the sym.
+ANY_SYM_Q = "{[d;s] count select[1] sym from qatt where date=d, sym in s}"
+
+
+def q_type_of(value) -> str:
+    """What pykx turns this into, and what q calls it.
+
+    THIS IS THE WHOLE QUESTION behind a silently empty answer.  `where
+    date=d` against a partition column compares two types, and if a python
+    date arrives as a timestamp the comparison is simply false for every
+    row - no error, no rows.  Printing it beats reasoning about it.  Ported
+    from ../TradingData/equitymaster.py, which was written for the 'type
+    version of the same question."""
+    try:
+        import pykx
+    except ImportError:
+        return f"{type(value).__name__} (pykx not installed, cannot convert)"
+    try:
+        converted = pykx.toq(value)
+    except Exception as e:                                  # noqa: BLE001
+        return (f"{type(value).__name__} -> will not convert: "
+                f"{type(e).__name__}: {e}")
+    kind = getattr(converted, "t", "?")
+    inside = ""
+    #  A bare "List (q type 0)" hid the sym bug in the sibling: the
+    #  container was right and its CONTENTS were the wrong type.
+    if kind == 0:
+        first = None
+        for get in (lambda c: c[0], lambda c: list(c)[0],
+                    lambda c: c.py()[0]):
+            try:
+                first = get(converted)
+                break
+            except Exception:                               # noqa: BLE001
+                continue
+        inside = (" of ?" if first is None else
+                  f" of {type(first).__name__} "
+                  f"(q type {getattr(first, 't', '?')})")
+    return (f"{type(value).__name__} -> {type(converted).__name__} "
+            f"(q type {kind}){inside}")
+
+
+def diagnose(conn, date, syms) -> list:
+    """Why the answer was empty, as (label, finding) pairs.
+
+    ONE PREDICATE AT A TIME.  ticks_q asks for date AND sym AND price>0 AND
+    size>0; an empty result could be any of them.  Removing them one at a
+    time says which, and a sample of the syms qatt actually holds on that
+    date says what shape it wants when the answer is the sym.
+
+    Every query here is capped with select[n], so this is safe to run
+    against a tick table."""
+    out = [("date sent as", q_type_of(date)),
+           ("syms sent as", q_type_of(list(syms)))]
+
+    def ask(label, query, *args):
+        try:
+            return _py(conn(query, *args))
+        except Exception as e:                              # noqa: BLE001
+            out.append((label, f"the query RAISED: {e}"))
+            return None
+
+    on_date = ask("rows on that date", ANY_ON_DATE_Q, date)
+    if on_date is None:
+        return out
+    if not on_date:
+        out.append(("rows on that date", "NONE - qatt has nothing at all "
+                    "for this date, so the date predicate is what is "
+                    "empty, not the syms"))
+        return out
+    out.append(("rows on that date", "yes, so the date matches"))
+
+    try:
+        sample = [text(r.get("sym")) for r in _rows(conn(SAMPLE_SYMS_Q, date))]
+    except Exception as e:                                  # noqa: BLE001
+        sample = []
+        out.append(("syms qatt holds there", f"the query RAISED: {e}"))
+    if sample:
+        out.append(("syms qatt holds there", ", ".join(sample[:5])))
+
+    matched = ask("those syms on that date", ANY_SYM_Q, date, list(syms))
+    if matched is not None:
+        out.append(("those syms on that date",
+                    "yes, so the sym matches and price>0/size>0 is what "
+                    "emptied it" if matched else
+                    "NONE - the sym predicate is what is empty.  Compare "
+                    "the shape asked for with the sample above"))
+    return out
+
+
 def connect(host: str, port: int):
     try:
         import pykx
@@ -490,6 +587,55 @@ def self_test() -> int:
         got = "schema" if "not be a q date column" in str(e) else str(e)
     check("both failing says SCHEMA, and names the probe that settles it",
           got, "schema")
+
+    print("\nnarrowing an empty answer")
+
+    class Narrow:
+        """A qatt that answers each diagnostic query differently."""
+
+        def __init__(self, on_date, matched, sample=None):
+            self.on_date, self.matched = on_date, matched
+            self.sample = sample or []
+
+        def __call__(self, q, *args):
+            if q == ANY_ON_DATE_Q:
+                return self.on_date
+            if q == ANY_SYM_Q:
+                return self.matched
+            if q == SAMPLE_SYMS_Q:
+                return [{"sym": x} for x in self.sample]
+            raise AssertionError(f"unexpected query {q}")
+
+    day = dt.date(2026, 9, 4)
+
+    found = dict(diagnose(Narrow(0, 0), day, ["7203.JP"]))
+    check("an empty partition blames the date, and stops there",
+          "NONE" in found["rows on that date"], True)
+    check("and does not go on to accuse the syms",
+          "those syms on that date" in found, False)
+
+    found = dict(diagnose(Narrow(1, 0, ["7203.T", "6758.T"]),
+                          day, ["7203.JP"]))
+    check("a populated partition clears the date",
+          found["rows on that date"], "yes, so the date matches")
+    check("no sym match blames the sym",
+          "NONE" in found["those syms on that date"], True)
+    check("and shows what shape qatt actually uses, which is the answer",
+          found["syms qatt holds there"], "7203.T, 6758.T")
+
+    found = dict(diagnose(Narrow(1, 1, ["7203.JP"]), day, ["7203.JP"]))
+    check("a sym that matches unfiltered leaves only price>0/size>0",
+          "price>0" in found["those syms on that date"], True)
+
+    class Raises:
+        def __call__(self, q, *args):
+            raise RuntimeError("type")
+
+    found = dict(diagnose(Raises(), day, ["7203.JP"]))
+    check("a query that raises is reported, not swallowed",
+          "RAISED" in found["rows on that date"], True)
+    check("and the q types are reported first, so they survive a raise",
+          "date sent as" in found and "syms sent as" in found, True)
 
     print("\ntext out of kdb")
     check("a symbol", text("7203.JP"), "7203.JP")
