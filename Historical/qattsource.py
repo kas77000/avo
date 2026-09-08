@@ -67,16 +67,31 @@ MASTER_FIELDS = ("sym", "EQY_PRIM_EXCH_SHRT", "COMPOSITE_EXCH_CODE",
 
 PARTITIONS_Q = "{exec distinct date from qatt}"
 
-MAXDATE_Q = "{[d] exec max date from equity_master where date<=d}"
+#  TWO WAYS TO ASK FOR THE PARTITION, because the type of equity_master's
+#  `date` column is NOT established and a LimitUpDown run on 2026-09-04 died
+#  on 'type asking the first way.  See ../LimitUpDown/v2/kdbclose.py.
+#
+#    client   the bound is a python date, converted by pykx on the way out
+#    server   the bound is computed IN q from .z.D, so no date crosses the
+#             wire at all - only an integer, which cannot be mis-converted
+MAXDATE_CLIENT_Q = "{[d] exec max date from equity_master where date<=d}"
+MAXDATE_SERVER_Q = ("{[n] exec max date from equity_master "
+                    "where date<=.z.D-n}")
 
-#  `$s casts the python list of strings to the symbol vector the column is.
+#  NO `$ CAST ON THE SYM LIST.  This module used to carry one, with a comment
+#  claiming it made a symbol vector out of a list of strings.  It does not:
+#  pykx already sends symbols, and `$ applied to a symbol is a type error.
+#  LimitUpDown paid for that live on 2026-09-04 against this same server -
+#  see the ledger in ../LimitUpDown/v2/kdbclose.py - and TradingData's
+#  ../TradingData/equitymaster.py carries the same plain form.  The syms go
+#  in as they arrive.
 MASTER_BPIPE_Q = (
     "{[d;s] select sym_bpipe," + ",".join(MASTER_FIELDS) +
-    " from equity_master where date=d, sym_bpipe in `$s}")
+    " from equity_master where date=d, sym_bpipe in s}")
 
 MASTER_MBPIPE_Q = (
     "{[d;s] select sym_mbpipe," + ",".join(MASTER_FIELDS) +
-    " from equity_master where date=d, sym_mbpipe in `$s}")
+    " from equity_master where date=d, sym_mbpipe in s}")
 
 #  The third pass, and the one China needs.  A Shanghai line is `600000 C1`
 #  in the crosscode, so sym_bpipe would be `600000.C1` - but equity_master
@@ -85,7 +100,7 @@ MASTER_MBPIPE_Q = (
 #  first two passes cannot.
 MASTER_SYM_Q = (
     "{[d;s] select " + ",".join(MASTER_FIELDS) +
-    " from equity_master where date=d, sym in `$s}")
+    " from equity_master where date=d, sym in s}")
 
 
 def ticks_q(time_field: str = None) -> str:
@@ -96,14 +111,14 @@ def ticks_q(time_field: str = None) -> str:
     job does not use."""
     return ("{[d;s] select sym," + (time_field or TIME_FIELD) + "," +
             ",".join(TICK_FIELDS) +
-            " from qatt where date=d, sym in `$s, price>0, size>0}")
+            " from qatt where date=d, sym in s, price>0, size>0}")
 
 
 def probe_q() -> str:
     """Every time column at once, for one name on one day."""
     return ("{[d;s] select " + ",".join(TIME_FIELDS) + "," +
             ",".join(TICK_FIELDS) +
-            " from qatt where date=d, sym=`$s, price>0, size>0}")
+            " from qatt where date=d, sym=s, price>0, size>0}")
 
 
 def connect(host: str, port: int):
@@ -229,14 +244,42 @@ def _as_date(value):
     return None
 
 
-def resolve_master_date(conn, requested):
-    """The most recent equity_master date on or before the one asked for."""
-    got = _as_date(conn(MAXDATE_Q, requested))
-    if got is None:
-        raise SystemExit(
-            f"equity_master has no rows on or before {requested}.  "
-            "Check the server and the date.")
-    return got
+def resolve_master_date(conn, requested, days_back=1, log=None):
+    """The most recent equity_master date on or before the one asked for.
+
+    BOTH WAYS OF ASKING ARE TRIED.  Sending the bound as a python date is
+    the obvious way and it is the way that died on 'type in LimitUpDown on
+    2026-09-04; computing the bound in q from .z.D sends an integer, which
+    cannot be mis-converted.  If both fail, `date` is not a date column and
+    no client-side change will help - which is what the error says."""
+    say = log or (lambda line: None)
+    errors = []
+    attempts = ((f"client date {requested}", MAXDATE_CLIENT_Q, requested),
+                (f"server .z.D-{days_back}", MAXDATE_SERVER_Q,
+                 int(days_back)))
+    for how, query, arg in attempts:
+        try:
+            got = _as_date(conn(query, arg))
+        except Exception as e:
+            errors.append(f"{how}: {str(e).splitlines()[0]}")
+            continue
+        if got is None:
+            errors.append(f"{how}: no partition on or before the bound")
+            say(f"      {how}: null - no partition on or before the bound")
+            continue
+        say(f"      {how}: got {got}")
+        return got
+
+    NL = chr(10)
+    raise SystemExit(NL.join(
+        [f"equity_master has no usable date on or before {requested}."]
+        + ["    " + e for e in errors]
+        + ["  BOTH ways of asking failed, so this is most likely the SCHEMA",
+           "  rather than the client: `date` may not be a q date column at",
+           "  all.  Run",
+           "      python ../LimitUpDown/other/em_probe.py "
+           "--server HOST:PORT --meta",
+           "  and check what type `date` actually is."]))
 
 
 def _rows(result):
@@ -348,12 +391,54 @@ def self_test() -> int:
           "whole reason",
           "price>0, size>0" in ticks_q(), True)
     check("it constrains on the partition", "date=d" in ticks_q(), True)
-    check("and casts the sym list, because sym is a symbol column",
-          "sym in `$s" in ticks_q(), True)
+    check("it does NOT cast the sym list - pykx sends symbols already, "
+          "and `$ on a symbol is the 'type LimitUpDown paid for",
+          "sym in s" in ticks_q(), True)
+    check("and no query anywhere still carries that cast",
+          [q for q in (MASTER_BPIPE_Q, MASTER_MBPIPE_Q, MASTER_SYM_Q,
+                       ticks_q(), probe_q()) if "`$" in q], [])
     check("the probe asks for all five time columns at once",
           all(f in probe_q() for f in TIME_FIELDS), True)
     check("equity_master is asked for the four cross-references",
           all(f in MASTER_BPIPE_Q for f in MASTER_FIELDS), True)
+
+    print("\nresolving the equity_master date, both ways")
+
+    class FakeConn:
+        """Answers by query text, so a test can fail one way and not the
+        other - which is the whole point of there being two."""
+        def __init__(self, answers):
+            self.answers, self.asked = answers, []
+        def __call__(self, query, *args):
+            self.asked.append(query)
+            got = self.answers.get(query)
+            if isinstance(got, Exception):
+                raise got
+            return got
+
+    day = dt.date(2026, 9, 4)
+    c = FakeConn({MAXDATE_CLIENT_Q: day})
+    check("the client form answers, and is asked first",
+          (resolve_master_date(c, day), len(c.asked)), (day, 1))
+
+    c = FakeConn({MAXDATE_CLIENT_Q: RuntimeError("type"),
+                  MAXDATE_SERVER_Q: day})
+    check("a 'type on the client form falls through to the server form",
+          resolve_master_date(c, day), day)
+
+    c = FakeConn({MAXDATE_CLIENT_Q: None, MAXDATE_SERVER_Q: day})
+    check("so does a null answer, which is not an error but is not a date",
+          resolve_master_date(c, day), day)
+
+    c = FakeConn({MAXDATE_CLIENT_Q: RuntimeError("type"),
+                  MAXDATE_SERVER_Q: RuntimeError("type")})
+    try:
+        resolve_master_date(c, day)
+        got = "no exit"
+    except SystemExit as e:
+        got = "schema" if "not be a q date column" in str(e) else str(e)
+    check("both failing says SCHEMA, and names the probe that settles it",
+          got, "schema")
 
     print("\ntext out of kdb")
     check("a symbol", text("7203.JP"), "7203.JP")
