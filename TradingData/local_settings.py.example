@@ -16,6 +16,14 @@ TEMP_PATH = r"CHANGEME\TradingData.tmp.csv"
 MSCI_MAPPING_PATH = ""
 OPEN_AUCTION_OVERRIDE_PATH = ""
 HKEX_CAS_LIST_PATH = ""
+
+# The two India closing-auction lists.  A name on its own exchange's list
+# gets Segment = CAS.
+#
+# SPACE SEPARATED, with a header carrying `isin` and
+# `eligible_in_closing_auction`.  The R job reads them as CSV, which finds
+# no columns in a space file and quietly marks nothing - so a list that
+# looks fine and changes no Segment is the bug, not the file.
 INDIA_NSE_CAS_LIST_PATH = ""
 INDIA_BSE_CAS_LIST_PATH = ""
 

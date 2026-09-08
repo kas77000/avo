@@ -11,7 +11,8 @@ WHAT IS NOT FILLED, AND WHY
   MsciCountryIndex, MsciSectorCountryIndex, MsciSectorIndex,
   MsciSectorRegionIndex   need msci_mapping.csv
   OpenAggressivityPct     needs the auction override CSV
-  Segment for HKG/NSI/BSE needs the dico and CAS lists
+  Segment for HKG      needs the dico and the intraday Bloomberg call
+  Segment CAS for NSI/BSE  fills when the two India lists are supplied
 
   Segment for HK ETFs is the one genuinely unavailable field.  It comes from
   TRADING_CONDITIONS_1 via an intraday Bloomberg call at :357 and has no
@@ -56,6 +57,7 @@ import sys
 import time
 from pathlib import Path
 
+import caslist
 import columns
 import crosscode
 import equitymaster
@@ -122,7 +124,7 @@ def _measure(value, scale=1) -> str:
     return _plain(d * scale)
 
 
-def build_rows(rows, master, markets, mapping, sym_hits) -> list:
+def build_rows(rows, master, markets, mapping, sym_hits, cas=None) -> list:
     """One output dict per crosscode row.  Missing reference data leaves a
     column blank; it never becomes zero, and a zero that came back from kdb
     is treated as missing for Beta, Close and Volatility10D."""
@@ -147,11 +149,17 @@ def build_rows(rows, master, markets, mapping, sym_hits) -> list:
         #  the Sector column or the msci lookup.
         industry = columns.present(_T(rec.get("INDUSTRY_SECTOR")))
 
+        isin = _T(rec.get("ID_ISIN"))
+
         seg = columns.segment_cn(row.market, row.sec_type)
         if seg is None and row.market == "ASX-MAIN":
             seg = columns.segment_asx(row.ticker, row.sec_type)
         if seg is None:
             seg = columns.SEGMENT_DEFAULT
+        #  :580-581 runs AFTER the market rules and overwrites them, so a
+        #  name on its exchange's closing-auction list is CAS whatever the
+        #  bucket above decided.
+        seg = caslist.segment(cas, row.market, isin) or seg
 
         out = {
             "#FidessaCode": row.fidessa_code,
@@ -171,7 +179,7 @@ def build_rows(rows, master, markets, mapping, sym_hits) -> list:
                 row.market, row.sec_type, row.is_reit, markets),
             "OpenAggressivityPct": "",
             "MarketCap": _plain(market_cap),
-            "ISIN": _T(rec.get("ID_ISIN")),
+            "ISIN": isin,
             "SubscribeFeedAtStartup": "FALSE",    # :599, always FALSE
         }
         out.update(msci.resolve(mapping, row.market, "", industry))
@@ -436,7 +444,7 @@ def say(line=""):
 
 
 def run(crosscode_path, server, output_path, temp_path,
-        mapping_path="", date=None) -> int:
+        mapping_path="", date=None, nse_cas_path="", bse_cas_path="") -> int:
     started = time.time()
 
     def step(label):
@@ -452,6 +460,14 @@ def run(crosscode_path, server, output_path, temp_path,
     say(f"  {len(markets)} markets configured")
     mapping = msci.load(mapping_path) if mapping_path else None
     say("  msci mapping " + ("loaded" if mapping else "not supplied"))
+    cas = caslist.load_india(nse_cas_path, bse_cas_path)
+    for market, path in ((caslist.NSE_MARKET, nse_cas_path),
+                         (caslist.BSE_MARKET, bse_cas_path)):
+        if not path:
+            say(f"  {market} cas list not supplied")
+        else:
+            say(f"  {market} cas list {len(cas.get(market, ())):6d} isins  "
+                f"{path}")
 
     host, _, port = server.partition(":")
     step(f"connecting to equity_master at {server}")
@@ -473,7 +489,7 @@ def run(crosscode_path, server, output_path, temp_path,
 
     step("building rows")
     hits = {}
-    out = build_rows(rows, master, markets, mapping, hits)
+    out = build_rows(rows, master, markets, mapping, hits, cas)
     say(f"  {len(out)} output rows, {len(hits)} matched a sym")
 
     step("validating")
@@ -523,7 +539,9 @@ def main(argv=None) -> int:
     #  only buries it.
     try:
         rc = run(s.CROSSCODE_PATH, s.EQUITY_MASTER_SERVER, s.OUTPUT_PATH,
-                 s.TEMP_PATH, getattr(s, "MSCI_MAPPING_PATH", ""), date)
+                 s.TEMP_PATH, getattr(s, "MSCI_MAPPING_PATH", ""), date,
+                 getattr(s, "INDIA_NSE_CAS_LIST_PATH", ""),
+                 getattr(s, "INDIA_BSE_CAS_LIST_PATH", ""))
     except equitymaster.KdbError as e:
         say(f"\n  FAILED: {e}")
         return 1
@@ -607,6 +625,38 @@ def self_test() -> int:
     check("and everything from kdb is blank, not zero",
           [r[c] for c in ("Close", "Beta", "MarketCap", "ISIN")],
           ["", "", "", ""])
+
+    print("\nindia, and its closing-auction list")
+    nse = crosscode.Row(
+        fidessa_code="RELIANCE.IN", ric="RELI.NS", bbg="RELIANCE IN",
+        ticker="RELIANCE", bbg_ext="IN", sec_type="Equity",
+        bbg_sec_type="Equity", market="NSI-MAIN", currency="INR",
+        is_reit=False)
+    bse = crosscode.Row(
+        fidessa_code="RELIANCE.IB", ric="RELI.BO", bbg="RELIANCE IB",
+        ticker="RELIANCE", bbg_ext="IB", sec_type="Equity",
+        bbg_sec_type="Equity", market="BSE-MAIN", currency="INR",
+        is_reit=False)
+    em = {"RELIANCE.IN": {"ID_ISIN": "INE002A01018", "PX_LAST": 1400.0},
+          "RELIANCE.IB": {"ID_ISIN": "INE002A01018", "PX_LAST": 1400.0}}
+
+    check("with no list, an Indian row takes the default segment",
+          build_rows([nse], em, M, None, {})[0]["Segment"],
+          columns.SEGMENT_DEFAULT)
+
+    cas = {caslist.NSE_MARKET: {"INE002A01018"}}
+    check("on the NSE list it is CAS, which :580 writes over whatever the "
+          "market rules chose",
+          build_rows([nse], em, M, None, {}, cas)[0]["Segment"], "CAS")
+    check("and the SAME isin on Bombay is not, because only the NSE list "
+          "was supplied",
+          build_rows([bse], em, M, None, {}, cas)[0]["Segment"],
+          columns.SEGMENT_DEFAULT)
+    check("a row equity_master has no ISIN for cannot be marked",
+          build_rows([nse], {}, M, None, {}, cas)[0]["Segment"],
+          columns.SEGMENT_DEFAULT)
+    check("and a Japanese row is untouched by any of it",
+          build_rows([row], master, M, None, {}, cas)[0]["Segment"], "A-B")
 
     print("\na row equity_master has, carrying zeros")
     zero = {"BHP.AU": dict(master["BHP.AU"], PX_LAST=0.0, EQY_BETA=0,
