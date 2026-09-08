@@ -991,6 +991,17 @@ def self_test() -> int:
               [len(a) for _, a in rdb.calls], [1])
 
     with tempfile.TemporaryDirectory() as d:
+        #  THE RDB GETS THE QATT KEY, not the crosscode code.  `7203 JT` is
+        #  what the crosscode calls it and `7203.JP` is what qatt answers
+        #  to; the conversion is universe.resolve_sym's, and the live path
+        #  reads name.sym exactly as the dated one does.
+        pl = add_today(plan([toyota], [], d, 1, {}), [toyota], today)
+        hdb, rdb = Which(), Which()
+        run(hdb, pl, {}, d, 200, False, {}, None, rdb, today)
+        check("the RDB is asked for 7203.JP, not 7203 JT",
+              [list(a[0]) for _, a in rdb.calls], [["7203.JP"]])
+
+    with tempfile.TemporaryDirectory() as d:
         #  a file already on disk for today must NOT settle it
         pl = add_today(plan([bhp], [], d, 1, {}), [bhp], today)
         Path(d, ticksfile.filename("BHP AU", today)).write_text("x")
