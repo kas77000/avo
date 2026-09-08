@@ -184,10 +184,17 @@ takes - because the consumer looks it up rather than printing it. Japan is
 therefore `Tokyo Standard Time`, not `Japan Standard Time`.
 
 Windows names several zones after one city and covers the neighbours with it,
-so Hong Kong reads `China Standard Time`, Bangkok and Jakarta both read
-`SE Asia Standard Time`, and Manila reads `Singapore Standard Time` because
-Windows has no Philippine zone. Those are right, not typos. `marketcfg.py`
-carries the full list and a check that refuses anything outside it.
+so Hong Kong reads `China Standard Time`, and Bangkok and Jakarta both read
+`SE Asia Standard Time`. Those are right, not typos.
+
+Manila reads `China Standard Time` too. That is *not* the id Windows would
+suggest - it has no Philippine zone, so the obvious choice would be
+`Singapore Standard Time` - but a real `BEL PM` file says otherwise, and the
+file beats the reasoning. Same UTC+8, same absence of DST, so the clock is
+identical either way.
+
+`marketcfg.py` carries the full list and a check that refuses anything
+outside it.
 
 ---
 

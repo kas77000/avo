@@ -9,7 +9,7 @@ KOE-MAIN,KS,FALSE,TRUE,Korea Standard Time
 KSC-MAIN,KS,FALSE,TRUE,Korea Standard Time
 NSI-MAIN,IN,TRUE,,India Standard Time
 NZX-MAIN,NZ,FALSE,,New Zealand Standard Time
-PHS-MAIN,PM,FALSE,TRUE,Singapore Standard Time
+PHS-MAIN,PM,FALSE,TRUE,China Standard Time
 SES-MAIN,SP,FALSE,,Singapore Standard Time
 SET-MAIN,TB,FALSE,TRUE,SE Asia Standard Time
 SHA-MAIN,CH,TRUE,,China Standard Time

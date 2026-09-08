@@ -20,8 +20,14 @@ it, so these are correct and only look wrong:
     Jakarta    -> SE Asia Standard Time     (Bangkok, Hanoi, Jakarta)
     Bangkok    -> SE Asia Standard Time     the same one
     Kuala L.   -> Singapore Standard Time   (Kuala Lumpur, Singapore)
-    Manila     -> Singapore Standard Time   Windows has no Philippine zone
     Taipei     -> Taipei Standard Time      not "Taiwan"
+
+MANILA IS China Standard Time, WHICH IS NOT THE ONE WINDOWS WOULD PICK.
+Windows carries no Philippine zone, so the obvious id for it is Singapore
+Standard Time - but a real BEL PM file says China Standard Time, and the
+file on disk beats the reasoning.  Both are UTC+8 and neither keeps DST, so
+the clock is the same either way; this is about matching what the consumer
+already reads.
 
 Every id in the column was checked against Get-TimeZone -ListAvailable on
 2026-09-08 and every one resolves.  It is
@@ -146,9 +152,9 @@ def self_test() -> int:
                  - set(WINDOWS_TIME_ZONE_IDS)), [])
     check("Hong Kong is covered by Beijing's zone, which is correct and "
           "only looks wrong", M["HKG-MAIN"].time_zone, "China Standard Time")
-    check("and Manila by Kuala Lumpur's, because Windows has no Philippine "
-          "zone at all",
-          M["PHS-MAIN"].time_zone, "Singapore Standard Time")
+    check("Manila is China Standard Time, per a real BEL PM file - NOT "
+          "the Singapore zone Windows would have you pick",
+          M["PHS-MAIN"].time_zone, "China Standard Time")
     check("EVERY listed market has one - a blank writes a six-cell header "
           "and the consumer cannot tell which clock it is reading",
           sorted(k for k, v in M.items() if not v.time_zone), [])
