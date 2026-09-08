@@ -21,7 +21,8 @@ THREE SOURCES ARE UNVERIFIED and print a banner rather than being trusted
 silently:
 
   Volatility10D   equity_master.volatility may not be the 10-day figure
-                  Bloomberg's VOLATILITY_10D returns
+                  Bloomberg's VOLATILITY_10D returns.  It is a fraction and
+                  is written out times 100, as a percentage.
   MarketCap/Capi  assumes fx_last is a local->USD rate matching load_FXdatas
   Sector          equity_master has no GICS_SECTOR_NAME, so every row takes
                   the :295 fallback and differs from the R wherever GICS had
@@ -70,6 +71,10 @@ OUTPUT_COLUMNS = [
 # The columns the six-field brief names.  Their fill rates are reported.
 KEY_COLUMNS = ("Close", "Beta", "Volatility10D", "Index", "MarketCap")
 
+# equity_master stores volatility as a fraction; Volatility10D is a
+# percentage.
+VOL_SCALE = 100
+
 # The fields the R job's dead :120 top-up would have refetched.
 TOPUP_FIELDS = ("CUR_MKT_CAP", "EQY_BETA", "volatility", "INDUSTRY_SECTOR")
 
@@ -91,7 +96,7 @@ def _plain(d) -> str:
     return format(d.normalize(), "f")
 
 
-def _measure(value) -> str:
+def _measure(value, scale=1) -> str:
     """Beta, Close and Volatility10D: no value writes nothing, and zero is
     no value.
 
@@ -99,11 +104,15 @@ def _measure(value) -> str:
     job counts `== 0` alongside is.na and "" at :109-110 when it decides a
     row is missing its reference data.  A zero close, a zero beta, a zero
     volatility - none of those are measurements, so they go out blank rather
-    than as "0" and let the fill rates say how much is really there."""
+    than as "0" and let the fill rates say how much is really there.
+
+    `scale` is Volatility10D's percentage conversion.  It multiplies a value
+    that is there and leaves a value that is not alone: no value stays no
+    value, rather than becoming a scaled zero."""
     d = _D(value)
     if d is None or d == 0:
         return ""
-    return _plain(d)
+    return _plain(d * scale)
 
 
 def build_rows(rows, master, markets, mapping, sym_hits) -> list:
@@ -146,7 +155,9 @@ def build_rows(rows, master, markets, mapping, sym_hits) -> list:
             "Segment": seg,
             "Beta": _measure(rec.get("EQY_BETA")),
             "Close": _measure(rec.get("PX_LAST")),
-            "Volatility10D": _measure(rec.get("volatility")),
+            #  equity_master holds volatility as a fraction, the CSV wants
+            #  it as a percentage: 0.21 goes out as 21.
+            "Volatility10D": _measure(rec.get("volatility"), VOL_SCALE),
             "NoShortSell": marketcfg.no_short_sell(row.market, markets),
             "RespectShortSellPrice": marketcfg.respect_short_sell(
                 row.market, row.sec_type, row.is_reit, markets),
@@ -251,8 +262,8 @@ def report(out_rows, rows, excluded, sym_hits, date_used, date_asked,
               "top-up if it read `> 0`")
 
     print("\n  ! UNVERIFIED SOURCES - confirm before cutover")
-    print("    Volatility10D  from equity_master.volatility; the definition "
-          "is NOT confirmed to be Bloomberg's VOLATILITY_10D")
+    print("    Volatility10D  from equity_master.volatility x100; the "
+          "definition is NOT confirmed to be Bloomberg's VOLATILITY_10D")
     print("    MarketCap/Capi CUR_MKT_CAP * fx_last; fx_last's direction is "
           "assumed to be local->USD")
     print("    Sector         equity_master has no GICS_SECTOR_NAME, so "
@@ -517,7 +528,8 @@ def self_test() -> int:
     print("\nthe six fields that matter")
     check("Close is PX_LAST", r["Close"], "40.5")
     check("Beta is EQY_BETA, not the lowercase beta", r["Beta"], "0.9")
-    check("Volatility10D is the volatility column", r["Volatility10D"], "0.21")
+    check("Volatility10D is the volatility column, as a percentage",
+          r["Volatility10D"], "21")
     check("Index is REL_INDEX", r["Index"], "AS51")
     check("MarketCap is CUR_MKT_CAP times fx_last",
           r["MarketCap"], "1300000")
@@ -555,7 +567,7 @@ def self_test() -> int:
     r = build_rows([row], zero, M, None, {})[0]
     check("a zero close is no close, so it is blank not \"0\"", r["Close"], "")
     check("the same for beta", r["Beta"], "")
-    check("and for volatility, however it is spelled",
+    check("and for volatility, which a x100 would only have kept at zero",
           r["Volatility10D"], "")
     check("a real negative beta is still a value",
           build_rows([row], {"BHP.AU": dict(master["BHP.AU"],
