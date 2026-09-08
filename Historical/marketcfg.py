@@ -7,7 +7,13 @@ three of its columns - the Fidessa market, the Bloomberg composite and the
 timezone label - and ignores `NoShortSell` and `RespectShortSellPrice`
 entirely.
 
-`TimeZone` is this job's own addition and ships BLANK on every row.  It is
+`TimeZone` is this job's own addition, and it is the STANDARD NAME of the
+market's clock - "Japan Standard Time", "AUS Eastern Standard Time" - not a
+Windows timezone id.  The two agree for Australia and Korea and part ways
+for Hong Kong, Jakarta, Kuala Lumpur, Manila, Bangkok and Taipei, where
+Windows names the neighbour it shares an offset with.  A consumer that looks
+the string up rather than printing it wants the ids instead, and this column
+is where that would change.  It is
 the seventh header cell of the output CSV, naming the clock column one is
 in - and what that clock is cannot be known until qatt_time_probe.py has
 run.  Filling it in before then would be writing down a guess.
@@ -62,6 +68,15 @@ def composite(market: str, markets) -> str:
     return m.bbg_composite if m else ""
 
 
+def tz_of(markets, market: str) -> str:
+    """The timezone label for a Fidessa market, or "" if unlisted.
+
+    The mirror of composite(): the crosscode carries venues this file has
+    never listed, and the answer for those is no opinion."""
+    m = markets.get((market or "").strip())
+    return m.time_zone if m else ""
+
+
 def self_test() -> int:
     ok = True
 
@@ -89,6 +104,24 @@ def self_test() -> int:
     check("Australia's primary and composite are the same letters, which is "
           "why AU names hide this whole problem",
           composite("ASX-MAIN", M), "AU")
+
+    print("\nthe timezone label, which is the seventh header cell")
+    check("Tokyo is the standard name, not the Windows id Tokyo Standard "
+          "Time", M["TYO-MAIN"].time_zone, "Japan Standard Time")
+    check("Sydney matches the one real file on record",
+          M["ASX-MAIN"].time_zone, "AUS Eastern Standard Time")
+    check("EVERY listed market has one - a blank writes a six-cell header "
+          "and the consumer cannot tell which clock it is reading",
+          sorted(k for k, v in M.items() if not v.time_zone), [])
+    check("the boards that share a clock say the same thing",
+          {M[k].time_zone for k in ("SHA-MAIN", "SHH-MAIN", "SHZ-MAIN",
+                                    "SSC-MAIN", "SZA-MAIN", "SZC-MAIN")},
+          {"China Standard Time"})
+    check("and Korea's two boards do too",
+          M["KSC-MAIN"].time_zone == M["KOE-MAIN"].time_zone, True)
+    check("a market this file does not list has no label to give, which is "
+          "no opinion rather than an error",
+          tz_of(M, "JNX-MAIN"), "")
 
     print("\nmarkets this file does not list")
     check("a Japanese alternative venue is not in here, and that is not an "

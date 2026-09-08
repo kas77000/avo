@@ -177,9 +177,15 @@ columns and a seventh *header* cell naming the timezone:
 09:31:33,0.105,1000,T,T,XASX
 ```
 
-The label comes from `config/markets.csv`'s `TimeZone` column and **ships
-blank**, writing a six-cell header, because what that clock is is exactly what
-the probe has yet to establish.
+The label comes from `config/markets.csv`'s `TimeZone` column, which is
+filled in for all 21 markets, so the header has seven cells. The value is the
+**standard name** of the market's clock - `Japan Standard Time` - not a
+Windows timezone id, which for Japan would be `Tokyo Standard Time`.
+
+That distinction only matters if the volume-curve process *looks the string
+up* rather than printing it. If it does, six of them - Hong Kong, Jakarta,
+Kuala Lumpur, Manila, Bangkok, Taipei - will not resolve, and the column is
+the one place to change.
 
 ---
 
@@ -248,7 +254,8 @@ commentary but **never** a warning. `--log FILE` appends a timestamped record.
 
 1. **`TIME_FIELD`** — the one that yields *wrong* data rather than missing
    data. Settle it with the probe before any real run.
-2. **The `TimeZone` labels** are blank until 1 is answered.
+2. **The `TimeZone` labels** say what clock the times are in. They do not
+   say the times are *correct*; that is 1.
 3. **qatt holds only subscribed names.** A crosscode name it never carried
    gets a miss-cache line, not a file. Expect a non-zero `no prints` count on
    the first run and check it is not most of the universe.

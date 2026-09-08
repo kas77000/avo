@@ -155,9 +155,10 @@ because the name says so, **not because it has been checked**.
 Pick a liquid name, and one *outside* Hong Kong: a HK name cannot separate
 the plant's clock from the exchange's, because there they are the same clock.
 
-`config/markets.csv` carries a `TimeZone` column for the seventh header cell.
-It ships blank on every row and writes a six-cell header until filled in,
-because what that clock is is exactly what the probe has yet to establish.
+`config/markets.csv` carries a `TimeZone` column for the seventh header cell,
+filled in for all 21 markets - `TYO-MAIN` is `Japan Standard Time`. It is the
+standard name of the clock, not a Windows timezone id; see `marketcfg.py` for
+the six markets where those differ.
 
 ## Running
 
