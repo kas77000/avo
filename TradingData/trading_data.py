@@ -206,6 +206,29 @@ def topup_candidates(rows, master, markets) -> int:
     return n
 
 
+def fx_seen(master, sym_hits) -> list:
+    """(currency, rate, rows) for every CRNCY the matched rows carry.
+
+    THIS IS WHAT SETTLES WHETHER fx_last CONVERTS TO USD OR TO EUR, and it
+    needs no reference rates to read: a currency quoted against itself is 1
+    and nothing else is, so the base is whichever row shows 1.
+
+    It answers the direction too.  fx_last is used as a local->base rate, so
+    a currency worth less than the base has to come back below 1: AUD at
+    0.65 is local->USD, AUD at 1.54 is USD->local and the multiplication in
+    build_rows is inverted."""
+    seen = {}
+    for sym in sym_hits.values():
+        rec = master.get(sym, {})
+        crncy = _T(rec.get("CRNCY"))
+        rate = _D(rec.get("fx_last"))
+        if not crncy or rate is None:
+            continue
+        key = (crncy, _plain(rate))
+        seen[key] = seen.get(key, 0) + 1
+    return sorted((c, r, n) for (c, r), n in seen.items())
+
+
 def validate(out_rows) -> list:
     problems = []
     if not out_rows:
@@ -228,7 +251,7 @@ def write_csv(path, out_rows):
 
 
 def report(out_rows, rows, excluded, sym_hits, date_used, date_asked,
-           mapping, markets, topup=None):
+           mapping, markets, topup=None, master=None):
     print(f"\n  crosscode rows      {len(rows)}")
     for e in excluded:
         print(f"  excluded            {len(e.rows):6d}  {e.reason}")
@@ -260,6 +283,21 @@ def report(out_rows, rows, excluded, sym_hits, date_used, date_asked,
         filled = sum(1 for r in out_rows if r[c])
         print(f"    {c:<22} {filled:6d} / {len(out_rows)}  "
               f"{100 * filled // n:3d}%")
+
+    fx = fx_seen(master or {}, sym_hits)
+    if fx:
+        print("\n  fx_last by currency - the base is whichever one is 1")
+        for crncy, rate, n in fx[:25]:
+            print(f"    {crncy:<6} {rate:<18} {n:6d} rows")
+        base = sorted({c for c, r, _ in fx if _D(r) == 1})
+        if base:
+            print(f"    -> fx_last converts to {', '.join(base)}, so "
+                  f"MarketCap is in {base[0]}")
+        else:
+            print("    -> nothing is quoted at 1, so the base is not in this "
+                  "universe; read it off a rate above")
+            print("       (a currency worth less than the base is BELOW 1; "
+                  "above 1 means the rate is inverted)")
 
     if mapping is None:
         print("\n  ! msci_mapping.csv not supplied - the four Msci* columns "
@@ -374,7 +412,7 @@ def demo() -> int:
         write_csv(p, out)
         print("\n" + p.read_text(encoding="utf-8"))
         report(out, rows, [], hits, when, when, None, markets,
-               topup_candidates(rows, master, markets))
+               topup_candidates(rows, master, markets), master)
 
     if hits.get("005930.KR") == "005930.KS":
         print("\n  note: Korea matched on the composite (KS), not the "
@@ -441,7 +479,7 @@ def run(crosscode_path, server, output_path, temp_path,
     step("validating")
     problems = validate(out)
     report(out, rows, excluded, hits, used, asked, mapping, markets,
-           topup_candidates(rows, master, markets))
+           topup_candidates(rows, master, markets), master)
 
     if problems:
         for problem in problems:
@@ -582,6 +620,19 @@ def self_test() -> int:
           build_rows([row], {"BHP.AU": dict(master["BHP.AU"],
                                             EQY_BETA=-0.4)},
                      M, None, {})[0]["Beta"], "-0.4")
+
+    print("\nwhich currency fx_last converts to")
+    fxm = {"A.AU": {"CRNCY": "AUD", "fx_last": 0.65},
+           "B.US": {"CRNCY": "USD", "fx_last": 1.0},
+           "C.AU": {"CRNCY": "AUD", "fx_last": 0.65}}
+    seen = fx_seen(fxm, {"a": "A.AU", "b": "B.US", "c": "C.AU"})
+    check("one line per currency, with the row count",
+          seen, [("AUD", "0.65", 2), ("USD", "1", 1)])
+    check("and the base is the one quoted at 1",
+          [c for c, r, _ in seen if _D(r) == 1], ["USD"])
+    check("a row with no CRNCY or no rate is not a currency",
+          fx_seen({"X": {"fx_last": 0.5}, "Y": {"CRNCY": "JPY"}},
+                  {"x": "X", "y": "Y"}), [])
 
     print("\nsorting, per :606")
     rows = [
