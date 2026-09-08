@@ -156,9 +156,9 @@ Pick a liquid name, and one *outside* Hong Kong: a HK name cannot separate
 the plant's clock from the exchange's, because there they are the same clock.
 
 `config/markets.csv` carries a `TimeZone` column for the seventh header cell,
-filled in for all 21 markets - `TYO-MAIN` is `Japan Standard Time`. It is the
-standard name of the clock, not a Windows timezone id; see `marketcfg.py` for
-the six markets where those differ.
+filled in for all 21 markets - `TYO-MAIN` is `Tokyo Standard Time`. The values
+are **Windows timezone ids**, so the consumer can look them up; several are
+named after one city and cover its neighbours. See `marketcfg.py`.
 
 ## Running
 

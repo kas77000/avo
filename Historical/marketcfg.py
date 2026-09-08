@@ -7,13 +7,24 @@ three of its columns - the Fidessa market, the Bloomberg composite and the
 timezone label - and ignores `NoShortSell` and `RespectShortSellPrice`
 entirely.
 
-`TimeZone` is this job's own addition, and it is the STANDARD NAME of the
-market's clock - "Japan Standard Time", "AUS Eastern Standard Time" - not a
-Windows timezone id.  The two agree for Australia and Korea and part ways
-for Hong Kong, Jakarta, Kuala Lumpur, Manila, Bangkok and Taipei, where
-Windows names the neighbour it shares an offset with.  A consumer that looks
-the string up rather than printing it wants the ids instead, and this column
-is where that would change.  It is
+`TimeZone` is this job's own addition, and it is a WINDOWS TIMEZONE ID -
+the string TimeZoneInfo.FindSystemTimeZoneById takes - because the consumer
+looks the label up rather than printing it.  That is why Japan reads "Tokyo
+Standard Time" and not "Japan Standard Time", which is the natural name and
+is not a Windows id at all.
+
+Windows names several zones after ONE city and covers its neighbours with
+it, so these are correct and only look wrong:
+
+    Hong Kong  -> China Standard Time       (Beijing, Chongqing, Hong Kong)
+    Jakarta    -> SE Asia Standard Time     (Bangkok, Hanoi, Jakarta)
+    Bangkok    -> SE Asia Standard Time     the same one
+    Kuala L.   -> Singapore Standard Time   (Kuala Lumpur, Singapore)
+    Manila     -> Singapore Standard Time   Windows has no Philippine zone
+    Taipei     -> Taipei Standard Time      not "Taiwan"
+
+Every id in the column was checked against Get-TimeZone -ListAvailable on
+2026-09-08 and every one resolves.  It is
 the seventh header cell of the output CSV, naming the clock column one is
 in - and what that clock is cannot be known until qatt_time_probe.py has
 run.  Filling it in before then would be writing down a guess.
@@ -68,6 +79,23 @@ def composite(market: str, markets) -> str:
     return m.bbg_composite if m else ""
 
 
+#  Every Windows id this config uses, checked against
+#  `Get-TimeZone -ListAvailable` on 2026-09-08.  The point of the list is
+#  that a typo cannot pass: a misspelt id is not a timezone anywhere, and
+#  the consumer would find that out long after the file was written.
+WINDOWS_TIME_ZONE_IDS = (
+    "AUS Eastern Standard Time",      # Canberra, Melbourne, Sydney
+    "China Standard Time",            # Beijing, Chongqing, Hong Kong
+    "India Standard Time",            # Chennai, Kolkata, Mumbai, New Delhi
+    "Korea Standard Time",            # Seoul
+    "New Zealand Standard Time",      # Auckland, Wellington
+    "SE Asia Standard Time",          # Bangkok, Hanoi, Jakarta
+    "Singapore Standard Time",        # Kuala Lumpur, Singapore, and Manila
+    "Taipei Standard Time",           # Taipei
+    "Tokyo Standard Time",            # Osaka, Sapporo, Tokyo
+)
+
+
 def tz_of(markets, market: str) -> str:
     """The timezone label for a Fidessa market, or "" if unlisted.
 
@@ -106,10 +134,21 @@ def self_test() -> int:
           composite("ASX-MAIN", M), "AU")
 
     print("\nthe timezone label, which is the seventh header cell")
-    check("Tokyo is the standard name, not the Windows id Tokyo Standard "
-          "Time", M["TYO-MAIN"].time_zone, "Japan Standard Time")
-    check("Sydney matches the one real file on record",
+    check("Tokyo is the WINDOWS id, not the natural name Japan Standard "
+          "Time, because the consumer looks it up",
+          M["TYO-MAIN"].time_zone, "Tokyo Standard Time")
+    check("Sydney matches the one real file on record, and is a Windows id "
+          "either way",
           M["ASX-MAIN"].time_zone, "AUS Eastern Standard Time")
+    check("every label is a Windows id - a typo like Toyko would resolve to "
+          "nothing at the far end, silently",
+          sorted({v.time_zone for v in M.values()}
+                 - set(WINDOWS_TIME_ZONE_IDS)), [])
+    check("Hong Kong is covered by Beijing's zone, which is correct and "
+          "only looks wrong", M["HKG-MAIN"].time_zone, "China Standard Time")
+    check("and Manila by Kuala Lumpur's, because Windows has no Philippine "
+          "zone at all",
+          M["PHS-MAIN"].time_zone, "Singapore Standard Time")
     check("EVERY listed market has one - a blank writes a six-cell header "
           "and the consumer cannot tell which clock it is reading",
           sorted(k for k, v in M.items() if not v.time_zone), [])

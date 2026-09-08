@@ -1,22 +1,22 @@
 FidessaMarket,BBGComposite,NoShortSell,RespectShortSellPrice,TimeZone
 ASX-MAIN,AU,FALSE,,AUS Eastern Standard Time
 BSE-MAIN,IB,TRUE,,India Standard Time
-HKG-GEM,HK,FALSE,TRUE,Hong Kong Time
-HKG-MAIN,HK,FALSE,TRUE,Hong Kong Time
-JKT-MAIN,IJ,FALSE,TRUE,Western Indonesia Time
-KLS-MAIN,MK,FALSE,TRUE,Malaysia Time
+HKG-GEM,HK,FALSE,TRUE,China Standard Time
+HKG-MAIN,HK,FALSE,TRUE,China Standard Time
+JKT-MAIN,IJ,FALSE,TRUE,SE Asia Standard Time
+KLS-MAIN,MK,FALSE,TRUE,Singapore Standard Time
 KOE-MAIN,KS,FALSE,TRUE,Korea Standard Time
 KSC-MAIN,KS,FALSE,TRUE,Korea Standard Time
 NSI-MAIN,IN,TRUE,,India Standard Time
 NZX-MAIN,NZ,FALSE,,New Zealand Standard Time
-PHS-MAIN,PM,FALSE,TRUE,Philippine Standard Time
+PHS-MAIN,PM,FALSE,TRUE,Singapore Standard Time
 SES-MAIN,SP,FALSE,,Singapore Standard Time
-SET-MAIN,TB,FALSE,TRUE,Indochina Time
+SET-MAIN,TB,FALSE,TRUE,SE Asia Standard Time
 SHA-MAIN,CH,TRUE,,China Standard Time
 SHH-MAIN,CH,TRUE,,China Standard Time
 SHZ-MAIN,CH,TRUE,,China Standard Time
 SSC-MAIN,CH,TRUE,,China Standard Time
 SZA-MAIN,CH,TRUE,,China Standard Time
 SZC-MAIN,CH,TRUE,,China Standard Time
-TAI-MAIN,TT,FALSE,,Taiwan Standard Time
-TYO-MAIN,JP,FALSE,TRUE,Japan Standard Time
+TAI-MAIN,TT,FALSE,,Taipei Standard Time
+TYO-MAIN,JP,FALSE,TRUE,Tokyo Standard Time

@@ -178,14 +178,16 @@ columns and a seventh *header* cell naming the timezone:
 ```
 
 The label comes from `config/markets.csv`'s `TimeZone` column, which is
-filled in for all 21 markets, so the header has seven cells. The value is the
-**standard name** of the market's clock - `Japan Standard Time` - not a
-Windows timezone id, which for Japan would be `Tokyo Standard Time`.
+filled in for all 21 markets, so the header has seven cells. The value is a
+**Windows timezone id** - the string `TimeZoneInfo.FindSystemTimeZoneById`
+takes - because the consumer looks it up rather than printing it. Japan is
+therefore `Tokyo Standard Time`, not `Japan Standard Time`.
 
-That distinction only matters if the volume-curve process *looks the string
-up* rather than printing it. If it does, six of them - Hong Kong, Jakarta,
-Kuala Lumpur, Manila, Bangkok, Taipei - will not resolve, and the column is
-the one place to change.
+Windows names several zones after one city and covers the neighbours with it,
+so Hong Kong reads `China Standard Time`, Bangkok and Jakarta both read
+`SE Asia Standard Time`, and Manila reads `Singapore Standard Time` because
+Windows has no Philippine zone. Those are right, not typos. `marketcfg.py`
+carries the full list and a check that refuses anything outside it.
 
 ---
 
