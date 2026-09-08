@@ -69,15 +69,28 @@ TICK_FIELDS = ("price", "size", "cond", "ex")
 MASTER_FIELDS = ("sym", "EQY_PRIM_EXCH_SHRT", "COMPOSITE_EXCH_CODE",
                  "ID_MIC_PRIM_EXCH")
 
-#  AN EXPRESSION, NOT A LAMBDA, and it is the only query here sent with no
-#  arguments.  conn("{...}") EVALUATES the string, and a lambda literal
-#  evaluates to the unapplied function - q never runs it, and there is
-#  nothing to apply it to.  The dates that came back were the characters of
-#  the function's own text, every one of which _as_date discards, so
-#  partitions() returned [] and the run said "qatt holds no partitions at
-#  all" with no error anywhere.  Every other query here takes an argument,
-#  which is what made pykx apply them and why this was the only one wrong.
-PARTITIONS_Q = "exec distinct date from qatt"
+#  .Q.pv IS THE PARTITION LIST.  `exec distinct date from qatt` raised 'nyi
+#  on 2026-09-08: `distinct` is not one of the aggregations kdb can
+#  map-reduce across partitions, so the query is refused however it is
+#  spelled.  .Q.pv is the list itself - already distinct, already sorted -
+#  and it costs nothing, because no partition has to be opened to read it.
+#
+#  It is DATABASE-WIDE, not per table.  A date the HDB holds for some other
+#  partitioned table but not for qatt is planned, comes back empty, and
+#  lands in the miss cache like any other empty day.  That is the same
+#  handling an ordinary non-trading day gets.
+#
+#  BOTH ARE EXPRESSIONS, NOT LAMBDAS, and they are the only queries here
+#  sent with no arguments.  conn("{...}") EVALUATES the string, and a lambda
+#  literal evaluates to the unapplied function - q never runs it, and there
+#  is nothing to apply it to.  This file carried "{exec distinct date from
+#  qatt}" and got the characters of the function's own text back, every one
+#  of which _as_date discards, so partitions() returned [] and the run said
+#  "qatt holds no partitions at all" with no error anywhere.
+PARTITIONS_Q = ".Q.pv"
+#  For a par.txt database, where .Q.pv is the deduplicated view and .Q.PV
+#  the raw one.  Also cheap; also a variable, not a scan.
+PARTITIONS_ALT_Q = ".Q.PV"
 
 #  TWO WAYS TO ASK FOR THE PARTITION, because the type of equity_master's
 #  `date` column is NOT established and a LimitUpDown run on 2026-09-04 died
@@ -368,10 +381,50 @@ def partitions(conn) -> list:
     sixty days behind it, and the difference between "no history" and "no
     partition" is the difference between a coverage problem and a request
     for a day that was never stored."""
-    got = _py(conn(PARTITIONS_Q))
-    if got is None:
+    errors, answered = [], False
+    for query in (PARTITIONS_Q, PARTITIONS_ALT_Q):
+        try:
+            got = _py(conn(query))
+        except Exception as e:                              # noqa: BLE001
+            errors.append(f"{query}: {str(e).splitlines()[0]}")
+            continue
+        answered = True
+        dates = sorted({d for d in (_as_date(x) for x in _iter(got))
+                        if d is not None})
+        if dates:
+            return dates
+
+    #  AN EMPTY ANSWER IS NOT AN ERROR.  A server that answered and holds no
+    #  partitions is a fact the caller reports in its own words; only a
+    #  server that refused both ways is a problem this module can explain.
+    if answered:
         return []
-    return sorted({d for d in (_as_date(x) for x in got) if d is not None})
+
+    NL = chr(10)
+    raise SystemExit(NL.join(
+        ["qatt: could not list the partitions.  Neither way of asking "
+         "was answered."]
+        + ["    " + e for e in errors]
+        + ["  .Q.pv is the partition list of a partitioned HDB, and it is "
+           "read without",
+           "  opening a partition.  `exec distinct date from qatt` is NOT "
+           "the way to ask:",
+           "  distinct is not an aggregation kdb can map-reduce across "
+           "partitions, so it",
+           "  raises 'nyi however it is spelled.",
+           "  If .Q.pv itself is missing, QATT_SERVER is most likely not "
+           "the HDB - the RDB",
+           "  holds today only and has no partitions at all."]))
+
+
+def _iter(value):
+    """A q vector, a python list, or a lone atom - all iterable the same."""
+    if isinstance(value, (str, bytes, bytearray)):
+        return [value]
+    try:
+        return list(value)
+    except TypeError:
+        return [value]
 
 
 def _as_date(value):
@@ -610,11 +663,12 @@ def self_test() -> int:
           got, "schema")
 
     print("\na query sent with no arguments must not be a lambda")
-    check("the partitions query is an expression - a lambda literal would "
+    check("both partition queries are expressions - a lambda literal would "
           "come back unapplied, and its characters are not dates",
-          PARTITIONS_Q.startswith("{"), False)
-    check("and it is still the only one sent bare; every other query takes "
-          "an argument, which is what makes pykx apply it",
+          [q for q in (PARTITIONS_Q, PARTITIONS_ALT_Q)
+           if q.startswith("{")], [])
+    check("and they are the only two sent bare; every other query takes an "
+          "argument, which is what makes pykx apply it",
           [q for q in (MAXDATE_CLIENT_Q, MAXDATE_SERVER_Q, MASTER_BPIPE_Q,
                        MASTER_MBPIPE_Q, MASTER_SYM_Q, ticks_q(),
                        live_ticks_q(), probe_q(), ANY_ON_DATE_Q,
@@ -848,6 +902,33 @@ def self_test() -> int:
 
     check("an empty store is an empty list, not a crash",
           partitions(EmptyConn()), [])
+    class Refuses:
+        """.Q.pv is not defined here, and `exec distinct` is 'nyi."""
+
+        def __call__(self, q, *args):
+            raise RuntimeError("nyi")
+
+    class OnlyPV:
+        """.Q.pv missing, .Q.PV present - a par.txt database."""
+
+        def __call__(self, q, *args):
+            if q == PARTITIONS_Q:
+                raise RuntimeError("nyi")
+            return [dt.date(2026, 9, 4)]
+
+    check("the partition list is asked for as .Q.pv, not with distinct - "
+          "distinct across partitions is 'nyi and always was",
+          (PARTITIONS_Q, "distinct" in PARTITIONS_Q), (".Q.pv", False))
+    check("a par.txt database answers on .Q.PV instead, and that is tried",
+          partitions(OnlyPV()), [dt.date(2026, 9, 4)])
+    try:
+        partitions(Refuses())
+        got = "no exit"
+    except SystemExit as e:
+        got = "explained" if "not the HDB" in str(e) else str(e)
+    check("both ways refused says so, and names the likely cause, rather "
+          "than reporting an empty store", got, "explained")
+
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

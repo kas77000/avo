@@ -693,7 +693,7 @@ def demo() -> int:
         def __call__(self, q, *args):
             if "max date" in q:
                 return dt.date(2026, 9, 3)
-            if "distinct date" in q:
+            if q.startswith(".Q.p"):
                 return [dt.date(2026, 9, 1), dt.date(2026, 9, 2),
                         dt.date(2026, 9, 3)]
             #  Dispatch on the TABLE first.  The tick query also contains
