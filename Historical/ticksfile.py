@@ -141,6 +141,57 @@ def days_wanted(have: set, partitions: list, backfill: int) -> list:
     return [d for d in partitions[-n:] if d not in have]
 
 
+def migrate_flat(directory, folder_of=None, dry_run=False) -> dict:
+    """Move files written before there were folders.  Returns a tally.
+
+    A DAY ALREADY FETCHED MUST NOT BE FETCHED AGAIN, and that is the whole
+    point of this.  When every file sat loose in the store, existing_dates
+    found them; once it looks in one folder per name, the same file is
+    invisible, the day reads as untried, and the run refetches and rewrites
+    something it already had.
+
+    The filename carries the FILE code and the folder is named for the
+    CROSSCODE code - the two differ for China - so `folder_of` maps one to
+    the other.  A code it does not know keeps its own name as the folder,
+    which is right everywhere except China and is the best that can be done
+    for a name the crosscode no longer carries.
+
+    ONE PASS OVER THE ROOT, not one per name.  Only loose files are looked
+    at; anything already in a folder is left alone, and so is any file that
+    is not one of ours - the miss cache lives at the root and stays there.
+
+    A destination that already exists is NOT overwritten.  The file in the
+    folder is the one existing_dates found, so it is the one that counts,
+    and the loose copy is left behind to be looked at rather than deleted
+    silently."""
+    folder_of = folder_of or {}
+    d = Path(directory)
+    tally = {"moved": 0, "already there": 0, "unknown code": 0}
+    if not d.is_dir():
+        return tally
+    for entry in sorted(d.iterdir()):
+        if not entry.is_file():
+            continue
+        parsed = parse_filename(entry.name)
+        if not parsed:
+            continue
+        code = parsed[0]
+        if code in folder_of:
+            target = folder_of[code]
+        else:
+            target = code
+            tally["unknown code"] += 1
+        dest = d / folder(target) / entry.name
+        if dest.exists():
+            tally["already there"] += 1
+            continue
+        tally["moved"] += 1
+        if not dry_run:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            entry.replace(dest)
+    return tally
+
+
 def write(path, rows, mic: str, tz_label: str = "") -> int:
     """One name, one day.  Returns the row count written.
 
@@ -315,6 +366,56 @@ def self_test() -> int:
         check("asking with the file code as the folder finds nothing, "
               "which is why both are passed",
               existing_dates(d, "600000 CG", "600000 CG"), set())
+
+    print("\nfiles written before there were folders")
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        flat = [filename("7203 JT", D(2026, 9, 3)),
+                filename("7203 JT", D(2026, 9, 4)),
+                filename("600000 CG", D(2026, 9, 3)),
+                filename("SCB-R TB", D(2026, 9, 3))]
+        for f in flat:
+            (root / f).write_text("x", encoding="utf-8")
+        (root / "_no_data.csv").write_text("x", encoding="utf-8")
+
+        check("a loose file is invisible to the folder lookup, which is "
+              "why it has to move at all",
+              existing_dates(root, "7203 JT", "7203 JT"), set())
+
+        seen = migrate_flat(root, {"600000 CG": "600000 C1"}, dry_run=True)
+        check("a dry run counts them and moves nothing",
+              (seen["moved"], sorted(x.name for x in root.iterdir()
+                                     if x.is_file())),
+              (4, sorted(flat + ["_no_data.csv"])))
+
+        tally = migrate_flat(root, {"600000 CG": "600000 C1"})
+        check("all four move", tally["moved"], 4)
+        check("and the days are found again, which is the point",
+              existing_dates(root, "7203 JT", "7203 JT"),
+              {D(2026, 9, 3), D(2026, 9, 4)})
+        check("China's file goes to the CROSSCODE folder, not its own code",
+              existing_dates(root, "600000 C1", "600000 CG"),
+              {D(2026, 9, 3)})
+        check("a code with a hyphen is not split by the move either",
+              existing_dates(root, "SCB-R TB", "SCB-R TB"), {D(2026, 9, 3)})
+        check("a code the map does not know keeps its own name, and is "
+              "counted rather than lost", tally["unknown code"], 3)
+        check("the miss cache is not one of ours and stays at the root",
+              (root / "_no_data.csv").is_file(), True)
+        check("nothing else is left loose",
+              [x.name for x in root.iterdir() if x.is_file()],
+              ["_no_data.csv"])
+
+        check("a second run has nothing to do", migrate_flat(root),
+              {"moved": 0, "already there": 0, "unknown code": 0})
+
+        #  the same day, loose AND in its folder
+        (root / filename("7203 JT", D(2026, 9, 3))).write_text("x",
+                                                               encoding="utf-8")
+        again = migrate_flat(root)
+        check("a day that is already in the folder is not overwritten by "
+              "the loose copy", (again["moved"], again["already there"]),
+              (0, 1))
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

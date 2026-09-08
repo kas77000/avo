@@ -156,6 +156,30 @@ def plan(names, partitions, out_dir, backfill, cache=None) -> dict:
     return {"by_date": dict(sorted(by_date.items())), "per_name": per_name}
 
 
+def stage_migrate(names, out_dir, dry_run, log):
+    """Move anything written before there were folders, so a day already
+    fetched is not fetched again.
+
+    Silent when there is nothing loose, which is every run after the first.
+    """
+    tally = ticksfile.migrate_flat(
+        out_dir, {n.bbg: n.crosscode_bbg for n in names}, dry_run)
+    if not any(tally.values()):
+        return
+    log.kv("older files moved into folders",
+           logs.thousands(tally["moved"]),
+           "written before the store had one folder per name"
+           + ("   NOT MOVED, --dry-run" if dry_run else ""))
+    if tally["already there"]:
+        log.warn(f"{tally['already there']} loose file(s) name a day the "
+                 f"folder already has. The folder's copy is the one that "
+                 f"counts; the loose ones are left for you to look at.")
+    if tally["unknown code"]:
+        log.info(f"    {tally['unknown code']} of them are codes this "
+                 f"crosscode no longer carries, and keep their own name "
+                 f"as the folder")
+
+
 def add_today(plan_, names, today) -> dict:
     """Put today in the plan for every name, whatever is on disk.
 
@@ -649,6 +673,7 @@ def main(argv=None) -> int:
         return 1
 
     log.step(5, "what is already tried")
+    stage_migrate(names, out_dir, a.dry_run, log)
     cache = {} if a.retry_misses else misscache.load(miss_path)
     log.kv("miss cache", f"{logs.thousands(misscache.count(cache))} pairs",
            f"{miss_path}" + ("   IGNORED, --retry-misses"
@@ -992,6 +1017,29 @@ def self_test() -> int:
         pl2 = plan([bhp], [D(2026, 9, 3)], d, 1, cache)
         stats2 = run(Silent(), pl2, {}, d, 200, False, cache)
         check("so the next run asks kdb nothing at all", stats2["reads"], 0)
+
+    print("\na day generated before the folders existed is not redone")
+    with tempfile.TemporaryDirectory() as d:
+        old_file = Path(d) / ticksfile.filename("7203 JT", P[2])
+        old_file.write_text("x", encoding="utf-8")
+
+        class Quiet:
+            counts = {logs.WARN: 0}
+            def kv(self, *a, **k): pass
+            def info(self, *a, **k): pass
+            def warn(self, *a, **k): pass
+
+        pl = plan([toyota], P, d, 1, {})
+        check("without the move, the day looks untried and would be "
+              "fetched and rewritten", P[2] in pl["per_name"]["7203 JT"],
+              True)
+
+        stage_migrate([toyota], d, False, Quiet())
+        check("after it, the file is in the name's folder",
+              (Path(d) / "7203 JT" / old_file.name).is_file(), True)
+        pl = plan([toyota], P, d, 1, {})
+        check("and the day is not asked for again, which is the point",
+              P[2] in pl["per_name"]["7203 JT"], False)
 
     print("\ntoday, which comes from the other server")
 
