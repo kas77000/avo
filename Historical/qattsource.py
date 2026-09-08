@@ -36,8 +36,12 @@ THREE UNCERTAINTIES, ALL REPORTED RATHER THAN ASSUMED.
 ONE ROUND TRIP PER DATE PER CHUNK, never one per symbol.  A universe is tens
 of thousands of names; a per-symbol query would still be running at the open.
 
-HDB ONLY.  Every date this job asks for is a day that has finished, so there
-is no RDB branch here and no live/dated pair to keep in step.
+HDB FOR EVERY FINISHED DAY, RDB FOR TODAY.  A partition appears when the day
+is done, so today is not in the HDB and no dated query will ever find it.
+The two are DIFFERENT SERVERS - QATT_SERVER and QATT_RDB_SERVER - and the
+RDB has no date column, so the pair is ticks_q (dated) and live_ticks_q
+(not).  Today is asked for only when --today says so; see historical_ticks.py
+for why a partial session is not written by accident.
 
 pykx is imported inside connect(), so every other module - and --self-test -
 runs on a machine with no kdb and no q licence.
@@ -112,6 +116,24 @@ def ticks_q(time_field: str = None) -> str:
     return ("{[d;s] select sym," + (time_field or TIME_FIELD) + "," +
             ",".join(TICK_FIELDS) +
             " from qatt where date=d, sym in s, price>0, size>0}")
+
+
+def live_ticks_q(time_field: str = None) -> str:
+    """The same prints, from the RDB, for today.
+
+    TODAY IS NOT IN THE HDB.  qatt is partitioned by date and a partition
+    appears when the day is done, so the only way to see today is the RDB -
+    a DIFFERENT SERVER, QATT_RDB_SERVER, not a different query against the
+    same one.
+
+    It carries no date column at all, which is why this is a separate query
+    rather than ticks_q with the predicate dropped: there is nothing to
+    constrain and nothing to pass.  The RDB holds today and only today, so
+    the table itself is the filter.  LimitUpDown/v1/kdbsource.py asks qatt
+    the same undated way for the same reason."""
+    return ("{[s] select sym," + (time_field or TIME_FIELD) + "," +
+            ",".join(TICK_FIELDS) +
+            " from qatt where sym in s, price>0, size>0}")
 
 
 def probe_q() -> str:
@@ -369,6 +391,23 @@ def fetch_ticks(conn, date, syms, time_field: str = None) -> dict:
     return out
 
 
+def fetch_live_ticks(conn, syms, time_field: str = None) -> dict:
+    """Today's prints for these syms, from the RDB.  No date, either sent or
+    returned - the table is today."""
+    if not syms:
+        return {}
+    out = {}
+    field = time_field or TIME_FIELD
+    for row in _rows(conn(live_ticks_q(field), list(syms))):
+        out.setdefault(text(row.get("sym")), []).append({
+            "time": clock(row.get(field)),
+            "price": to_decimal(row.get("price")),
+            "size": to_decimal(row.get("size")),
+            "cond": text(row.get("cond")),
+            "ex": text(row.get("ex"))})
+    return out
+
+
 def self_test() -> int:
     ok = True
 
@@ -397,6 +436,18 @@ def self_test() -> int:
     check("and no query anywhere still carries that cast",
           [q for q in (MASTER_BPIPE_Q, MASTER_MBPIPE_Q, MASTER_SYM_Q,
                        ticks_q(), probe_q()) if "`$" in q], [])
+    print("\ntoday comes from the RDB, which has no date at all")
+    check("the live query names no date, because there is none to name",
+          "date" in live_ticks_q(), False)
+    check("it takes only the syms - one argument, not two",
+          live_ticks_q().startswith("{[s]"), True)
+    check("it filters to prints in q, exactly as the dated one does",
+          "price>0, size>0" in live_ticks_q(), True)
+    check("and asks for the same columns, so both fill the same file",
+          all(f in live_ticks_q() for f in ("sym",) + TICK_FIELDS), True)
+    check("the dated query does name the partition, and still does",
+          "date=d" in ticks_q(), True)
+
     check("the probe asks for all five time columns at once",
           all(f in probe_q() for f in TIME_FIELDS), True)
     check("equity_master is asked for the four cross-references",

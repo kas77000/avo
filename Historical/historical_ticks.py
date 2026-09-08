@@ -10,6 +10,13 @@ written in the shape the Bloomberg add-in was writing:
     #Time,Last,Volume,Condition,Exchange,MicCode,AUS Eastern Standard Time
     09:31:33,0.105,1000,T,T,XASX
 
+TWO STORES, ONE SHAPE.  Every finished day is an HDB partition and is asked
+for by date.  Today is not a partition at all - one appears when the day is
+done - so it lives on the RDB, a different server with no date column, and
+only --today goes there.  A finished day is settled once; today is refetched
+and rewritten every run, and never recorded as a miss, because a session
+still running is not an answer.
+
 ONE RULE, NOT TWO POPULATIONS.  Every name wants the last BACKFILL_DAYS
 partitions minus whatever has already been TRIED, and the backfill and the
 daily top-up fall out of that one subtraction.  "Tried" means two things:
@@ -35,6 +42,7 @@ Bloomberg version had.
     python historical_ticks.py --dry-run       real reads, writes nothing
     python historical_ticks.py                 the daily run
     python historical_ticks.py --backfill 90   a deeper first run
+    python historical_ticks.py --today         also today, from the RDB
     python historical_ticks.py --date 2026-09-02   as if that were today
     python historical_ticks.py --only "7203 JT"    one name, for a check
     python historical_ticks.py --retry-misses  ask again about the empties
@@ -147,6 +155,26 @@ def plan(names, partitions, out_dir, backfill, cache=None) -> dict:
     return {"by_date": dict(sorted(by_date.items())), "per_name": per_name}
 
 
+def add_today(plan_, names, today) -> dict:
+    """Put today in the plan for every name, whatever is on disk.
+
+    TODAY IS NOT SUBTRACTED THE WAY A FINISHED DAY IS.  days_wanted skips a
+    date that has a file, which is right for a partition - it cannot change
+    again - and wrong for today, whose file is a session still running.  So
+    --today always refetches and always rewrites, and the file settles when
+    the day does.
+
+    It is not in `partitions` either: a partition appears when the day is
+    done, so today is never in the window plan() worked from."""
+    by_date = dict(plan_["by_date"])
+    by_date[today] = list(names)
+    per_name = dict(plan_["per_name"])
+    for name in names:
+        per_name[name.bbg] = sorted(set(per_name.get(name.bbg, [])) |
+                                    {today})
+    return {"by_date": dict(sorted(by_date.items())), "per_name": per_name}
+
+
 def tz_label(name, markets) -> str:
     """The seventh header cell, from config/markets.csv.
 
@@ -158,12 +186,18 @@ def tz_label(name, markets) -> str:
 
 
 def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
-        log=None) -> dict:
+        log=None, live_conn=None, live_date=None) -> dict:
     """Fetch and write, one date at a time.
 
     A name with prints gets a file.  A name with none gets a line in the
     miss cache INSTEAD - not an empty file - so the output directory holds
-    only real data and the record of absence lives in one place."""
+    only real data and the record of absence lives in one place.
+
+    WHICH SERVER IS DECIDED PER DATE.  live_date is today when --today is
+    on, and that one date is asked of the RDB with no date in the query;
+    every other date is a finished partition and goes to the HDB.  The rows
+    come back in the same shape either way, so everything below this is the
+    same code."""
     cache = cache if cache is not None else {}
     log = log or logs.Log(stamps=False, quiet=True)
     stats = {"files": 0, "rows": 0, "empty": 0, "reads": 0}
@@ -174,10 +208,17 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
         log.info(f"{date}  {len(names)} names, {len(by_sym)} syms, "
                  f"{-(-len(by_sym) // max(1, chunk))} read(s)")
 
+        live = live_conn is not None and date == live_date
+        if live:
+            log.info(f"{date}  from the RDB - today, and today is not a "
+                     f"partition")
+
         fetched = {}
         for group in chunked(sorted(by_sym), chunk):
             if not dry_run:
-                fetched.update(qattsource.fetch_ticks(conn, date, group))
+                fetched.update(
+                    qattsource.fetch_live_ticks(live_conn, group) if live
+                    else qattsource.fetch_ticks(conn, date, group))
             stats["reads"] += 1
 
         for name in names:
@@ -189,8 +230,14 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
                 #  about the data and it is worth remembering.  A query that
                 #  RAISED never gets here - it takes the whole run down -
                 #  which is what keeps an outage out of the cache.
+                #
+                #  EXCEPT FOR TODAY, which is not a fact yet.  A name that
+                #  has not traded by 11am may trade at 2pm, and a miss
+                #  cached now is never asked again.  Today is remembered by
+                #  nothing, which is also why --today always refetches.
                 stats["empty"] += 1
-                misscache.record(cache, name.bbg, name.sym, date)
+                if not live:
+                    misscache.record(cache, name.bbg, name.sym, date)
                 continue
             path = Path(out_dir) / ticksfile.filename(name.bbg, date)
             stats["rows"] += ticksfile.write(
@@ -504,6 +551,11 @@ def main(argv=None) -> int:
     p.add_argument("--chunk", type=int, default=None,
                    help=f"syms per qatt read (default "
                         f"{settings.DEFAULTS['SYM_CHUNK']})")
+    p.add_argument("--today", action="store_true",
+                   help="also fetch today, from QATT_RDB_SERVER.  Today is "
+                        "not an HDB partition, so a normal run cannot see "
+                        "it.  Always refetched and rewritten - a session "
+                        "still running is not a finished day.")
     p.add_argument("--retry-misses", action="store_true",
                    help="ignore the miss cache for this run and rebuild it "
                         "from what today's run actually finds")
@@ -526,6 +578,10 @@ def main(argv=None) -> int:
         settings.require(cfg, "CROSSCODE_PATH", "OUTPUT_DIR")
         em_host, em_port = settings.server(cfg, "EQUITY_MASTER_SERVER")
         q_host, q_port = settings.server(cfg, "QATT_SERVER")
+        #  Only --today needs the RDB, so an unset QATT_RDB_SERVER is not a
+        #  problem until it is asked for - and then it is a hard stop, not
+        #  a run that quietly fetches no today at all.
+        rdb = settings.server(cfg, "QATT_RDB_SERVER") if a.today else None
     except SettingError as e:
         print(f"FAIL  {e}", file=sys.stderr)
         return 2
@@ -569,10 +625,18 @@ def main(argv=None) -> int:
            f"{miss_path}" + ("   IGNORED, --retry-misses"
                              if a.retry_misses else ""))
     plan_ = plan(names, parts, out_dir, backfill, cache)
+    today = None
+    if a.today:
+        today = dt.date.today()
+        plan_ = add_today(plan_, names, today)
+        log.kv("today", str(today),
+               f"from the RDB at {rdb[0]}:{rdb[1]}; refetched and rewritten")
     log_plan(plan_, log)
 
     log.step(6, "fetch and write")
-    stats = run(conn, plan_, markets, out_dir, chunk, a.dry_run, cache, log)
+    live_conn = qattsource.connect(*rdb) if a.today else None
+    stats = run(conn, plan_, markets, out_dir, chunk, a.dry_run, cache, log,
+                live_conn, today)
     if not a.dry_run:
         n = misscache.save(miss_path, cache)
         log.kv("miss cache now", f"{logs.thousands(n)} pairs", str(miss_path))
@@ -893,6 +957,55 @@ def self_test() -> int:
         pl2 = plan([bhp], [D(2026, 9, 3)], d, 1, cache)
         stats2 = run(Silent(), pl2, {}, d, 200, False, cache)
         check("so the next run asks kdb nothing at all", stats2["reads"], 0)
+
+    print("\ntoday, which comes from the other server")
+
+    class Which:
+        """Records which connection was asked, and with what."""
+
+        def __init__(self, rows=None):
+            self.rows, self.calls = rows or [], []
+
+        def __call__(self, q, *args):
+            self.calls.append((q, args))
+            return self.rows
+
+    today = D(2026, 9, 8)
+    with tempfile.TemporaryDirectory() as d:
+        pl = plan([bhp], [D(2026, 9, 3)], d, 1, {})
+        check("a plan off finished partitions does not contain today",
+              today in pl["by_date"], False)
+
+        pl = add_today(pl, [bhp], today)
+        check("--today puts it there", today in pl["by_date"], True)
+        check("without disturbing the finished day",
+              sorted(pl["by_date"]), [D(2026, 9, 3), today])
+
+        hdb, rdb = Which(), Which()
+        run(hdb, pl, {}, d, 200, False, {}, None, rdb, today)
+        check("the finished day went to the HDB, and only that day",
+              [a[0] for _, a in hdb.calls], [D(2026, 9, 3)])
+        check("today went to the RDB instead",
+              len(rdb.calls), 1)
+        check("and was asked for with syms alone - no date to send",
+              [len(a) for _, a in rdb.calls], [1])
+
+    with tempfile.TemporaryDirectory() as d:
+        #  a file already on disk for today must NOT settle it
+        pl = add_today(plan([bhp], [], d, 1, {}), [bhp], today)
+        Path(d, ticksfile.filename("BHP AU", today)).write_text("x")
+        pl2 = add_today(plan([bhp], [], d, 1, {}), [bhp], today)
+        check("a file for today does not count as tried - the session is "
+              "still running",
+              today in pl2["by_date"], True)
+
+    with tempfile.TemporaryDirectory() as d:
+        cache = {}
+        pl = add_today(plan([bhp], [], d, 1, cache), [bhp], today)
+        run(Silent(), pl, {}, d, 200, False, cache, None, Silent(), today)
+        check("an empty answer for today is NOT cached as a miss - a name "
+              "that has not traded by 11am may trade at 2pm",
+              cache, {})
 
     print("\na dry run records nothing")
     with tempfile.TemporaryDirectory() as d:

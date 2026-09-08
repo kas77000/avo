@@ -22,9 +22,13 @@ DEFAULTS = {
     #  Two different servers.  equity_master sits on the order side in
     #  kdb-queries' layout (:5010); qatt has its own (:5011).
     "EQUITY_MASTER_SERVER": "",
-    #  Must be the HDB - the one partitioned by date.  The RDB holds today
-    #  only, and every day these jobs ask for has finished.
+    #  Must be the HDB - the one partitioned by date.  Every finished day
+    #  comes from here.
     "QATT_SERVER": "",
+    #  The RDB (:5013 in kdb-queries' layout), which holds today and only
+    #  today and has no date column.  Needed ONLY by --today; empty is fine
+    #  and a run without --today never opens it.
+    "QATT_RDB_SERVER": "",
 
     "CROSSCODE_PATH": "",
     "OUTPUT_DIR": "",
