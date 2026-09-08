@@ -91,9 +91,25 @@ def _plain(d) -> str:
     return format(d.normalize(), "f")
 
 
+def _measure(value) -> str:
+    """Beta, Close and Volatility10D: no value writes nothing, and zero is
+    no value.
+
+    equity_master carries 0 where Bloomberg had nothing, which is why the R
+    job counts `== 0` alongside is.na and "" at :109-110 when it decides a
+    row is missing its reference data.  A zero close, a zero beta, a zero
+    volatility - none of those are measurements, so they go out blank rather
+    than as "0" and let the fill rates say how much is really there."""
+    d = _D(value)
+    if d is None or d == 0:
+        return ""
+    return _plain(d)
+
+
 def build_rows(rows, master, markets, mapping, sym_hits) -> list:
     """One output dict per crosscode row.  Missing reference data leaves a
-    column blank; it never becomes zero."""
+    column blank; it never becomes zero, and a zero that came back from kdb
+    is treated as missing for Beta, Close and Volatility10D."""
     staged = []
     for row in rows:
         rec = None
@@ -109,7 +125,10 @@ def build_rows(rows, master, markets, mapping, sym_hits) -> list:
         market_cap = cap * fx if cap is not None and fx is not None else None
 
         rel_index = _T(rec.get("REL_INDEX"))
-        industry = _T(rec.get("INDUSTRY_SECTOR"))
+        #  equity_master carries Bloomberg's "N.A." verbatim; it is the
+        #  absence of a sector, not the name of one, so it never reaches
+        #  the Sector column or the msci lookup.
+        industry = columns.present(_T(rec.get("INDUSTRY_SECTOR")))
 
         seg = columns.segment_cn(row.market, row.sec_type)
         if seg is None and row.market == "ASX-MAIN":
@@ -125,9 +144,9 @@ def build_rows(rows, master, markets, mapping, sym_hits) -> list:
             "Index": rel_index,
             "ICBIndex": "",            # filled by the propagation below
             "Segment": seg,
-            "Beta": _plain(_D(rec.get("EQY_BETA"))),
-            "Close": _plain(_D(rec.get("PX_LAST"))),
-            "Volatility10D": _plain(_D(rec.get("volatility"))),
+            "Beta": _measure(rec.get("EQY_BETA")),
+            "Close": _measure(rec.get("PX_LAST")),
+            "Volatility10D": _measure(rec.get("volatility")),
             "NoShortSell": marketcfg.no_short_sell(row.market, markets),
             "RespectShortSellPrice": marketcfg.respect_short_sell(
                 row.market, row.sec_type, row.is_reit, markets),
@@ -529,6 +548,19 @@ def self_test() -> int:
     check("and everything from kdb is blank, not zero",
           [r[c] for c in ("Close", "Beta", "MarketCap", "ISIN")],
           ["", "", "", ""])
+
+    print("\na row equity_master has, carrying zeros")
+    zero = {"BHP.AU": dict(master["BHP.AU"], PX_LAST=0.0, EQY_BETA=0,
+                           volatility="0.00")}
+    r = build_rows([row], zero, M, None, {})[0]
+    check("a zero close is no close, so it is blank not \"0\"", r["Close"], "")
+    check("the same for beta", r["Beta"], "")
+    check("and for volatility, however it is spelled",
+          r["Volatility10D"], "")
+    check("a real negative beta is still a value",
+          build_rows([row], {"BHP.AU": dict(master["BHP.AU"],
+                                            EQY_BETA=-0.4)},
+                     M, None, {})[0]["Beta"], "-0.4")
 
     print("\nsorting, per :606")
     rows = [

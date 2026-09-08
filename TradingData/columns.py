@@ -41,13 +41,26 @@ def capi_bucket(market_cap) -> str:
     return "MICRO"
 
 
+#  Bloomberg's ways of saying "no value", which reach equity_master as
+#  ordinary text and would otherwise be written out as if they were data.
+#  "N.A." is not a sector.
+_NOT_A_VALUE = ("", "n.a.", "n.a", "na", "n/a", "#n/a", "#n/a n/a",
+                "#n/a field not applicable", "none", "null", "nan")
+
+
+def present(text: str) -> str:
+    """The text, or "" when it is one of those placeholders."""
+    value = (text or "").strip()
+    return "" if value.lower() in _NOT_A_VALUE else value
+
+
 def sector(gics: str, industry: str) -> str:
     """:295 prefers GICS_SECTOR_NAME and falls back to INDUSTRY_SECTOR.
 
     equity_master has no GICS_SECTOR_NAME, so in practice every row takes the
     fallback.  The comma substitution is :89 - a comma would break the
     unquoted CSV the R job writes."""
-    value = (gics or "").strip() or (industry or "").strip()
+    value = present(gics) or present(industry)
     return value.replace(",", "|")
 
 
@@ -138,6 +151,12 @@ def self_test() -> int:
     check("blank GICS falls back", sector("", "Banks"), "Banks")
     check("commas become pipes, per :89", sector("", "Oil, Gas"), "Oil| Gas")
     check("neither means blank", sector("", ""), "")
+    check("a Bloomberg placeholder is not a sector",
+          sector("", "N.A."), "")
+    check("nor are its other spellings",
+          [sector("", x) for x in ("#N/A N/A", "n/a", " NA ")], ["", "", ""])
+    check("a real sector that starts with those letters survives",
+          sector("", "Natural Resources"), "Natural Resources")
 
     print("\nASX segments")
     check("A goes in A-B", segment_asx("ANZ", "Equity"), "A-B")
