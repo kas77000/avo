@@ -162,7 +162,7 @@ quote-only rows to exclude.
 
 | outcome | what lands |
 |---|---|
-| prints came back | `raw-<code>-<YYYYMMDD>.csv` in `OUTPUT_DIR` |
+| prints came back | `OUTPUT_DIR/<crosscode code>/raw-<code>-<YYYYMMDD>.csv` |
 | kdb answered, empty | one line in the miss cache — **not** an empty CSV |
 | the query raised | nothing; the run stops |
 
@@ -202,7 +202,7 @@ outside it.
 
 | | |
 |---|---|
-| `OUTPUT_DIR/raw-*.csv` | one per name per day |
+| `OUTPUT_DIR/<code>/raw-*.csv` | one folder per name, one file per day |
 | `OUTPUT_DIR/_no_data.csv` | the miss cache (or `MISS_CACHE_PATH`) |
 | `--log FILE` | appended, if given |
 

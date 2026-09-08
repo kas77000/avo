@@ -31,9 +31,15 @@ QATT_SERVER = "CHANGEME:5011"
 
 CROSSCODE_PATH = r"CHANGEME\CrossCode.csv"
 
-# One raw-<code>-<YYYYMMDD>.csv per name per day lands here, and this
-# directory is HALF the job's memory: a date with no file is a date not yet
-# fetched.  Point it somewhere permanent.
+# One FOLDER per name, named for its crosscode BloombergCode, holding one
+# raw-<code>-<YYYYMMDD>.csv per day.  This directory is HALF the job's
+# memory: a date with no file is a date not yet fetched.  Point it
+# somewhere permanent.
+#
+# The folders are not cosmetic.  Deciding what to fetch lists each name's
+# own folder; when every file shared one directory, that listing was the
+# WHOLE store, once per name - measured at 170ms per name over 8,000 files,
+# and a real backfill is upwards of a million.
 OUTPUT_DIR = r"CHANGEME\ticks"
 
 # The other half: every (name, date) kdb was asked about and had nothing

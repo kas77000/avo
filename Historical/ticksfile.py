@@ -52,6 +52,33 @@ def filename(bbg: str, date) -> str:
     return f"{PREFIX}{bbg}-{date:%Y%m%d}{SUFFIX}"
 
 
+def folder(crosscode_bbg: str) -> str:
+    """The directory one name's files live in: its crosscode BloombergCode.
+
+    NOT the file's own code.  The two differ for China, where the MIC
+    renames the file - folder "600000 C1" holds "raw-600000 CG-...csv" -
+    because the folder answers "which crosscode line is this" and the file
+    answers "what does the consumer call it".  Everywhere else they are the
+    same string.
+
+    ONE FOLDER PER NAME, and it is what makes a real backfill possible.
+    existing_dates is called once per name, and when every file shared one
+    directory each of those calls listed the WHOLE store: 59,013 names over
+    60 days is upwards of a million files, listed 59,013 times.  Measured at
+    170ms per name over only 8,000 files, which extrapolates to days of
+    work before the first query is sent.  Per name, the listing is the
+    handful of days that name actually has.
+
+    """
+    return (crosscode_bbg or "").strip()
+
+
+def path(directory, crosscode_bbg: str, bbg: str, date) -> Path:
+    """Where one name's file for one day goes.  Two codes, deliberately:
+    the folder's and the file's.  See folder()."""
+    return Path(directory) / folder(crosscode_bbg) / filename(bbg, date)
+
+
 def parse_filename(name: str):
     """The inverse, or None if this is not one of ours.
 
@@ -68,14 +95,18 @@ def parse_filename(name: str):
         return None
 
 
-def existing_dates(directory, bbg: str) -> set:
-    """Every date already on disk for one name."""
-    d = Path(directory)
+def existing_dates(directory, crosscode_bbg: str, bbg: str) -> set:
+    """Every date already on disk for one name.
+
+    Only that name's own folder is listed.  The FILE code is still checked
+    against each filename, so a file that somehow landed in the wrong
+    folder is ignored rather than counted as a day already fetched."""
+    d = Path(directory) / folder(crosscode_bbg)
     if not d.is_dir():
         return set()
     out = set()
-    for path in d.iterdir():
-        parsed = parse_filename(path.name)
+    for entry in d.iterdir():
+        parsed = parse_filename(entry.name)
         if parsed and parsed[0] == bbg:
             out.add(parsed[1])
     return out
@@ -224,7 +255,7 @@ def self_test() -> int:
              "size": Decimal("4998"), "cond": "", "ex": "H"}]
 
     with tempfile.TemporaryDirectory() as d:
-        p = Path(d) / filename("EAU AU", D(2026, 8, 17))
+        p = path(d, "EAU AU", "EAU AU", D(2026, 8, 17))
         check("the row count comes back", write(p, rows, "XASX",
                                                 "AUS Eastern Standard Time"),
               3)
@@ -259,11 +290,31 @@ def self_test() -> int:
               ["#Time,Last,Volume,Condition,Exchange,MicCode"])
 
         check("the directory now answers for what it holds",
-              existing_dates(d, "EAU AU"), {D(2026, 8, 17)})
+              existing_dates(d, "EAU AU", "EAU AU"), {D(2026, 8, 17)})
         check("and says nothing about a name it does not have",
-              existing_dates(d, "7203 JT"), set())
+              existing_dates(d, "7203 JT", "7203 JT"), set())
         check("a directory that does not exist is empty, not an error",
-              existing_dates(Path(d) / "nope", "EAU AU"), set())
+              existing_dates(Path(d) / "nope", "EAU AU", "EAU AU"), set())
+
+        check("the file sits in a folder named for the code, not loose in "
+              "the store", p.parent.name, "EAU AU")
+        check("and the store itself holds folders, not files",
+              [x.name for x in sorted(Path(d).iterdir()) if x.is_file()],
+              ["no_label.csv"])
+
+        #  CHINA IS THE ONE PLACE THE TWO CODES DIFFER.  The folder is the
+        #  crosscode's line; the file is what the consumer asks for.
+        cn = path(d, "600000 C1", "600000 CG", D(2026, 9, 3))
+        write(cn, rows, "XSHG", "China Standard Time")
+        check("the folder keeps the crosscode's C1", cn.parent.name,
+              "600000 C1")
+        check("while the file inside takes the MIC's CG", cn.name,
+              "raw-600000 CG-20260903.csv")
+        check("and the pair is found again by the same two codes",
+              existing_dates(d, "600000 C1", "600000 CG"), {D(2026, 9, 3)})
+        check("asking with the file code as the folder finds nothing, "
+              "which is why both are passed",
+              existing_dates(d, "600000 CG", "600000 CG"), set())
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

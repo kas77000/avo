@@ -21,7 +21,7 @@ ONE RULE, NOT TWO POPULATIONS.  Every name wants the last BACKFILL_DAYS
 partitions minus whatever has already been TRIED, and the backfill and the
 daily top-up fall out of that one subtraction.  "Tried" means two things:
 
-    a file on disk           in OUTPUT_DIR, one per name per day
+    a file on disk           OUTPUT_DIR/<code>/, one folder per name
     a line in the miss cache kdb was asked and had nothing
 
 There is no state file beyond those two, and both are readable and editable
@@ -146,7 +146,8 @@ def plan(names, partitions, out_dir, backfill, cache=None) -> dict:
     cache = cache or {}
     by_date, per_name = {}, {}
     for name in names:
-        have = (ticksfile.existing_dates(out_dir, name.bbg)
+        have = (ticksfile.existing_dates(out_dir, name.crosscode_bbg,
+                                         name.bbg)
                 | misscache.tried(cache, name.bbg))
         want = ticksfile.days_wanted(have, partitions, backfill)
         per_name[name.bbg] = want
@@ -239,7 +240,8 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
                 if not live:
                     misscache.record(cache, name.bbg, name.sym, date)
                 continue
-            path = Path(out_dir) / ticksfile.filename(name.bbg, date)
+            path = ticksfile.path(out_dir, name.crosscode_bbg, name.bbg,
+                                  date)
             stats["rows"] += ticksfile.write(
                 path, rows, name.mic, tz_label(name, markets))
             stats["files"] += 1
@@ -466,12 +468,12 @@ def trace(cfg, a, log=None) -> int:
 
     log.step(5, "what a real run would already have")
     for n in names:
-        have = ticksfile.existing_dates(out_dir, n.bbg)
+        have = ticksfile.existing_dates(out_dir, n.crosscode_bbg, n.bbg)
         cache = misscache.load(cfg["MISS_CACHE_PATH"]
                                or Path(out_dir) / "_no_data.csv")
         log.kv("file on disk",
                "yes" if date in have else "no",
-               str(Path(out_dir) / ticksfile.filename(n.bbg, date)))
+               str(ticksfile.path(out_dir, n.crosscode_bbg, n.bbg, date)))
         log.kv("in the miss cache",
                "yes" if date in misscache.tried(cache, n.bbg) else "no")
         log.kv("a real run would",
@@ -541,7 +543,7 @@ def trace(cfg, a, log=None) -> int:
         log.ok("--dry-run: nothing written")
     else:
         for n in names:
-            path = Path(out_dir) / ticksfile.filename(n.bbg, date)
+            path = ticksfile.path(out_dir, n.crosscode_bbg, n.bbg, date)
             written = ticksfile.write(path, fetched.get(n.sym, []), n.mic,
                                       tz_label(n, markets))
             log.kv("written", f"{logs.thousands(written)} rows", str(path))
@@ -793,7 +795,8 @@ def demo() -> int:
         print("\n--- the files ---")
         for f in sorted(out.iterdir()):
             print(f"  {f.name}")
-        sample = out / ticksfile.filename("7203 JT", dt.date(2026, 9, 3))
+        sample = ticksfile.path(out, "7203 JT", "7203 JT",
+                                dt.date(2026, 9, 3))
         print(f"\n--- {sample.name} ---")
         for line in sample.read_text(encoding="utf-8").splitlines():
             print(f"  {line}")
@@ -821,7 +824,9 @@ def demo() -> int:
         log_plan(plan3, dlog)
         log_result(stats3, False, dlog)
 
-        sha = out / ticksfile.filename("600000 CG", dt.date(2026, 9, 3))
+        #  The folder keeps the crosscode's C1; the file takes the MIC's CG.
+        sha = ticksfile.path(out, "600000 C1", "600000 CG",
+                             dt.date(2026, 9, 3))
         print(f"\n--- {sha.name} ---")
         for line in sha.read_text(encoding="utf-8").splitlines():
             print(f"  {line}")
@@ -906,8 +911,11 @@ def self_test() -> int:
     print("\nplanning, from an empty directory")
 
     class N:
-        def __init__(self, bbg, sym):
+        def __init__(self, bbg, sym, crosscode_bbg=None):
             self.bbg, self.sym, self.mic, self.rows = bbg, sym, "X", ()
+            #  Same code in both places for everything but China, which is
+            #  exactly what the real Name carries.
+            self.crosscode_bbg = bbg if crosscode_bbg is None else crosscode_bbg
 
     import tempfile
     P = [D(2026, 9, 1), D(2026, 9, 2), D(2026, 9, 3)]
@@ -923,7 +931,7 @@ def self_test() -> int:
               "query serves every name that wants that day",
               len(pl["by_date"]), 2)
 
-        ticksfile.write(Path(d) / ticksfile.filename("7203 JT", P[2]),
+        ticksfile.write(ticksfile.path(d, "7203 JT", "7203 JT", P[2]),
                         [], "XTKS", "")
         pl = plan([toyota, bhp], P, d, 2)
         check("the day it already has drops out of that date's read",
@@ -1031,7 +1039,9 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as d:
         #  a file already on disk for today must NOT settle it
         pl = add_today(plan([bhp], [], d, 1, {}), [bhp], today)
-        Path(d, ticksfile.filename("BHP AU", today)).write_text("x")
+        p = ticksfile.path(d, "BHP AU", "BHP AU", today)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
         pl2 = add_today(plan([bhp], [], d, 1, {}), [bhp], today)
         check("a file for today does not count as tried - the session is "
               "still running",

@@ -62,11 +62,17 @@ MIC_FILE_EXT = {"XSHG": "CG", "XSHE": "CS"}
 
 @dataclass(frozen=True)
 class Name:
-    bbg: str          # "7203 JT" - the primary, and what names the file
+    bbg: str          # "7203 JT" - the primary, and what names the FILE
     sym: str          # "7203.JP" - the qatt key
     mic: str          # "XTKS"
     rows: tuple       # every crosscode row that collapsed into this one
     source: str       # "equity_master" or "markets.csv"
+    #  The crosscode's own BloombergCode, which names the FOLDER.  It is
+    #  the same string as bbg everywhere except China, where the MIC
+    #  renames the file: folder "600000 C1" holds "raw-600000 CG-...csv".
+    #  Kept separately because file_code() has already thrown it away by
+    #  the time anything downstream sees the Name.
+    crosscode_bbg: str = ""
 
 
 @dataclass
@@ -166,7 +172,8 @@ def build(rows, master: dict, markets) -> tuple:
             tally["china without a MIC"] += 1
 
         names.append(Name(bbg=bbg, sym=sym, mic=mic,
-                          rows=tuple(group_rows), source=source))
+                          rows=tuple(group_rows), source=source,
+                          crosscode_bbg=chosen.bbg))
 
     names.sort(key=lambda n: n.bbg)
     return (names,

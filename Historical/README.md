@@ -41,7 +41,7 @@ one subtraction. "Tried" means two things:
 
 | | |
 |---|---|
-| a file in `OUTPUT_DIR` | `raw-<code>-<YYYYMMDD>.csv`, one per name per day |
+| a file in `OUTPUT_DIR` | `<crosscode code>/raw-<code>-<YYYYMMDD>.csv`, one folder per name, one file per day |
 | a line in the miss cache | kdb was asked and had nothing |
 
 There is no manifest and no state file beyond those two, and both are
