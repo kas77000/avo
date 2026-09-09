@@ -123,7 +123,7 @@ def render(securities, fields, values, refused, field_problems) -> list:
 
 
 def fetch(session, identity, securities, fields):
-    """(values, refused, field_problems).  Mirrors v2/bpipe.fetch, kept
+    """(values, refused, field_problems).  Mirrors bpipe.fetch, kept
     separate so the probes never import the job."""
     blpapi = bpipe_probe._blpapi()
     if not session.openService("//blp/refdata"):

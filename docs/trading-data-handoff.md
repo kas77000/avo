@@ -26,9 +26,9 @@ To re-read a photo: `pillow_heif` + `PIL` are installed under
 your local Python. Convert to PNG, crop and upscale 2-3x for
 anything ambiguous.
 
-`LimitUpDown/v1` is a completed Python port of the sibling R job and is the
-template for this one (`v2` adds a bpipe source; `other/` holds bpipe probes). See "Conventions" below and
-`docs/limit-up-down-how-it-works.md`.
+`LimitUpDown/` is a completed Python port of the sibling R job and is the
+template for this one (`other/` holds its bpipe probes). See "Conventions"
+below and `LimitUpDown/README.md`.
 
 ## What the script does
 

@@ -259,7 +259,7 @@ def resolve_date(conn, requested, days_back=1, log=None):
         + ["  BOTH ways of asking failed, so this is most likely the SCHEMA",
            "  rather than the client: `date` may not be a q date column at",
            "  all. Run",
-           "      python ../other/em_probe.py --server HOST:PORT --meta",
+           "      python other/em_probe.py --server HOST:PORT --meta",
            "  and check what type `date` actually is."]))
 
 
@@ -358,7 +358,7 @@ def fetch(conn, date, syms, log=None) -> dict:
             f"    either that partition is empty, or `sym` does not look "
             f"like {list(syms)[:3]}.",
             "    Run",
-            f"        python ../other/em_probe.py --server HOST:PORT "
+            f"        python other/em_probe.py --server HOST:PORT "
             f"--sample {list(syms)[0]}",
             "    to see what the column actually holds."]))
 

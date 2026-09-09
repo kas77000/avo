@@ -1,54 +1,412 @@
-# LimitUpDown
+# LimitUpDown — ask Bloomberg, or compute it
 
 Builds `limitUpDown.csv`, the daily price-band file the Nova ATS uses to bound
-orders. Two implementations that disagree about where the band should come
-from, and the probes used to settle the question.
+orders. A Python port of `LimitUpDown.r`, and the version that runs.
 
 ```
-v1/       compute the band from rules + a kdb reference price
-v2/       ask Bloomberg for the band, over B-PIPE
-other/    the B-PIPE probes that made v2 possible
+*.py       the job
+config/    one row per venue, one row per band tier
+other/     the B-PIPE probes that settled what the job could ask for
 ```
 
-Both write the same seven columns:
+It writes the seven columns the ATS reads, unchanged from the R job:
 
 ```
 #ReutersCode,BloombergCode,LimitDate,LimitUpPrice,LimitDownPrice,FidessaCode,Venue
 7203.T,7203 JT,2026-09-03,3833,2433,7203.JP,TYO-MAIN
 ```
 
-## The two versions
+**Every venue names its own source, and any of them can be switched by editing
+one word** in `config/markets.csv`:
 
-|  | v1 | v2 |
+```
+Source=bloomberg   MIN_LIMIT / MAX_LIMIT off B-PIPE
+Source=computed    band = f(previous close, tiers), rounded to the tick
+                   previous close from kdb's equity_master
+```
+
+Each source is opened **only if it has work**. Switch every venue to computed
+and the job never touches B-PIPE; leave them all on bloomberg and it never
+touches kdb. That is what makes a market B-PIPE will not serve us — an
+entitlement refusal, say — still publishable.
+
+### Where a computed close comes from
+
+`equity_master` in kdb is the Bloomberg **Data Licence** feed, so its `PX_LAST`
+on the previous partition is a close of the same lineage as `PX_YEST_CLOSE`,
+**adjusted for corporate actions**, reached without a real-time entitlement.
+The alternatives were worse:
+
+| candidate | why not |
+|---|---|
+| `PX_YEST_CLOSE` | static, and confirmed refused to this subscription |
+| `PREV_CLOSE_VALUE_REALTIME` | only served for names the plant serves at all — exactly the set that fails |
+| **`equity_master.PX_LAST`** | **this** |
+
+Two things it gets right that a naive version would not. **The date** rolls back
+to the most recent partition with rows, because yesterday is a Sunday every
+Monday, and both dates are printed so a stale close is visible. It is asked
+for **two ways** — a Python date converted by pykx, then a bound computed in q
+from `.z.D` so no date crosses the wire at all — because a 2026-09-04 run died
+on `QError: type` here. The report says which one answered. If both fail, the
+error says it is a schema question and names the probe:
+
+```
+python other/em_probe.py --server HOST:PORT --meta
+``` **The symbol**
+gets up to two candidates — the crosscode's own suffix first, then the venue's
+`BBGComposite` — because Shanghai is `600001 CG` in the crosscode and
+`600001.CH` in equity_master. The run reports which suffix hit.
+
+### As shipped: Japan, Thailand and India ask; everything else computes
+
+```
+bloomberg   TYO-MAIN  JNX-MAIN  CHJ-MAIN  SET-MAIN
+            NSI-MAIN  BSE-MAIN  BSE-SECONDARY
+computed    the other twelve
+```
+
+**The markets Bloomberg prices are exactly the markets whose rule is not
+written down here**, and each of them is refused if you try to compute it. TSE
+limits are an absolute price-step table nobody has transcribed; Thailand's and
+India's are not in `bands.csv` either. A percentage tier invented for any of
+them would be a plausible-looking wrong answer on live orders, so switching one
+is refused outright:
+
+```
+TYO-MAIN has Source=computed but no band tiers in bands.csv. Add its tiers,
+or leave it on Source=bloomberg - a market whose rule nobody has written
+down cannot be computed.
+```
+
+## Thailand and India need more than a config row
+
+Both were out of scope until the filters below existed, and a bare
+`markets.csv` line for either would have published limits that must not exist.
+
+### Thailand: the local line only
+
+The SET lists one company three ways — the local board, the foreign board
+(`/F`) and the NVDR (`/Q`) — and Nova trades the local one. The other two are
+dropped in `crosscode.py`, before the universe, so they are counted in the
+report and never paid for in a Bloomberg request. R greps the same two
+(`LimitUpDown.r:180`).
+
+### India: three venues, and names that must NOT get a limit
+
+| | |
+|---|---|
+| `NSI-MAIN` | the NSE, priced by Bloomberg |
+| `BSE-MAIN` | the BSE, priced by Bloomberg |
+| `BSE-SECONDARY` | every `BSE-MAIN` row again, off the same fetch |
+
+**Some Indian names have their limits configured inside the ATS strategy
+files**, and for those Nova's own configuration is the authority. Publishing a
+`limitUpDown` row for one would *override a number a person set deliberately*,
+which is worse than publishing nothing — so each Indian venue names its
+strategy file in the new `ExcludeFile` column of `markets.csv`, and every
+mnemonic the file lists is dropped from the universe:
+
+```
+India,NSI-MAIN,IN,10:49:00,bloomberg,,,,in-nse_drv.stra
+India,BSE-MAIN,IB,10:49:00,bloomberg,,,,in-bse_drv.stra
+```
+
+Both are **filenames, not paths** — they are resolved against `TSR_DIR`,
+because they live beside `spol_JKT.tsr` on the ATS share. So the config
+committed here names no machine, and moving the share is one setting rather
+than three edits. An absolute path is still honoured, for the day one of them
+does not live with the others.
+
+The file is whitespace-separated with an eight-line preamble, and the mnemonic
+is its second field, matched against `Mnemo` with the first two characters
+stripped — the crosscode prefixes a country code the strategy file does not
+carry. `LimitUpDown.r:112-152`.
+
+**An unreadable strategy file stops the run, exactly as R's `stop()` does**, and
+the reason is worth stating: an empty exclusion list is indistinguishable from
+a correct one, and the only symptom would be Indian names quietly receiving a
+limit that overrides the desk's. It is read **only once the venue has reached
+its cutoff**, so an Indian share being down at 07:30 cannot take out Japan.
+
+**The BSE secondary venue has no crosscode line of its own.** A name on the NSE
+may also be reachable on the BSE under a different code, and the crosscode says
+so in three columns of the *same* row — `VenueList` naming `BSE-SECONDARY`,
+plus `BSEBloombergCode` and `BSERic`. Those rows are synthesised in `india.py`,
+asked of Bloomberg in the same request as everything else, and published
+**twice**, once under each venue, off one set of limits. A code the crosscode
+already carries itself is left to the ordinary path rather than synthesised, or
+one name would appear twice under `BSE-MAIN`. `LimitUpDown.r:387-414`.
+
+One deliberate difference from R: R builds that list from the crosscode as
+read, this builds it from the universe as filtered — so a BSE listing is never
+derived from a line that lost a duplicate or is not ACTV. It is the rule this
+job already has everywhere else.
+
+## One substitution in each branch
+
+Bloomberg carries these numbers under two sets of names and our B-PIPE
+entitlement serves only one. A probe on 2026-09-03 got *"Field not permitted to
+datafeed users"* for `PX_MIN_LIMIT`, `PX_MAX_LIMIT` and `PX_LAST` on the same
+request where the **real-time** names answered:
+
+| wanted | barred (static) | used here |
 |---|---|---|
-| Band from | rules in `config/bands.csv`, applied to a kdb reference price | Bloomberg for Japan, Thailand and India; computed for the rest |
-| Depends on | kdb | B-PIPE |
-| Computes | every market | twelve venues |
-| `bands.csv` holds | six markets | twelve venues |
-| Markets | six | nine countries, nineteen venues |
-| Breaks when | a market changes its rule and nobody edits the CSV | Bloomberg has no limit for a name |
-| Open risk | China ST names get ±10% instead of ±5% — no source for the flag | coverage: unknown until measured per venue |
+| the limits | `PX_MAX_LIMIT` / `PX_MIN_LIMIT` | `MAX_LIMIT` / `MIN_LIMIT` |
+| the close | `PX_YEST_CLOSE` | `PREV_CLOSE_VALUE_REALTIME`, or the next candidate that answers |
+| last trade | `PX_LAST` | `LAST_PRICE` |
 
-**They are alternatives, not stages.** v1 removes the Bloomberg dependency
-entirely and pays for it by encoding every market's rule in config. v2 keeps the
-dependency and asks Bloomberg for exactly the markets whose rule nobody has
-written down — Japan, Thailand and India — computing the other twelve venues
-itself, so no entitlement refusal can empty one of those.
+`7203 JT Equity` returned `MIN_LIMIT` 2433.0 / `MAX_LIMIT` 3833.0. See
+`other/bpipe_probe.py`.
 
-Either can be evaluated without touching the other: `--self-test` and `--demo`
-run on any machine, with no kdb, no Bloomberg and no network shares.
+## The status filter
 
-## The finding that produced v2
+Only ACTV names are published, and the status comes from **CrossCode's own
+`BloombergStatus` column** — not from Bloomberg. It is already in the
+file we read to build the universe, and `dedupe` already trusts it to choose
+between two rows claiming one code. The filter applies it once more, to the
+case dedupe never sees: a delisted name that had no competitor to lose to.
 
-Bloomberg carries daily price limits under two sets of names, and our B-PIPE
-entitlement serves only one of them. On 2026-09-03 the **static reference**
-fields `PX_MAX_LIMIT`, `PX_MIN_LIMIT` and `PX_LAST` came back *"Field not
-permitted to datafeed users"* — on the same request where the **real-time**
-`MIN_LIMIT` / `MAX_LIMIT` answered with 2433.0 / 3833.0 for `7203 JT Equity`.
+It also means the file no longer hangs on `MARKET_STATUS`, a **static**
+field from the same family as `PX_LAST`. **The 2026-09-04 run settled that
+question: `MARKET_STATUS` IS served to us** — 21,869 names came back
+`ACTV` — so it is kept as a cross-check and the two filters agree. The
+CrossCode column stays primary because it costs nothing and cannot be
+withdrawn by an entitlement change.
 
-The two families are not two spellings of one field. Anything v2 needs must be
-found in the real-time family, and sometimes there is no equivalent.
-`other/bpipe_fields.py` lists what that family contains.
+Two rules keep the filter from emptying the file:
+
+| | |
+|---|---|
+| a **blank** status | no opinion — the row is kept, the same rule `band_from` applies to a field Bloomberg did not serve |
+| a **missing column** | fatal. Every row would read as "no opinion", the filter would pass everything, and the only symptom would be delisted names quietly getting a band |
+
+**And do not reach for `RT_EXCH_MARKET_STATUS` instead.** Bloomberg's own real-time
+model has two status axes, visible as two `MKTDATA_EVENT_SUBTYPE` values:
+
+| axis | field | answers |
+|---|---|---|
+| `MARKETSTATUS` | `RT_EXCH_MARKET_STATUS` | what **session phase** is the exchange in — open, closed, auction, halt |
+| `SECURITYSTATUS` | `RT_SIMP_SEC_STATUS` | this **instrument's** own state |
+
+**What the 2026-09-04 run actually showed, which is not what was predicted
+here:** `RT_EXCH_MARKET_STATUS` came back `ACTV` for 21,863 names — it
+tracks the listing, not the session phase, and it did **not** read "closed"
+for the universe. The reasoning that follows was wrong on the facts; the
+conclusion survives for a different reason. `RT_SIMP_SEC_STATUS` *is* the
+session-shaped one — 11,309 `TMOC`, 8,032 `TRAD`, 2,391 `CLOS`, 129
+`AUCT` — so filtering on **that** at 07:30 would drop most of the file.
+Neither is used.
+
+Both real-time candidates are requested and **tallied but never filtered on**.
+The 2026-09-04 run carried:
+
+```
+  status     21869  MARKET_STATUS = ACTV            <- served after all
+  status     21863  RT_EXCH_MARKET_STATUS = ACTV    <- the listing, not the session
+  status     11309  RT_SIMP_SEC_STATUS = TMOC       <- this is the session-shaped one
+  status      8032  RT_SIMP_SEC_STATUS = TRAD
+  status      2391  RT_SIMP_SEC_STATUS = CLOS
+```
+
+## Reading the run report
+
+It opens with one line per venue — published, excluded, and where the band
+comes from. **Every configured venue appears, including one that published
+nothing**, because a market losing its whole universe is the thing most worth
+seeing and the thing a published-only table cannot say:
+
+```
+  venue        published  excluded  source
+  JKT-MAIN           842        42  computed
+  KLS-MAIN             0       905  bloomberg   <- nothing published
+  TYO-MAIN          3421        18  bloomberg
+```
+
+Then every exclusion, named, counted **and broken down by venue**:
+
+```
+  excluded    412  no MIN_LIMIT
+    KLS-MAIN       412  MAYBANK.KL (MAYBANK MK), PBBANK.KL (PBBANK MK) (+410 more)
+  excluded     18  last price outside the limits
+    TYO-MAIN        18  6501.T (6501 JT), 7011.T (7011 JT) (+16 more)
+```
+
+The venue line is the point. A bare `excluded 412 no MIN_LIMIT` cannot tell you
+whether 412 names are scattered across the region or whether **one whole market
+has vanished**; split by venue, it says so at a glance. Both codes are shown
+because the Bloomberg one is what you paste into a terminal to check a name by
+hand, and the RIC is what you match against the published file.
+
+### The entitlement CSV
+
+Names B-PIPE refused for want of an entitlement are also written to
+`entitlement_refused.csv`, beside `OUT_TEMP`:
+
+```csv
+ReutersCode,BloombergCode,Venue,EIDs,Message
+MAYBANK.KL,MAYBANK MK,KLS-MAIN,64487 64488,Bloomberg refused the security: Security Entitlement Check Failed! ...
+```
+
+They are separated from every other exclusion because the fix is different in
+kind: no code change reaches these names. The `EIDs` column is the part a
+market-data team acts on. A run with no entitlement refusals **deletes** the
+file rather than leaving yesterday's looking like today's. It is never
+published to Test/Pilot/Prod — the ATS does not read it.
+
+Run `other/bpipe_auth.py` to find out whether a different identity on the
+same machine already holds those EIDs.
+
+## Investigating a kdb fault
+
+A real run spends its first minutes on sixteen thousand Bloomberg names and
+only then touches kdb, so a kdb fault costs a whole run to see once. This
+reaches the same code in seconds:
+
+```
+python limit_up_down.py --kdb-check          five real names, verbosely
+python limit_up_down.py --kdb-check --sample 50
+```
+
+It prints the query sent, the argument **and what pykx turned it into**, and
+what came back — then the symbol candidates per name and which of them
+answered. Nothing is written and Bloomberg is never opened.
+
+The schema (`kdb-queries/no_git/kdb/equity_master.csv`) says `date` is a q
+date, so a `'type` here is the client's conversion, not the column. That is
+what the `arg ... -> ... (q type N)` line settles.
+
+## Running
+
+```
+python limit_up_down.py --self-test        checks, no Bloomberg, no files
+python limit_up_down.py --demo             both branches on canned data
+python limit_up_down.py ""                 real run, publish nowhere
+python limit_up_down.py "Test|Pilot|Prod"  real run, publish
+python limit_up_down.py --compare OLD.csv  diff the last output against another
+python limit_up_down.py --kdb-check        only the kdb path, verbosely
+```
+
+**kdb runs before Bloomberg.** The Bloomberg fetch is sixteen thousand names
+and minutes of it, so running it first meant every kdb fault cost a whole run
+to see once. The cheap, fragile side now fails fast.
+
+`--self-test` and `--demo` need nothing but Python. Every module has its own:
+
+```
+python bands.py --self-test        python marketcfg.py --self-test
+python ticks.py --self-test        python crosscode.py --self-test
+python bpipe.py --self-test        python mailer.py --self-test
+python india.py --self-test
+```
+
+## First run
+
+```
+pip install --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
+copy local_settings.py.example local_settings.py
+```
+
+Fill in `BPIPE_HOST`, `BPIPE_PORT`, `BPIPE_APP`, `EQUITY_MASTER_SERVER`,
+`TSR_DIR` and the SMTP host. `EQUITY_MASTER_SERVER` is only read when some
+venue is `computed`.
+
+`TSR_DIR` now carries India's two `.stra` strategy files as well as the tick
+ladder, so it has to be the real ATS share before India's 10:49 cutoff — the
+run stops there rather than publishing a limit over one the desk configured.
+The B-PIPE three have no defaults — the job refuses to start rather than connect
+somewhere you did not mean.
+
+**Keep `OUT_TEMP` different from v1's** while both are running, or whichever
+finishes last is the file that gets published.
+
+## Where things live
+
+| | |
+|---|---|
+| `bpipe.py` | session, authorization, batched fetch. The only module that imports blpapi. |
+| `kdbclose.py` | the previous close out of equity_master. The only module that imports pykx. |
+| `bands.py` | tier selection, band arithmetic, tick rounding. Pure. Copied from v1. |
+| `ticks.py` | tick ladders from a `.tsr` file. Pure. Copied from v1. |
+| `marketcfg.py` | loads the config **and enforces the split** |
+| `crosscode.py` | CrossCode.csv → the universe, filtered and deduplicated |
+| `india.py` | the ATS strategy files, and the BSE listings with no row of their own |
+| `limit_up_down.py` | orchestration, validation, environment copy |
+| `config/markets.csv` | one row per venue: cutoff, which side of the split, and India's `ExcludeFile` |
+| `config/bands.csv` | tiers per venue. Present for twelve; they are what make a venue switchable |
+| `config/spol_JKT.tsr` | **placeholder.** Point `TSR_DIR` at the ATS share, which also holds India's two `.stra` files. |
+
+`marketcfg` refuses a half-configured venue: a `bloomberg` venue carrying a tick
+file, tiers for a venue Bloomberg prices, a `computed` venue with no tiers. Each
+is somebody's half-finished edit, and each would otherwise surface as a market
+silently missing from a production feed.
+
+## Rules worth knowing about
+
+- **Indonesia's arithmetic runs in this order**: tier from the previous close,
+  band, floor the down leg at `MinPrice`, and only *then* round to the tick.
+  Rounding before flooring would move prices near a tier boundary. The tick is
+  chosen from the close, not from the limit being rounded.
+- **The cutoff is cumulative by time of day.** Each run rewrites the whole file
+  with the venues whose `Time` has passed, so the 07:30 run publishes Japan and
+  Korea and the 09:03 run republishes those and adds the rest.
+- **Deduplication prefers the ACTV row, then the ACTV filter takes the
+  rest.** A repeated `BloombergCode` is settled on `BloombergStatus`; if
+  none of the group is ACTV the code is published by nobody, because a band
+  off a delisted line is worse than no band. The order matters — filtering
+  first would leave dedupe's preference as dead code.
+- **A limit that does not bracket the last trade is not published.** A *missing*
+  last price is not a veto, though — it is counted and reported, because this
+  job runs pre-open and a real-time field may not have ticked yet. If
+  `LAST_PRICE` turns out to be always populated at run time, tighten
+  `bpipe.band_from`.
+- **A name under Rp 50 matches no tier**, and is reported rather than quietly
+  lost.
+- **Rights are excluded** by the `Type in {Equity, ETF}` filter on CrossCode.csv,
+  for every market.
+- **Write to temp, validate, then copy.**
+
+## Scope
+
+Nine countries, nineteen venues:
+
+| | venues | cutoff | source |
+|---|---|---|---|
+| Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | **bloomberg** |
+| Korea | `KOE-MAIN`, `KSC-MAIN` | 07:30 | computed, ±30% |
+| Malaysia | `KLS-MAIN` | 07:59 | computed, ±30% |
+| Taiwan | `TAI-MAIN` | 07:59 | computed, ±10% |
+| Indonesia | `JKT-MAIN` | 07:59 | computed, tiered + tick |
+| China | `SHA`, `SHH`, `SSC`, `SZA`, `SHZ`, `SZC` | 09:03 | computed, ±10% / ±20% |
+| Philippines | `PHS-MAIN` | 09:03 | computed, ±30% |
+| Thailand | `SET-MAIN` | 10:39 | **bloomberg**, local line only |
+| India | `NSI-MAIN`, `BSE-MAIN`, `BSE-SECONDARY` | 10:49 | **bloomberg**, less the ATS's own names |
+
+Thailand and India are the two that took more than a config row — see above.
+
+### The one arithmetic gap, and it is China's
+
+The China tiers key the wider band off the **ticker prefix**: `688` for the
+STAR board and `300` for ChiNext get ±20%, everything else ±10%. That is
+correct for the boards, but **ST and \*ST names are capped at ±5% and nothing
+here knows which they are** — the crosscode carries no such flag, so they get
+±10% and the band comes out twice as wide as the exchange allows.
+
+Bloomberg knew. This is the one thing the computed path gives up, and it
+applies to every Chinese venue now that they are all computed. Before Prod,
+either find a source for the ST flag or keep China on `bloomberg`.
+
+## Before this goes anywhere near Prod
+
+1. **Set `EQUITY_MASTER_SERVER`**, and check the `sym hit` counts in the run
+   report. A market whose count is zero is a market whose key does not
+   resolve, and it will publish nothing.
+2. **China's ST names** — see above. The only known arithmetic gap.
+3. **Coverage per venue against the file in production today.** `--compare`
+   exists exactly for this, and it matters more now than it did: twelve
+   markets just changed where their numbers come from, so the diff against
+   yesterday's Bloomberg-sourced file is the check that the tiers agree with
+   what the exchange actually did.
 
 ## other/
 
@@ -83,6 +441,6 @@ a missing entitlement both return nothing and only one of them is a finding.
 
 ## Documentation
 
-- v1, in detail: [`../docs/limit-up-down-how-it-works.md`](../docs/limit-up-down-how-it-works.md)
-- why v1 is built that way: [`../docs/superpowers/specs/2026-09-01-limit-up-down-python-design.md`](../docs/superpowers/specs/2026-09-01-limit-up-down-python-design.md)
-- v2: [`v2/README.md`](v2/README.md)
+- why it is built this way, and what the R job does:
+  [`../docs/superpowers/specs/2026-09-01-limit-up-down-python-design.md`](../docs/superpowers/specs/2026-09-01-limit-up-down-python-design.md)
+- the R job itself: `no_git/LimitUpDown.r`, which is not published here
