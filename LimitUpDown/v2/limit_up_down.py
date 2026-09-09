@@ -93,9 +93,10 @@ BPIPE_APP = ""
 #  venue needs it; a config where Bloomberg prices everything never connects.
 EQUITY_MASTER_SERVER = "CHANGEME:5010"
 CROSSCODE_PATH = r"CHANGEME\CrossCode.csv"
-#  Where spol_JKT.tsr lives.  Defaults to the copy shipped in config/ so the
-#  job runs offline; point it at the ATS share so Indonesia's ladder cannot
-#  drift from the trading system.
+#  The ATS share: spol_JKT.tsr and India's two .stra strategy files.
+#  Defaults to the copy of the ladder shipped in config/ so the job runs
+#  offline; point it at the share so Indonesia's ladder cannot drift from
+#  the trading system - and so India's exclusions are read at all.
 TSR_DIR = str(Path(__file__).resolve().parent / "config")
 OUT_TEMP = str(Path(__file__).resolve().parent / "out" / "limitUpDown.csv")
 OUT_TEST = ""

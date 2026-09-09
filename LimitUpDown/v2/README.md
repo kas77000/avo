@@ -93,9 +93,15 @@ strategy file in the new `ExcludeFile` column of `markets.csv`, and every
 mnemonic the file lists is dropped from the universe:
 
 ```
-India,NSI-MAIN,IN,10:49:00,bloomberg,,,,D:\...\in-nse_drv.stra
-India,BSE-MAIN,IB,10:49:00,bloomberg,,,,D:\...\in-bse_drv.stra
+India,NSI-MAIN,IN,10:49:00,bloomberg,,,,in-nse_drv.stra
+India,BSE-MAIN,IB,10:49:00,bloomberg,,,,in-bse_drv.stra
 ```
+
+Both are **filenames, not paths** — they are resolved against `TSR_DIR`,
+because they live beside `spol_JKT.tsr` on the ATS share. So the config
+committed here names no machine, and moving the share is one setting rather
+than three edits. An absolute path is still honoured, for the day one of them
+does not live with the others.
 
 The file is whitespace-separated with an eight-line preamble, and the mnemonic
 is its second field, matched against `Mnemo` with the first two characters
@@ -302,9 +308,9 @@ Fill in `BPIPE_HOST`, `BPIPE_PORT`, `BPIPE_APP`, `EQUITY_MASTER_SERVER`,
 `TSR_DIR` and the SMTP host. `EQUITY_MASTER_SERVER` is only read when some
 venue is `computed`.
 
-Then fill in the two `ExcludeFile` paths in `config/markets.csv`, which ship as
-`CHANGEME`. They are India's ATS strategy files, and the run stops on them at
-India's cutoff rather than publishing a limit over one the desk configured.
+`TSR_DIR` now carries India's two `.stra` strategy files as well as the tick
+ladder, so it has to be the real ATS share before India's 10:49 cutoff — the
+run stops there rather than publishing a limit over one the desk configured.
 The B-PIPE three have no defaults — the job refuses to start rather than connect
 somewhere you did not mean.
 
@@ -325,7 +331,7 @@ finishes last is the file that gets published.
 | `limit_up_down.py` | orchestration, validation, environment copy |
 | `config/markets.csv` | one row per venue: cutoff, which side of the split, and India's `ExcludeFile` |
 | `config/bands.csv` | tiers per venue. Present for twelve; they are what make a venue switchable |
-| `config/spol_JKT.tsr` | **placeholder.** Point `TSR_DIR` at the ATS share. |
+| `config/spol_JKT.tsr` | **placeholder.** Point `TSR_DIR` at the ATS share, which also holds India's two `.stra` files. |
 
 `marketcfg` refuses a half-configured venue: a `bloomberg` venue carrying a tick
 file, tiers for a venue Bloomberg prices, a `computed` venue with no tiers. Each

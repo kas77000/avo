@@ -15,6 +15,6 @@ China,SHZ-MAIN,CH,09:03:00,computed,,,,
 China,SZC-MAIN,CH,09:03:00,computed,,,,
 Philippines,PHS-MAIN,PM,09:03:00,computed,,,,
 Thailand,SET-MAIN,TB,10:39:00,bloomberg,,,,
-India,NSI-MAIN,IN,10:49:00,bloomberg,,,,CHANGEME\in-nse_drv.stra
-India,BSE-MAIN,IB,10:49:00,bloomberg,,,,CHANGEME\in-bse_drv.stra
+India,NSI-MAIN,IN,10:49:00,bloomberg,,,,in-nse_drv.stra
+India,BSE-MAIN,IB,10:49:00,bloomberg,,,,in-bse_drv.stra
 India,BSE-SECONDARY,IB,10:49:00,bloomberg,,,,

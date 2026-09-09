@@ -28,7 +28,9 @@ names quietly receiving a limit that overrides the desk's.
 WHERE THE PATH LIVES: the ExcludeFile column of config/markets.csv, one per
 venue, beside the venue's cutoff and its source.  R keeps StraNSI and
 StraBSE in config_cash.xml, a file away from the venue list; here the venue
-row carries everything about the venue.
+row carries everything about the venue.  It is a FILENAME, resolved against
+TSR_DIR - these live beside spol_JKT.tsr on the ATS share - so the config
+committed here names no machine.
 
 Whitespace-separated and read with str.split(), not a single space: the same
 lesson TradingData's caslist.py learned from these files.  R's sep=" " would

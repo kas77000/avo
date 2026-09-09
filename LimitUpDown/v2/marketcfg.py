@@ -26,9 +26,12 @@ ONE COLUMN IS CARRIED, NOT VALIDATED: ExcludeFile, the ATS strategy file
 whose names must NOT be published a limit.  Only India has one, and it is
 read by india.py when that venue reaches its cutoff - NOT here.  Checking
 it at load would let an Indian share being unreachable at 07:30 take out
-Japan, and R does not read it before the venue is in scope either.  A path
-relative to config/ is resolved against config/, the same courtesy
-TickSource gets.
+Japan, and R does not read it before the venue is in scope either.
+
+A BARE FILENAME IN EITHER FILE COLUMN IS RESOLVED AGAINST tsr_dir, because
+the tick table and the strategy files live in the same place - the ATS
+share.  markets.csv therefore names the file and never the machine, and
+moving the share is one setting rather than three edits.
 
     python marketcfg.py --self-test
 """
@@ -144,7 +147,8 @@ def load(config_dir, tsr_dir=None) -> Config:
         rounding = (r.get("Rounding") or "").strip()
         exclude_file = (r.get("ExcludeFile") or "").strip()
         if exclude_file and not Path(exclude_file).is_absolute():
-            exclude_file = str(config_dir / exclude_file)
+            #  Beside spol_JKT.tsr on the ATS share, not beside markets.csv.
+            exclude_file = str(tsr_dir / exclude_file)
 
         #  EVERY VENUE IS SWITCHABLE.  Flipping Source to computed must be a
         #  one-word edit, so the rounding and tick settings are allowed to
@@ -252,9 +256,10 @@ def self_test() -> int:
               + ("" if good else f"   got {got!r}, want it to contain "
                                 f"{fragment!r}"))
 
-    HDR = "Country,FidessaVenueID,Time,Source,TickSource,MinPrice,Rounding\n"
-    IDN = "Indonesia,JKT-MAIN,07:59:00,computed,spol_JKT.tsr,50,inward\n"
-    BBG = "China,SHA-MAIN,09:03:00,bloomberg,,,\n"
+    HDR = ("Country,FidessaVenueID,Time,Source,TickSource,MinPrice,"
+           "Rounding,ExcludeFile\n")
+    IDN = "Indonesia,JKT-MAIN,07:59:00,computed,spol_JKT.tsr,50,inward,\n"
+    BBG = "China,SHA-MAIN,09:03:00,bloomberg,,,,\n"
     BD = ("FidessaVenueID,Kind,SymPrefix,FloorFrom,Up,Down\n"
           "JKT-MAIN,pct,,50,0.35,0.35\n")
     TSR = "SPOL_JKT 0 1\nSPOL_JKT 200 2\n"
@@ -402,9 +407,35 @@ def self_test() -> int:
     check("BSE-SECONDARY does not, because it publishes no universe of its "
           "own - every row it carries is a copy of a BSE-MAIN one",
           real.venues["BSE-SECONDARY"].exclude_file, "")
-    check("a relative ExcludeFile is resolved against config/, so the "
-          "shipped placeholder is not read from the working directory",
-          Path(real.venues["NSI-MAIN"].exclude_file).is_absolute(), True)
+    #  The shipped markets.csv names the two .stra files and nothing else,
+    #  so where they are read from is TSR_DIR's business - the same share
+    #  the tick ladder comes off.
+    here = Path(__file__).resolve().parent / "config"
+    with tempfile.TemporaryDirectory() as d:
+        share = Path(d)
+        (share / "spol_JKT.tsr").write_text(
+            (here / "spol_JKT.tsr").read_text(encoding="utf-8"),
+            encoding="utf-8")
+        moved = load(here, share)
+        check("a bare ExcludeFile is resolved against TSR_DIR - the "
+              "strategy files sit beside spol_JKT.tsr on the ATS share, so "
+              "markets.csv names the file and never the machine",
+              Path(moved.venues["NSI-MAIN"].exclude_file),
+              share / "in-nse_drv.stra")
+        check("both of India's move with the share, so relocating it is one "
+              "setting rather than two edits",
+              Path(moved.venues["BSE-MAIN"].exclude_file),
+              share / "in-bse_drv.stra")
+
+    with tempfile.TemporaryDirectory() as d:
+        cfg = write(d, mk=HDR + IDN +
+                    "India,NSI-MAIN,10:49:00,bloomberg,,,,"
+                    + str(Path(d) / "elsewhere.stra") + "\n",
+                    bd=BD)
+        check("an absolute one is left exactly as written, for the day one "
+              "of them does not live with the others",
+              load(cfg).venues["NSI-MAIN"].exclude_file,
+              str(Path(d) / "elsewhere.stra"))
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1
