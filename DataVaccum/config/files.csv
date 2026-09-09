@@ -1,0 +1,3 @@
+Name,SourcePath,Route
+positions,\\CHANGEME-nas\risk\Positions.csv,direct
+prices,\\CHANGEME-vol1\marketdata\Prices.dat,server

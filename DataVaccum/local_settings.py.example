@@ -1,0 +1,57 @@
+#  Copy to local_settings.py and edit.  local_settings.py is gitignored, so a
+#  git pull is always clean and these survive it.
+#
+#  STRICT: a name this file sets that vaccum.py does not define is an ERROR,
+#  not a new setting.  A typo'd STAGING_UNK would otherwise sit there while
+#  the run used a default and quietly fetched nothing.
+#
+#  Nothing here is needed for rows with Route=direct.  A files.csv that is
+#  all direct rows never opens a WinRM connection, and only DEST_DIR is read.
+
+#  Where the files land.  ONE FLAT FOLDER - every file in files.csv is
+#  written here by its own name, so two shares with a file of the same name
+#  would collide.  Give one of them a different Name and check.
+DEST_DIR = r"CHANGEME\Data\vaccum"
+
+#  ---- everything below is only read by Route=server rows ----
+
+#  The server you currently RDP into.  Hostname or IP, no scheme, no port.
+SERVER = "CHANGEME"
+
+#  DOMAIN\user, not just user - NTLM needs the domain and fails with a
+#  confusing 401 without it.
+WINRM_USER = "CHANGEME"
+WINRM_PASSWORD = "CHANGEME"
+
+#  "ntlm" is the default and needs nothing installed.  It CANNOT pass your
+#  credentials on to a file share, though - see the double hop note at the
+#  top of staging.py - so if --probe reports DENIED on a share the server
+#  ought to be able to read, this is the knob:
+#
+#      "credssp"    delegates properly.  Needs `pip install requests-credssp`
+#                   here and `Enable-WSManCredSSP -Role Server` once on the
+#                   server.  Some estates disable it by policy.
+#      "kerberos"   the right answer in a well-run domain, but the
+#                   delegation has to be configured in AD by someone with
+#                   the rights to do it.
+WINRM_TRANSPORT = "ntlm"
+
+#  5985 is HTTP, 5986 is HTTPS.  Set WINRM_USE_SSL when you change to 5986.
+#  The traffic is encrypted at the message layer eve on 5985, so plain HTTP
+#  here is not the same thing as a plaintext password on the wire.
+WINRM_PORT = 5985
+WINRM_USE_SSL = False
+
+#  The staging folder, named TWICE because it is named by two machines.
+#
+#    STAGING_DIR   how the SERVER refers to it, a local path on the server
+#    STAGING_UNC   how THIS machine reads the same folder, over SMB
+#
+#  They have to be the same folder.  Pointing them at different places is
+#  the mistake to watch for: staging succeeds, robocopy then finds nothing,
+#  and the error talks about a missing file rather than a mismatch.
+#
+#  The folder needs to be shared and readable by WINRM_USER from here.
+#  --probe checks exactly that and says so.
+STAGING_DIR = r"CHANGEME\staging"
+STAGING_UNC = r"\\CHANGEME\staging"
