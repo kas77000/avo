@@ -22,6 +22,14 @@ table but no rounding to use it, a computed venue with no tiers, tiers for a
 venue markets.csv has never heard of.  Each would otherwise surface as a
 market silently missing from a production feed.
 
+ONE COLUMN IS CARRIED, NOT VALIDATED: ExcludeFile, the ATS strategy file
+whose names must NOT be published a limit.  Only India has one, and it is
+read by india.py when that venue reaches its cutoff - NOT here.  Checking
+it at load would let an Indian share being unreachable at 07:30 take out
+Japan, and R does not read it before the venue is in scope either.  A path
+relative to config/ is resolved against config/, the same courtesy
+TickSource gets.
+
     python marketcfg.py --self-test
 """
 
@@ -55,6 +63,9 @@ class Venue:
     min_price: Optional[Decimal]
     rounding: str
     bbg_composite: str = ""
+    #  The ATS strategy file listing names this venue must NOT publish a
+    #  limit for.  India only; read by india.py, at its cutoff, not here.
+    exclude_file: str = ""
 
     @property
     def computed(self) -> bool:
@@ -131,6 +142,9 @@ def load(config_dir, tsr_dir=None) -> Config:
         tick_source = (r.get("TickSource") or "").strip()
         raw_min = (r.get("MinPrice") or "").strip()
         rounding = (r.get("Rounding") or "").strip()
+        exclude_file = (r.get("ExcludeFile") or "").strip()
+        if exclude_file and not Path(exclude_file).is_absolute():
+            exclude_file = str(config_dir / exclude_file)
 
         #  EVERY VENUE IS SWITCHABLE.  Flipping Source to computed must be a
         #  one-word edit, so the rounding and tick settings are allowed to
@@ -161,7 +175,8 @@ def load(config_dir, tsr_dir=None) -> Config:
             tick_source=tick_source,
             min_price=(_decimal(raw_min, f"markets.csv {vid} MinPrice")
                        if raw_min else None),
-            rounding=rounding or "none")
+            rounding=rounding or "none",
+            exclude_file=exclude_file)
 
     if not venues:
         raise ConfigError(f"{config_dir / 'markets.csv'} defines no venues")
@@ -343,16 +358,18 @@ def self_test() -> int:
 
     print("\nthe real shipped config")
     real = load(Path(__file__).resolve().parent / "config")
-    check("fifteen venues", len(real.venues), 15)
-    check("seven countries in scope",
+    check("nineteen venues", len(real.venues), 19)
+    check("nine countries in scope",
           sorted({v.country for v in real.venues.values()}),
-          ["China", "Indonesia", "Japan", "Korea", "Malaysia", "Philippines",
-           "Taiwan"])
-    check("JAPAN is the only market Bloomberg prices - everything else is "
-          "computed, so an entitlement refusal cannot empty a market",
+          ["China", "India", "Indonesia", "Japan", "Korea", "Malaysia",
+           "Philippines", "Taiwan", "Thailand"])
+    check("JAPAN, THAILAND and INDIA are the markets Bloomberg prices - "
+          "everything else is computed, so an entitlement refusal cannot "
+          "empty those",
           sorted(v.venue_id for v in real.venues.values()
                  if not v.computed),
-          ["CHJ-MAIN", "JNX-MAIN", "TYO-MAIN"])
+          ["BSE-MAIN", "BSE-SECONDARY", "CHJ-MAIN", "JNX-MAIN", "NSI-MAIN",
+           "SET-MAIN", "TYO-MAIN"])
     check("and every computed venue has the tiers it needs, so the shipped "
           "config cannot fail at load",
           [v.venue_id for v in real.venues.values()
@@ -368,11 +385,26 @@ def self_test() -> int:
     check("all three Japanese venues share Korea's 07:30 cutoff",
           {v.cutoff for v in real.venues.values() if v.country == "Japan"},
           {time(7, 30)})
-    check("Thailand and India are OUT, and not by accident - each needs a "
-          "filter that is not written here",
-          [k for k in real.venues
-           if k in ("SET-MAIN", "NSI-MAIN", "BSE-MAIN", "BSE-SECONDARY")],
-          [])
+    check("Thailand is one venue, priced by Bloomberg - its /F and /Q "
+          "lines are dropped in crosscode.py, which is what kept it out "
+          "until somebody wrote that filter",
+          [k for k, v in real.venues.items() if v.country == "Thailand"],
+          ["SET-MAIN"])
+    check("India is three: both exchanges plus the secondary venue the BSE "
+          "rows are published under a second time",
+          sorted(k for k, v in real.venues.items() if v.country == "India"),
+          ["BSE-MAIN", "BSE-SECONDARY", "NSI-MAIN"])
+    check("and both Indian exchanges name the ATS strategy file whose "
+          "names must NOT be published a limit - without it this job would "
+          "override a number a person set",
+          [k for k in ("NSI-MAIN", "BSE-MAIN")
+           if not real.venues[k].exclude_file], [])
+    check("BSE-SECONDARY does not, because it publishes no universe of its "
+          "own - every row it carries is a copy of a BSE-MAIN one",
+          real.venues["BSE-SECONDARY"].exclude_file, "")
+    check("a relative ExcludeFile is resolved against config/, so the "
+          "shipped placeholder is not read from the working directory",
+          Path(real.venues["NSI-MAIN"].exclude_file).is_absolute(), True)
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

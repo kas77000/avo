@@ -4,12 +4,31 @@
 Two files and a clock.  config/markets.csv says which venues exist and when
 each one's data is ready; CrossCode.csv says what trades on them.
 
-FOUR FILTERS, in this order:
+SIX FILTERS, in this order:
 
   security type      Equity and ETF only
   configured venue   a FidessaMarket we know
   cutoff             a venue whose Time has passed
+  foreign ticker     Thailand only: no /F or /Q line
+  static limit       India only: not a name the ATS strategy file configures
   BloombergStatus    ACTV only, applied after deduplication
+
+THE LAST TWO ARE ONE MARKET EACH, and each is why that market was out of
+scope until somebody wrote it.
+
+  THAILAND lists the same company three ways - the local line, the foreign
+  board (/F) and the NVDR (/Q) - and Nova trades the local one.  Publishing
+  a band for the other two would put limits on instruments the ATS has no
+  order flow for.  (LimitUpDown.r:178-184)
+
+  INDIA has names whose limits are configured inside the ATS strategy file
+  named by the venue's ExcludeFile column.  For those, Nova's own config is
+  the authority, and a published row would OVERRIDE a number a person set.
+  So they are dropped here rather than priced.  (LimitUpDown.r:112-152)
+
+  The mnemonic is matched with its first two characters stripped, which is
+  what R's sub("..", "", Mnemo) does - the crosscode prefixes a country
+  code the strategy file does not carry.
 
 THE ACTV FILTER IS THE ONE WE ALREADY HAD THE DATA FOR.  CrossCode carries
 BloombergStatus, and dedupe below already trusts it to choose between two
@@ -39,12 +58,19 @@ This module does not care where a venue's band comes from.  It builds the
 universe; marketcfg.Config.by_source splits it afterwards into the names
 Bloomberg prices and the names we compute.
 
+THREE COLUMNS RIDE ALONG UNUSED BY ANY FILTER - VenueList, BSEBloombergCode
+and BSERic.  They are how a row says "this company is also reachable on the
+BSE, under this other code", a listing with no crosscode line of its own.
+india.secondary_rows turns them into rows; nothing else reads them, and a
+crosscode without the columns simply has none to offer.
+
     python crosscode.py --self-test
 """
 
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass, field
 from datetime import time
 from pathlib import Path
@@ -52,6 +78,15 @@ from pathlib import Path
 KEEP_TYPES = ("Equity", "ETF")
 STATUS_COLUMN = "BloombergStatus"
 ACTIVE_STATUS = ("ACTV",)
+
+#  Thailand's foreign board and NVDR lines, which Nova does not trade.
+#  R greps the same two on the BloombergCode: LimitUpDown.r:180.
+THAI_VENUE = "SET-MAIN"
+FOREIGN_TICKER = re.compile(r"/F|/Q")
+
+#  The crosscode prefixes its Mnemo with a two character country code that
+#  the ATS strategy file does not carry.  R: sub("..", "", Mnemo).
+MNEMO_PREFIX = 2
 
 
 class ConfigError(Exception):
@@ -67,6 +102,11 @@ class Row:
     fidessa_code: str
     venue_id: str
     status: str
+    #  The BSE listing this row also stands for, when it has one.  Read but
+    #  never filtered on here - see india.secondary_rows.
+    venue_list: str = ""
+    bse_bbg: str = ""
+    bse_ric: str = ""
 
 
 @dataclass(frozen=True)
@@ -116,6 +156,16 @@ def ticker_of(bbg: str) -> str:
     return (bbg or "").rsplit(" ", 1)[0]
 
 
+def mnemo_key(mnemo: str) -> str:
+    """'INRELIANCE' -> 'RELIANCE', the form an ATS strategy file uses.
+
+    R's sub("..", "", Mnemo) strips the first two characters, a country code
+    the strategy file does not carry.  A mnemonic shorter than that yields
+    the empty string and matches nothing, which is right: there is no name
+    there to exclude."""
+    return (mnemo or "")[MNEMO_PREFIX:]
+
+
 def dedupe(rows):
     """Settle a BloombergCode claimed by more than one row.
 
@@ -153,7 +203,13 @@ def dedupe(rows):
     return kept, removed
 
 
-def load(path, venues: dict, now: time):
+def load(path, venues: dict, now: time, strat=None):
+    """The universe, and everything that did not make it.
+
+    `strat` is {venue_id: set of mnemonics whose limits the ATS configures},
+    from india.strategy_lists.  Empty or absent means no venue has one and
+    the filter never fires - the state of every market but India."""
+    strat = strat or {}
     path = Path(path)
     if not path.is_file():
         raise ConfigError(f"{path} does not exist")
@@ -200,11 +256,28 @@ def load(path, venues: dict, now: time):
                 drop("no BloombergCode to ask Bloomberg about", ric, bbg,
                      venue_id)
                 continue
+            if venue_id == THAI_VENUE and FOREIGN_TICKER.search(bbg):
+                #  The foreign board and the NVDR, which Nova does not
+                #  trade.  Dropped here rather than at the Bloomberg fetch
+                #  so they are counted with every other exclusion and never
+                #  paid for in a request.
+                drop("Thai foreign or NVDR line, not the local one", ric,
+                     bbg, venue_id)
+                continue
+            configured = strat.get(venue_id)
+            if configured and mnemo_key(
+                    (r.get("Mnemo") or "").strip()) in configured:
+                drop("limit is configured in the ATS strategy file", ric,
+                     bbg, venue_id)
+                continue
             kept.append(Row(ric=ric, bbg=bbg, ticker=ticker_of(bbg),
                             security=security_name(bbg),
                             fidessa_code=(r.get("FidessaCode") or "").strip(),
                             venue_id=venue_id,
-                            status=(r.get("BloombergStatus") or "").strip()))
+                            status=(r.get("BloombergStatus") or "").strip(),
+                            venue_list=(r.get("VenueList") or "").strip(),
+                            bse_bbg=(r.get("BSEBloombergCode") or "").strip(),
+                            bse_ric=(r.get("BSERic") or "").strip()))
 
     kept, deduped = dedupe(kept)
     if deduped:
@@ -270,6 +343,13 @@ def self_test() -> int:
           "7203 JT equity")
     check("nothing in, nothing out", security_name(""), "")
 
+    print("\nstripping the country code off a crosscode mnemonic")
+    check("the ATS strategy file spells it without one",
+          mnemo_key("INRELIANCE"), "RELIANCE")
+    check("a mnemonic too short to have one matches nothing",
+          mnemo_key("IN"), "")
+    check("nothing in, nothing out", mnemo_key(""), "")
+
     print("\nsplitting the code into a ticker, for a computed venue's tiers")
     check("the code without its exchange", ticker_of("600001 CG"), "600001")
     check("a ticker with a space keeps everything but the last word",
@@ -286,6 +366,9 @@ def self_test() -> int:
 
     V = {"TYO-MAIN": venue("TYO-MAIN", time(7, 30)),
          "SHA-MAIN": venue("SHA-MAIN", time(9, 3))}
+    IN_TH = {"SET-MAIN": venue("SET-MAIN", time(10, 39)),
+             "NSI-MAIN": venue("NSI-MAIN", time(10, 49)),
+             "BSE-MAIN": venue("BSE-MAIN", time(10, 49))}
 
     print("\nfiltering the universe")
     BODY = ("7203.T,7203 JT,7203.JP,TYO-MAIN,Equity,ACTV\n"
@@ -323,6 +406,84 @@ def self_test() -> int:
 
         rows, _ = load(cc, V, time(6, 0))
         check("before every cutoff, nothing is published", rows, [])
+
+    print("\nThailand: the foreign board and the NVDR are not the local line")
+    with tempfile.TemporaryDirectory() as d:
+        cc = Path(d) / "CrossCode.csv"
+        cc.write_text(HDR +
+                      "PTT.BK,PTT TB,PTT.TH,SET-MAIN,Equity,ACTV\n"
+                      "PTTf.BK,PTT/F TB,PTT.TH,SET-MAIN,Equity,ACTV\n"
+                      "PTTn.BK,PTT/Q TB,PTT.TH,SET-MAIN,Equity,ACTV\n",
+                      encoding="utf-8")
+        rows, excl = load(cc, IN_TH, time(11, 0))
+        check("only the local line is published - Nova has no order flow "
+              "for the other two, and a band on them is a band on an "
+              "instrument nobody trades",
+              [r.ric for r in rows], ["PTT.BK"])
+        check("and both are named, not silently gone",
+              [d.ric for d in {e.reason: e.rows for e in excl}[
+                  "Thai foreign or NVDR line, not the local one"]],
+              ["PTTf.BK", "PTTn.BK"])
+
+        cc.write_text(HDR + "A.T,A/F JT,A.JP,TYO-MAIN,Equity,ACTV\n",
+                      encoding="utf-8")
+        rows, _ = load(cc, V, time(11, 0))
+        check("the filter is Thailand's alone - a slash in a Japanese code "
+              "is somebody else's share class, not an NVDR",
+              [r.ric for r in rows], ["A.T"])
+
+    print("\nIndia: names whose limit the ATS strategy file already sets")
+    IHDR = ("RicCode,BloombergCode,FidessaCode,FidessaMarket,Type,"
+            "BloombergStatus,Mnemo\n")
+    with tempfile.TemporaryDirectory() as d:
+        cc = Path(d) / "CrossCode.csv"
+        cc.write_text(IHDR +
+                      "RELI.NS,RIL IN,RELIANCE.IN,NSI-MAIN,Equity,ACTV,"
+                      "INRELIANCE\n"
+                      "TCS.NS,TCS IN,TCS.IN,NSI-MAIN,Equity,ACTV,INTCS\n"
+                      "RELI.BO,500325 IB,RELIANCE.IN,BSE-MAIN,Equity,ACTV,"
+                      "INRELIANCE\n", encoding="utf-8")
+        rows, excl = load(cc, IN_TH, time(11, 0),
+                          {"NSI-MAIN": {"RELIANCE"}})
+        check("a name the strategy file configures gets NO published limit "
+              "- one would override the number a person set",
+              sorted(r.ric for r in rows), ["RELI.BO", "TCS.NS"])
+        check("and it is named, with its venue",
+              [(d.ric, d.venue_id) for d in {e.reason: e.rows for e in excl}[
+                  "limit is configured in the ATS strategy file"]],
+              [("RELI.NS", "NSI-MAIN")])
+        check("the exclusion is per venue: the same company on the OTHER "
+              "exchange is untouched unless that exchange's own file lists "
+              "it",
+              [r.ric for r in load(cc, IN_TH, time(11, 0),
+                                   {"BSE-MAIN": {"RELIANCE"}})[0]
+               if r.venue_id == "BSE-MAIN"], [])
+        rows, _ = load(cc, IN_TH, time(11, 0), None)
+        check("no strategy list at all means the filter never fires, which "
+              "is every market but India", len(rows), 3)
+        rows, _ = load(cc, IN_TH, time(11, 0), {"NSI-MAIN": {"INRELIANCE"}})
+        check("the match is on the mnemonic WITHOUT its country code - the "
+              "raw crosscode value matches nobody", len(rows), 3)
+
+    print("\nthe BSE listing a row carries for somebody else")
+    with tempfile.TemporaryDirectory() as d:
+        cc = Path(d) / "CrossCode.csv"
+        cc.write_text(
+            "RicCode,BloombergCode,FidessaCode,FidessaMarket,Type,"
+            "BloombergStatus,VenueList,BSEBloombergCode,BSERic\n"
+            "RELI.NS,RIL IN,RELIANCE.IN,NSI-MAIN,Equity,ACTV,"
+            "NSI-MAIN|BSE-SECONDARY,500325 IB,RELI.BO\n",
+            encoding="utf-8")
+        rows, _ = load(cc, IN_TH, time(11, 0))
+        check("the three columns ride along, unfiltered, for india.py",
+              (rows[0].venue_list, rows[0].bse_bbg, rows[0].bse_ric),
+              ("NSI-MAIN|BSE-SECONDARY", "500325 IB", "RELI.BO"))
+        cc.write_text(HDR + "A.T,A JT,A.JP,TYO-MAIN,Equity,ACTV\n",
+                      encoding="utf-8")
+        rows, _ = load(cc, V, time(11, 0))
+        check("a crosscode without the columns simply has none to offer",
+              (rows[0].venue_list, rows[0].bse_bbg, rows[0].bse_ric),
+              ("", "", ""))
 
     print("\ndeduplicating a repeated bloomberg code")
     with tempfile.TemporaryDirectory() as d:

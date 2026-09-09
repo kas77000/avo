@@ -37,7 +37,14 @@ request:
                                    cutoff and BloombergStatus, deduplicated
                                    on BloombergCode
   split by Source              ->  ask Bloomberg | compute from kdb
+  + India's BSE secondary      ->  asked with the rest, published twice
   temp file -> validate -> Test / Pilot / Prod
+
+TWO MARKETS NEED MORE THAN A CONFIG ROW, and india.py is why they are in
+scope at all.  Thailand's /F and /Q lines are dropped in crosscode.py;
+India's ATS-configured names are dropped there too, off a strategy file the
+venue names in its ExcludeFile column, and India's BSE listings are
+synthesised here because they have no crosscode line of their own.
 
 HOW THIS DIFFERS FROM v1.  v1 computes EVERY market and has no Bloomberg at
 all.  v2 can do the same - switch every venue - but does not have to, so a
@@ -67,6 +74,7 @@ from pathlib import Path
 import bands
 import bpipe
 import crosscode
+import india
 import kdbclose
 import mailer
 import marketcfg
@@ -137,6 +145,8 @@ REQUIRED = {
     "kdbclose": ("connect", "parse_server", "resolve_date", "fetch",
                  "closes_for", "sym_candidates", "date_text", "KdbError"),
     "crosscode": ("load", "Dropped", "Excluded"),
+    "india": ("strategy_lists", "secondary_rows", "publish_both",
+              "SECONDARY_VENUE", "IndiaError"),
     "marketcfg": ("load", "ConfigError"),
     "bands": ("compute", "BandError"),
     "ticks": ("tick_for",),
@@ -269,12 +279,12 @@ def _venue_summary(cfg, out, excluded):
         for venue, rows in e.by_venue().items():
             dropped[venue] = dropped.get(venue, 0) + len(rows)
 
-    lines = [f"  {'venue':<12} {'published':>9} {'excluded':>9}  source"]
+    lines = [f"  {'venue':<14} {'published':>9} {'excluded':>9}  source"]
     for v in sorted(set(cfg.venues) | set(published) | set(dropped)):
         src = cfg.venues[v].source if v in cfg.venues else "not configured"
         flag = "   <- nothing published" if (published.get(v, 0) == 0
                                              and dropped.get(v, 0)) else ""
-        lines.append(f"  {v:<12} {published.get(v, 0):9d} "
+        lines.append(f"  {v:<14} {published.get(v, 0):9d} "
                      f"{dropped.get(v, 0):9d}  {src}{flag}")
     return lines
 
@@ -292,7 +302,7 @@ def _exclusion_lines(excluded):
             shown = ", ".join(str(d) for d in dropped[:SHOW_NAMES])
             more = (f" (+{len(dropped) - SHOW_NAMES} more)"
                     if len(dropped) > SHOW_NAMES else "")
-            lines.append(f"    {venue:<12} {len(dropped):6d}  {shown}{more}")
+            lines.append(f"    {venue:<14} {len(dropped):6d}  {shown}{more}")
     return lines
 
 
@@ -472,7 +482,18 @@ def run(envs_spec: str) -> int:
         here = Path(__file__).resolve().parent
         cfg = marketcfg.load(here / "config", Path(TSR_DIR))
         now = dt.datetime.now().time()
-        rows, excluded = crosscode.load(CROSSCODE_PATH, cfg.venues, now)
+        #  READ BEFORE THE CROSSCODE, and only for the venues whose cutoff
+        #  has passed.  An unreadable strategy file is fatal - an empty
+        #  exclusion list is indistinguishable from a correct one, and the
+        #  only symptom would be Indian names published a limit that
+        #  overrides the one the ATS was configured with.  Scoping it to the
+        #  cutoff is what keeps an Indian share being down from taking out
+        #  the 07:30 Japan run.
+        strat = india.strategy_lists(
+            [v.venue_id for v in cfg.venues.values() if now >= v.cutoff],
+            {v.venue_id: v.exclude_file for v in cfg.venues.values()})
+        rows, excluded = crosscode.load(CROSSCODE_PATH, cfg.venues, now,
+                                        strat)
 
         if not rows:
             print("no venue has reached its cutoff yet - nothing to publish")
@@ -484,13 +505,21 @@ def run(envs_spec: str) -> int:
         #  one computed venue or fifteen is a config question.
         ask, compute = cfg.by_source(rows)
 
+        #  India's BSE listings, which live in three columns of somebody
+        #  else's row rather than in rows of their own.  Priced by the same
+        #  Bloomberg path as `ask` and asked in the same request - kept in
+        #  their own list only because each priced row is published TWICE,
+        #  under BSE-MAIN and BSE-SECONDARY.
+        secondary = india.secondary_rows(rows)
+
         def progress(what):
             def report(n, total, so_far):
                 print(f"  {what}: batch {n}/{total}, {so_far} answered",
                       end="\r")
             return report
 
-        print(f"{len(compute)} computed, then {len(ask)} from Bloomberg")
+        print(f"{len(compute)} computed, then {len(ask)} from Bloomberg"
+              + (f" (+{len(secondary)} BSE secondary)" if secondary else ""))
 
         #  EACH SOURCE IS OPENED ONLY IF IT HAS WORK.  Switch every venue to
         #  computed and this never touches B-PIPE - which is the point of
@@ -527,12 +556,13 @@ def run(envs_spec: str) -> int:
                   f"{len(compute)} names")
 
         limits, refused, field_problems = {}, {}, {}
-        if ask:
+        if ask or secondary:
             session, identity = bpipe.connect(BPIPE_HOST, BPIPE_PORT,
                                               BPIPE_APP)
             print(f"connected to {BPIPE_HOST}:{BPIPE_PORT} as {BPIPE_APP}")
             limits, refused, field_problems = bpipe.fetch(
-                session, identity, [r.security for r in ask],
+                session, identity,
+                [r.security for r in ask] + [r.security for r in secondary],
                 progress=progress("limits"))
             print()
     except Exception as e:                           # noqa: BLE001
@@ -550,8 +580,12 @@ def run(envs_spec: str) -> int:
 
     out, more = price_from_bloomberg(ask, limits, refused)
     computed_out, computed_excluded = price_computed(cfg, compute, closes)
-    out = out + computed_out
-    excluded = list(excluded) + list(more) + list(computed_excluded)
+    #  One set of limits, two venues.  R writes the same rows twice, once
+    #  under each, and the ATS reads both.
+    sec_out, sec_excluded = price_from_bloomberg(secondary, limits, refused)
+    out = out + computed_out + sec_out + india.publish_both(sec_out)
+    excluded = (list(excluded) + list(more) + list(computed_excluded)
+                + list(sec_excluded))
 
     problems = validate(out)
     if problems:
@@ -626,10 +660,11 @@ def run(envs_spec: str) -> int:
     return 0
 
 
-def _row(ric, bbg, code, venue_id, status="ACTV"):
+def _row(ric, bbg, code, venue_id, status="ACTV", **extra):
     return crosscode.Row(ric=ric, bbg=bbg, ticker=crosscode.ticker_of(bbg),
                          security=crosscode.security_name(bbg),
-                         fidessa_code=code, venue_id=venue_id, status=status)
+                         fidessa_code=code, venue_id=venue_id, status=status,
+                         **extra)
 
 
 def demo() -> int:
@@ -657,8 +692,17 @@ def demo() -> int:
             _row("BBCA.JK", "BBCA IJ", "BBCA.ID", "JKT-MAIN"),
             _row("TLKM.JK", "TLKM IJ", "TLKM.ID", "JKT-MAIN"),
             _row("TINY.JK", "TINY IJ", "TINY.ID", "JKT-MAIN"),
-            _row("NOCL.JK", "NOCL IJ", "NOCL.ID", "JKT-MAIN")]
+            _row("NOCL.JK", "NOCL IJ", "NOCL.ID", "JKT-MAIN"),
+            #  Thailand.  Only the local line ever reaches here - the /F and
+            #  /Q lines are dropped in crosscode.py, before the universe.
+            _row("PTT.BK", "PTT TB", "PTT.TH", "SET-MAIN"),
+            #  India.  The NSE row also carries a BSE listing that has no
+            #  crosscode line of its own, in three columns of its own row.
+            _row("RELI.NS", "RIL IN", "RELIANCE.IN", "NSI-MAIN",
+                 venue_list="NSI-MAIN|BSE-SECONDARY",
+                 bse_bbg="500325 IB", bse_ric="RELI.BO")]
     ask, compute = cfg.by_source(rows)
+    secondary = india.secondary_rows(rows)
 
     #  7203 is the real answer the probe got on 2026-09-03.  The PTS line
     #  carries the same limits, which is what makes JNX and CHJ publishable.
@@ -671,7 +715,13 @@ def demo() -> int:
               "WIDE JT Equity": {"MIN_LIMIT": 2433.0, "MAX_LIMIT": 3833.0,
                                  "LAST_PRICE": 99000.0},
               "DEAD JT Equity": {"MIN_LIMIT": 2433.0, "MAX_LIMIT": 3833.0,
-                                 "MARKET_STATUS": "DLST"}}
+                                 "MARKET_STATUS": "DLST"},
+              "PTT TB Equity": {"MIN_LIMIT": 28.0, "MAX_LIMIT": 40.0,
+                                "LAST_PRICE": 34.0},
+              "RIL IN Equity": {"MIN_LIMIT": 1200.0, "MAX_LIMIT": 1600.0,
+                                "LAST_PRICE": 1400.0},
+              "500325 IB Equity": {"MIN_LIMIT": 1190.0, "MAX_LIMIT": 1610.0,
+                                   "LAST_PRICE": 1400.0}}
     refused = {"NOPX JT Equity":
                "Security Entitlement Check Failed! EID(s) needed: 64487 "
                "or 64488 [nid:58106]"}
@@ -687,7 +737,8 @@ def demo() -> int:
 
     out, excluded = price_from_bloomberg(ask, limits, refused)
     computed, computed_excluded = price_computed(cfg, compute, closes)
-    out = out + computed
+    sec_out, sec_excluded = price_from_bloomberg(secondary, limits, refused)
+    out = out + computed + sec_out + india.publish_both(sec_out)
 
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=OUT_HEADER, lineterminator="\n")
@@ -695,10 +746,10 @@ def demo() -> int:
     w.writerows(out)
     print(buf.getvalue(), end="")
 
-    print(f"--- {len(ask)} asked, {len(compute)} computed ---",
-          file=sys.stderr)
-    every = list(excluded) + list(computed_excluded)
-    for line in _venue_summary(cfg, out + computed, every):
+    print(f"--- {len(ask)} asked, {len(compute)} computed, "
+          f"{len(secondary)} BSE secondary ---", file=sys.stderr)
+    every = list(excluded) + list(computed_excluded) + list(sec_excluded)
+    for line in _venue_summary(cfg, out, every):
         print(line, file=sys.stderr)
     for line in _exclusion_lines(every):
         print(line, file=sys.stderr)
@@ -943,7 +994,7 @@ def self_test() -> int:
     asked, computed = cfg.by_source(mixed)
     check("the shipped config computes China too, not just Indonesia",
           sorted({r.venue_id for r in computed}), ["JKT-MAIN", "SHA-MAIN"])
-    check("and asks Bloomberg for nothing outside Japan",
+    check("and asks Bloomberg for none of them",
           [r.venue_id for r in asked], [])
     japan = [row("7203.T", "7203 JT", "7203.JP", "TYO-MAIN")]
     asked2, computed2 = cfg.by_source(japan)
@@ -1065,22 +1116,21 @@ def self_test() -> int:
         (Path(d) / "spol_JKT.tsr").write_text(
             (real / "spol_JKT.tsr").read_text(encoding="utf-8"),
             encoding="utf-8")
-        flipped = header.replace(",bloomberg,", ",computed,")
-        keep_japan = "".join(
-            line if line.startswith("Japan,") else
-            line.replace(",bloomberg,", ",computed,")
-            for line in header.splitlines(keepends=True))
-        (Path(d) / "markets.csv").write_text(keep_japan, encoding="utf-8")
-        cfg2 = marketcfg.load(Path(d), Path(d))
-        check("every venue with tiers flips to computed by editing ONE word "
-              "in markets.csv, with no code change",
-              len([v for v in cfg2.venues.values() if v.computed]), 12)
-        check("and the ones without tiers are left alone",
-              sorted(v.venue_id for v in cfg2.venues.values()
-                     if not v.computed),
-              ["CHJ-MAIN", "JNX-MAIN", "TYO-MAIN"])
 
-        (Path(d) / "markets.csv").write_text(flipped, encoding="utf-8")
+        #  EVERY venue can go to bloomberg, because asking needs no tiers.
+        #  That is the direction which rescues a market whose rule turns out
+        #  to be wrong: one word, no code.
+        (Path(d) / "markets.csv").write_text(
+            header.replace(",computed,", ",bloomberg,"), encoding="utf-8")
+        cfg2 = marketcfg.load(Path(d), Path(d))
+        check("every venue flips to bloomberg by editing ONE word in "
+              "markets.csv, with no code change",
+              [v.venue_id for v in cfg2.venues.values() if v.computed], [])
+        check("and all nineteen are still there", len(cfg2.venues), 19)
+
+        #  The other direction is not free, and must not silently be.
+        (Path(d) / "markets.csv").write_text(
+            header.replace(",bloomberg,", ",computed,"), encoding="utf-8")
         try:
             marketcfg.load(Path(d), Path(d))
             got = "loaded"
@@ -1088,8 +1138,47 @@ def self_test() -> int:
             got = str(e)
         check("switching a venue that has NO tiers is refused loudly rather "
               "than publishing a made-up band - Tokyo's limits are an "
-              "absolute step table nobody has written down here",
+              "absolute step table nobody has written down here, and "
+              "neither Thailand's rule nor India's is written either",
               "no band tiers in bands.csv" in got, True)
+
+    shipped = marketcfg.load(real, real)
+    check("as shipped, the markets Bloomberg prices are Japan, Thailand and "
+          "India - the three whose rules are not in bands.csv",
+          sorted({v.country for v in shipped.venues.values()
+                  if not v.computed}), ["India", "Japan", "Thailand"])
+    check("and not one of them has tiers, so none could be computed today "
+          "even by accident",
+          [v.venue_id for v in shipped.venues.values()
+           if not v.computed and v.venue_id in shipped.bands], [])
+
+    print("\nIndia, end to end through both halves of the fetch")
+    ind = [_row("RELI.NS", "RIL IN", "RELIANCE.IN", "NSI-MAIN",
+                venue_list="NSI-MAIN|BSE-SECONDARY", bse_bbg="500325 IB",
+                bse_ric="RELI.BO"),
+           _row("TCS.NS", "TCS IN", "TCS.IN", "NSI-MAIN")]
+    sec = india.secondary_rows(ind)
+    ind_values = {"RIL IN Equity": {"MIN_LIMIT": 1200.0, "MAX_LIMIT": 1600.0},
+                  "TCS IN Equity": {"MIN_LIMIT": 10.0, "MAX_LIMIT": 20.0},
+                  "500325 IB Equity": {"MIN_LIMIT": 1190.0,
+                                       "MAX_LIMIT": 1610.0}}
+    nse_out, _ = price_from_bloomberg(ind, ind_values)
+    bse_out, _ = price_from_bloomberg(sec, ind_values)
+    whole = nse_out + bse_out + india.publish_both(bse_out)
+    check("the NSE rows, the BSE row, and the BSE row again under the "
+          "secondary venue",
+          [(r["#ReutersCode"], r["Venue"]) for r in whole],
+          [("RELI.NS", "NSI-MAIN"), ("TCS.NS", "NSI-MAIN"),
+           ("RELI.BO", "BSE-MAIN"), ("RELI.BO", "BSE-SECONDARY")])
+    check("the BSE listing is priced off its OWN Bloomberg code, not the "
+          "NSE one - two lines of one company, with their own limits",
+          [(r["BloombergCode"], r["LimitUpPrice"]) for r in whole
+           if r["Venue"].startswith("BSE")],
+          [("500325 IB", "1610"), ("500325 IB", "1610")])
+    check("both BSE rows carry the same numbers, which is the whole point "
+          "of publishing one fetch twice",
+          whole[2]["LimitDownPrice"] == whole[3]["LimitDownPrice"], True)
+    check("and what this produces still validates", validate(whole), [])
 
     print("\nchecking the sibling modules before doing any work")
     check("the real modules satisfy the list, so the check cannot cry wolf",
@@ -1141,8 +1230,9 @@ def self_test() -> int:
           "in a column", "nothing published" in kls[0], True)
     tyo = [l for l in lines if "TYO-MAIN" in l][0]
     check("a healthy venue is not flagged", "nothing published" in tyo, False)
-    check("every configured venue appears, published or not",
-          len([l for l in lines if "-MAIN" in l]), len(cfg2.venues))
+    check("every configured venue appears, published or not - matched by "
+          "name, since BSE-SECONDARY is not spelled like the others",
+          sorted(l.split()[0] for l in lines[1:]), sorted(cfg2.venues))
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

@@ -21,18 +21,19 @@ Both write the same seven columns:
 
 |  | v1 | v2 |
 |---|---|---|
-| Band from | rules in `config/bands.csv`, applied to a kdb reference price | Bloomberg, except Indonesia |
+| Band from | rules in `config/bands.csv`, applied to a kdb reference price | Bloomberg for Japan, Thailand and India; computed for the rest |
 | Depends on | kdb | B-PIPE |
-| Computes | every market | only Indonesia |
-| `bands.csv` holds | six markets | one |
-| Markets | six | seven countries, fifteen venues |
+| Computes | every market | twelve venues |
+| `bands.csv` holds | six markets | twelve venues |
+| Markets | six | nine countries, nineteen venues |
 | Breaks when | a market changes its rule and nobody edits the CSV | Bloomberg has no limit for a name |
 | Open risk | China ST names get ±10% instead of ±5% — no source for the flag | coverage: unknown until measured per venue |
 
 **They are alternatives, not stages.** v1 removes the Bloomberg dependency
 entirely and pays for it by encoding every market's rule in config. v2 keeps the
-dependency and computes only the one market Bloomberg does not price for us, so
-its arithmetic is one market wide instead of six.
+dependency and asks Bloomberg for exactly the markets whose rule nobody has
+written down — Japan, Thailand and India — computing the other twelve venues
+itself, so no entitlement refusal can empty one of those.
 
 Either can be evaluated without touching the other: `--self-test` and `--demo`
 run on any machine, with no kdb, no Bloomberg and no network shares.

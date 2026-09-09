@@ -43,24 +43,84 @@ gets up to two candidates — the crosscode's own suffix first, then the venue's
 `BBGComposite` — because Shanghai is `600001 CG` in the crosscode and
 `600001.CH` in equity_master. The run reports which suffix hit.
 
-### As shipped: Japan asks, everything else computes
+### As shipped: Japan, Thailand and India ask; everything else computes
 
 ```
-bloomberg   TYO-MAIN  JNX-MAIN  CHJ-MAIN
+bloomberg   TYO-MAIN  JNX-MAIN  CHJ-MAIN  SET-MAIN
+            NSI-MAIN  BSE-MAIN  BSE-SECONDARY
 computed    the other twelve
 ```
 
-**Japan is the only market Bloomberg prices**, and it is also the only one that
-*cannot* be computed — deliberately. TSE limits are an absolute price-step
-table nobody has written down here, and a percentage tier would be a
-plausible-looking wrong answer on live orders. Switching `TYO-MAIN` is refused
-outright:
+**The markets Bloomberg prices are exactly the markets whose rule is not
+written down here**, and each of them is refused if you try to compute it. TSE
+limits are an absolute price-step table nobody has transcribed; Thailand's and
+India's are not in `bands.csv` either. A percentage tier invented for any of
+them would be a plausible-looking wrong answer on live orders, so switching one
+is refused outright:
 
 ```
 TYO-MAIN has Source=computed but no band tiers in bands.csv. Add its tiers,
 or leave it on Source=bloomberg - a market whose rule nobody has written
 down cannot be computed.
 ```
+
+## Thailand and India need more than a config row
+
+Both were out of scope until the filters below existed, and a bare
+`markets.csv` line for either would have published limits that must not exist.
+
+### Thailand: the local line only
+
+The SET lists one company three ways — the local board, the foreign board
+(`/F`) and the NVDR (`/Q`) — and Nova trades the local one. The other two are
+dropped in `crosscode.py`, before the universe, so they are counted in the
+report and never paid for in a Bloomberg request. R greps the same two
+(`LimitUpDown.r:180`).
+
+### India: three venues, and names that must NOT get a limit
+
+| | |
+|---|---|
+| `NSI-MAIN` | the NSE, priced by Bloomberg |
+| `BSE-MAIN` | the BSE, priced by Bloomberg |
+| `BSE-SECONDARY` | every `BSE-MAIN` row again, off the same fetch |
+
+**Some Indian names have their limits configured inside the ATS strategy
+files**, and for those Nova's own configuration is the authority. Publishing a
+`limitUpDown` row for one would *override a number a person set deliberately*,
+which is worse than publishing nothing — so each Indian venue names its
+strategy file in the new `ExcludeFile` column of `markets.csv`, and every
+mnemonic the file lists is dropped from the universe:
+
+```
+India,NSI-MAIN,IN,10:49:00,bloomberg,,,,D:\...\in-nse_drv.stra
+India,BSE-MAIN,IB,10:49:00,bloomberg,,,,D:\...\in-bse_drv.stra
+```
+
+The file is whitespace-separated with an eight-line preamble, and the mnemonic
+is its second field, matched against `Mnemo` with the first two characters
+stripped — the crosscode prefixes a country code the strategy file does not
+carry. `LimitUpDown.r:112-152`.
+
+**An unreadable strategy file stops the run, exactly as R's `stop()` does**, and
+the reason is worth stating: an empty exclusion list is indistinguishable from
+a correct one, and the only symptom would be Indian names quietly receiving a
+limit that overrides the desk's. It is read **only once the venue has reached
+its cutoff**, so an Indian share being down at 07:30 cannot take out Japan.
+
+**The BSE secondary venue has no crosscode line of its own.** A name on the NSE
+may also be reachable on the BSE under a different code, and the crosscode says
+so in three columns of the *same* row — `VenueList` naming `BSE-SECONDARY`,
+plus `BSEBloombergCode` and `BSERic`. Those rows are synthesised in `india.py`,
+asked of Bloomberg in the same request as everything else, and published
+**twice**, once under each venue, off one set of limits. A code the crosscode
+already carries itself is left to the ordinary path rather than synthesised, or
+one name would appear twice under `BSE-MAIN`. `LimitUpDown.r:387-414`.
+
+One deliberate difference from R: R builds that list from the crosscode as
+read, this builds it from the universe as filtered — so a BSE listing is never
+derived from a line that lost a duplicate or is not ACTV. It is the rule this
+job already has everywhere else.
 
 ## One substitution in each branch
 
@@ -180,10 +240,10 @@ same machine already holds those EIDs.
 
 | | v1 | v2 |
 |---|---|---|
-| Computes | every market, from rules | only Indonesia, as R does |
-| Asks Bloomberg | nothing | everything else |
-| Needs | kdb | B-PIPE |
-| `bands.csv` holds | six markets | one |
+| Computes | every market, from rules | twelve venues |
+| Asks Bloomberg | nothing | Japan, Thailand and India |
+| Needs | kdb | B-PIPE, and kdb for the computed twelve |
+| `bands.csv` holds | six markets | twelve venues |
 | Breaks when | a market changes its rule and nobody edits the CSV | Bloomberg has no limit for a name |
 
 They are alternatives, not stages.
@@ -228,6 +288,7 @@ to see once. The cheap, fragile side now fails fast.
 python bands.py --self-test        python marketcfg.py --self-test
 python ticks.py --self-test        python crosscode.py --self-test
 python bpipe.py --self-test        python mailer.py --self-test
+python india.py --self-test
 ```
 
 ## First run
@@ -240,6 +301,10 @@ copy local_settings.py.example local_settings.py
 Fill in `BPIPE_HOST`, `BPIPE_PORT`, `BPIPE_APP`, `EQUITY_MASTER_SERVER`,
 `TSR_DIR` and the SMTP host. `EQUITY_MASTER_SERVER` is only read when some
 venue is `computed`.
+
+Then fill in the two `ExcludeFile` paths in `config/markets.csv`, which ship as
+`CHANGEME`. They are India's ATS strategy files, and the run stops on them at
+India's cutoff rather than publishing a limit over one the desk configured.
 The B-PIPE three have no defaults — the job refuses to start rather than connect
 somewhere you did not mean.
 
@@ -256,8 +321,9 @@ finishes last is the file that gets published.
 | `ticks.py` | tick ladders from a `.tsr` file. Pure. Copied from v1. |
 | `marketcfg.py` | loads the config **and enforces the split** |
 | `crosscode.py` | CrossCode.csv → the universe, filtered and deduplicated |
+| `india.py` | the ATS strategy files, and the BSE listings with no row of their own |
 | `limit_up_down.py` | orchestration, validation, environment copy |
-| `config/markets.csv` | one row per venue: cutoff, and which side of the split |
+| `config/markets.csv` | one row per venue: cutoff, which side of the split, and India's `ExcludeFile` |
 | `config/bands.csv` | tiers per venue. Present for twelve; they are what make a venue switchable |
 | `config/spol_JKT.tsr` | **placeholder.** Point `TSR_DIR` at the ATS share. |
 
@@ -293,7 +359,7 @@ silently missing from a production feed.
 
 ## Scope
 
-Seven countries, fifteen venues:
+Nine countries, nineteen venues:
 
 | | venues | cutoff | source |
 |---|---|---|---|
@@ -304,13 +370,10 @@ Seven countries, fifteen venues:
 | Indonesia | `JKT-MAIN` | 07:59 | computed, tiered + tick |
 | China | `SHA`, `SHH`, `SSC`, `SZA`, `SHZ`, `SZC` | 09:03 | computed, ±10% / ±20% |
 | Philippines | `PHS-MAIN` | 09:03 | computed, ±30% |
+| Thailand | `SET-MAIN` | 10:39 | **bloomberg**, local line only |
+| India | `NSI-MAIN`, `BSE-MAIN`, `BSE-SECONDARY` | 10:49 | **bloomberg**, less the ATS's own names |
 
-**Thailand and India are out, deliberately** — not merely unlisted. Adding either
-is more than a config row: Thailand needs a `/F|/Q` foreign-ticker filter, and
-India needs the static-limit exclusion — names configured in the ATS strategy
-file must NOT get a published limit — plus the BSE secondary venue. Neither
-filter is written here, so a bare config row would publish limits for names that
-must not have them.
+Thailand and India are the two that took more than a config row — see above.
 
 ### The one arithmetic gap, and it is China's
 
