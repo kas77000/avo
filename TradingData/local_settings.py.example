@@ -14,6 +14,15 @@ TEMP_PATH = r"CHANGEME\TradingData.tmp.csv"
 # Optional.  Absent means the columns they feed are left blank, and the run
 # says so rather than failing.
 MSCI_MAPPING_PATH = ""
+
+# The open-auction aggressivity override, joined on RicCode: a CSV with a
+# header carrying `RicCode` and `OpenAggressivityPct`.  It is the ONLY
+# source of that column - there is no rule behind it - so no file means it
+# is blank on every row, which is what most rows get from the R job anyway.
+#
+# The RicCode has to be spelled the way the crosscode spells it.  A file
+# that loads and then matches nothing is the failure to watch for, so the
+# run prints how many rows took a percentage and shouts when that is none.
 OPEN_AUCTION_OVERRIDE_PATH = ""
 # The HKEX closing-auction list from the dico: ONE STOCK CODE PER LINE, no
 # header - 5, 700, 941.

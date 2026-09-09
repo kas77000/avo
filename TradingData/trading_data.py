@@ -10,7 +10,7 @@ WHAT IS NOT FILLED, AND WHY
 
   MsciCountryIndex, MsciSectorCountryIndex, MsciSectorIndex,
   MsciSectorRegionIndex   need msci_mapping.csv
-  OpenAggressivityPct     needs the auction override CSV
+  OpenAggressivityPct     fills when the auction override CSV is supplied
   Segment NO_CAS for HKG   fills when the HKEX dico list is supplied
   Segment CAS for NSI/BSE  fills when the two India lists are supplied
   Segment CAS for HK ETFs  needs TRADING_CONDITIONS_1, and cannot be had
@@ -58,6 +58,7 @@ import sys
 import time
 from pathlib import Path
 
+import auction
 import caslist
 import columns
 import crosscode
@@ -126,7 +127,7 @@ def _measure(value, scale=1) -> str:
 
 
 def build_rows(rows, master, markets, mapping, sym_hits, cas=None,
-               hkex=None) -> list:
+               hkex=None, override=None) -> list:
     """One output dict per crosscode row.  Missing reference data leaves a
     column blank; it never becomes zero, and a zero that came back from kdb
     is treated as missing for Beta, Close and Volatility10D."""
@@ -181,7 +182,9 @@ def build_rows(rows, master, markets, mapping, sym_hits, cas=None,
             "NoShortSell": marketcfg.no_short_sell(row.market, markets),
             "RespectShortSellPrice": marketcfg.respect_short_sell(
                 row.market, row.sec_type, row.is_reit, markets),
-            "OpenAggressivityPct": "",
+            #  :325 joins the override on RicCode and leaves every
+            #  other row NA, which write.csv renders as nothing.
+            "OpenAggressivityPct": (override or {}).get(row.ric, ""),
             "MarketCap": _plain(market_cap),
             "ISIN": isin,
             "SubscribeFeedAtStartup": "FALSE",    # :599, always FALSE
@@ -449,7 +452,7 @@ def say(line=""):
 
 def run(crosscode_path, server, output_path, temp_path,
         mapping_path="", date=None, nse_cas_path="", bse_cas_path="",
-        hkex_cas_path="") -> int:
+        hkex_cas_path="", override_path="") -> int:
     started = time.time()
 
     def step(label):
@@ -484,6 +487,11 @@ def run(crosscode_path, server, output_path, temp_path,
             #  nothing, and that has to be said out loud.
             say("  ! the HKEX list is EMPTY - no Hong Kong row will be "
                 "marked NO_CAS")
+    override = auction.load(override_path, say) if override_path else {}
+    if not override_path:
+        say("  auction override not supplied - OpenAggressivityPct is blank")
+    else:
+        say(f"  auction override   {len(override):6d} codes  {override_path}")
 
     host, _, port = server.partition(":")
     step(f"connecting to equity_master at {server}")
@@ -505,8 +513,17 @@ def run(crosscode_path, server, output_path, temp_path,
 
     step("building rows")
     hits = {}
-    out = build_rows(rows, master, markets, mapping, hits, cas, hkex)
+    out = build_rows(rows, master, markets, mapping, hits, cas, hkex,
+                     override)
     say(f"  {len(out)} output rows, {len(hits)} matched a sym")
+    if override:
+        #  The override is keyed on RicCode, and nothing checks that the
+        #  file spells a RIC the way the crosscode does.  A file that
+        #  loads and then matches nothing is the failure to catch here.
+        took = sum(1 for r in out if r["OpenAggressivityPct"])
+        say(f"  {took} rows took an override percentage")
+        if not took:
+            say("  ! NOT ONE RicCode on the override matched the crosscode")
 
     step("validating")
     problems = validate(out)
@@ -558,7 +575,8 @@ def main(argv=None) -> int:
                  s.TEMP_PATH, getattr(s, "MSCI_MAPPING_PATH", ""), date,
                  getattr(s, "INDIA_NSE_CAS_LIST_PATH", ""),
                  getattr(s, "INDIA_BSE_CAS_LIST_PATH", ""),
-                 getattr(s, "HKEX_CAS_LIST_PATH", ""))
+                 getattr(s, "HKEX_CAS_LIST_PATH", ""),
+                 getattr(s, "OPEN_AUCTION_OVERRIDE_PATH", ""))
     except equitymaster.KdbError as e:
         say(f"\n  FAILED: {e}")
         return 1
@@ -706,6 +724,20 @@ def self_test() -> int:
           [build_rows([r], {}, M, None, {})[0]["Segment"]
            for r in (hk, hk_off)],
           [columns.SEGMENT_DEFAULT, columns.SEGMENT_DEFAULT])
+
+    print("\nthe open-auction override, which is all OpenAggressivityPct is")
+    check("no override leaves the column blank, as the R job's NA does",
+          build_rows([row], master, M, None, {})[0]["OpenAggressivityPct"],
+          "")
+    check("the join is on RicCode, per :325 - not on the fidessa code",
+          build_rows([row], master, M, None, {}, None, None,
+                     {"BHP.AX": "50"})[0]["OpenAggressivityPct"], "50")
+    check("so a file that spells the key some other way matches nothing",
+          build_rows([row], master, M, None, {}, None, None,
+                     {"BHP.AU": "50"})[0]["OpenAggressivityPct"], "")
+    check("a row that is not on the override is blank, not zero",
+          build_rows([hk], {}, M, None, {}, None, None,
+                     {"BHP.AX": "50"})[0]["OpenAggressivityPct"], "")
 
     print("\na row equity_master has, carrying zeros")
     zero = {"BHP.AU": dict(master["BHP.AU"], PX_LAST=0.0, EQY_BETA=0,
