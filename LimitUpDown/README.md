@@ -438,6 +438,19 @@ Because a ladder is monotonic, "coarser of the two" is just "the tick at the
 higher price" — so **every down leg is unchanged** (the close is the higher
 there) and an up leg changes only when the limit crosses into a coarser band.
 
+**This is per venue, in the `TickFrom` column**, because the two venues that
+round have different verified answers:
+
+| `TickFrom` | venue | source |
+|---|---|---|
+| `close` (blank) | Indonesia | `LimitUpDown.r:315-324` — the tick comes from `PX_YEST_CLOSE` and both legs floor/ceil on it |
+| `coarser` | Korea `KSC-MAIN` | Bloomberg, on the two names above |
+
+Not a detail: an Indonesian close of 4,500 has an up leg of 5,625, which
+crosses the 5,000 floor where the tick goes 10 → 25. The R job publishes
+**5,620**; the coarser rule would publish 5,625. Every Indonesian name near a
+tier boundary would move.
+
 **The ladder is per name, not per venue, and it comes out of kdb** —
 `ticksizeids` maps a sym to a tick-table id, `ticksizetbl` holds that table's
 tiers. Both sit beside `equity_master` on `EQUITY_MASTER_SERVER`, so this needs

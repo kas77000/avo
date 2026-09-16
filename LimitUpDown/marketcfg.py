@@ -69,6 +69,7 @@ VALID_SOURCE = ("bloomberg", "computed")
 VALID_ROUNDING = ("none", "inward", "outward", "nearest")
 VALID_KIND = ("pct", "abs")
 VALID_FALLBACK = ("bloomberg",)
+VALID_TICK_FROM = ("close", "coarser")
 
 class ConfigError(Exception):
     pass
@@ -86,6 +87,9 @@ class Venue:
     #  What to do with a computed name equity_master has no close for:
     #  "bloomberg" asks B-PIPE for it, blank drops it as before.
     no_close_fallback: str = ""
+    #  Which price resolves a leg's tick.  See load() for why this is
+    #  per venue and not one rule.
+    tick_from: str = "close"
     bbg_composite: str = ""
     #  The ATS strategy file listing names this venue must NOT publish a
     #  limit for.  India only; read by india.py, at its cutoff, not here.
@@ -204,6 +208,26 @@ def load(config_dir, tsr_dir=None) -> Config:
                 f"markets.csv {vid}: NoCloseFallback {fallback!r} is not "
                 f"one of {VALID_FALLBACK} (blank means drop, as before)")
 
+        #  WHICH PRICE RESOLVES A LEG'S TICK, and it is per venue because
+        #  the two venues that round have different verified answers:
+        #
+        #    close     the R job's rule, and Indonesia's.  LimitUpDown.r
+        #              picks the tick from PX_YEST_CLOSE and floors/ceils
+        #              both legs on it.  A close of 4,500 gives 5,620 there
+        #              and 5,625 on the coarser rule, so this is not a
+        #              formatting difference.
+        #    coarser   the coarser of the close's tick and the leg's own.
+        #              Korea, where BOTH Bloomberg-confirmed names need it:
+        #              000250 KQ's up leg needs the leg's tick and
+        #              000020 KP's down leg needs the close's.
+        #
+        #  Blank means close, which is the R behaviour and the safe default.
+        tick_from = (r.get("TickFrom") or "").strip().lower() or "close"
+        if tick_from not in VALID_TICK_FROM:
+            raise ConfigError(
+                f"markets.csv {vid}: TickFrom {tick_from!r} is not one of "
+                f"{VALID_TICK_FROM} (blank means close, as the R job did)")
+
         venues[vid] = Venue(
             country=(r.get("Country") or "").strip(),
             venue_id=vid, cutoff=cutoff, source=source,
@@ -213,6 +237,7 @@ def load(config_dir, tsr_dir=None) -> Config:
                        if raw_min else None),
             rounding=rounding or "none",
             no_close_fallback=fallback,
+            tick_from=tick_from,
             exclude_file=exclude_file)
 
     if not venues:

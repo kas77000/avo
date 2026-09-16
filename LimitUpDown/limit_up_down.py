@@ -382,6 +382,17 @@ def price_from_bloomberg(rows, values, refused=None):
     return out, _excluded(by_reason)
 
 
+def _coarser(ladder, at_ref):
+    """A per-leg tick: the coarser of the close's and the leg's own.
+
+    A ladder is monotonic, so this is just the tick at the HIGHER of the
+    two prices - which leaves every DOWN leg on the close's tick and
+    changes an UP leg only where the limit crosses into a coarser band."""
+    def tick(price):
+        return max(at_ref, ticks.tick_for(ladder, price) or at_ref)
+    return tick
+
+
 def price_computed(cfg, rows, closes, ladders=None):
     """The band computed from a tier table and a close out of equity_master.
 
@@ -435,8 +446,20 @@ def price_computed(cfg, rows, closes, ladders=None):
             #  (the close is the higher) and changes an UP leg only when
             #  the limit crosses into a coarser band.
             #
-            #  DO NOT SIMPLIFY THIS TO THE LEG'S OWN TICK.  Two names
-            #  settle it and they point opposite ways.  BOTH expected
+            #  WHICH PRICE RESOLVES THE TICK IS PER VENUE - markets.csv's
+            #  TickFrom - because the two venues that round have different
+            #  verified answers.  Indonesia is "close", which is what
+            #  LimitUpDown.r does: the tick comes from PX_YEST_CLOSE and
+            #  both legs floor/ceil on it.  Taking the coarser there would
+            #  change it - a 4,500 close publishes 5,620 under the R job
+            #  and 5,625 under the coarser rule.
+            if venue.tick_from == "close":
+                tick = at_ref
+            else:
+                tick = _coarser(ladder, at_ref)
+
+            #  DO NOT SIMPLIFY KOREA'S RULE TO THE LEG'S OWN TICK.  Two
+            #  names settle it and they point opposite ways.  BOTH expected
             #  values below are Bloomberg's, not inferred:
             #
             #    000250 KQ  close 157,500 (tick 100, under 200,000)
@@ -453,8 +476,6 @@ def price_computed(cfg, rows, closes, ladders=None):
             #  So the close's tick alone is wrong for the first and the
             #  leg's own tick alone is wrong for the second.  The coarser
             #  of the two is the only rule that gives both.
-            def tick(price, _ladder=ladder, _at_ref=at_ref):
-                return max(_at_ref, ticks.tick_for(_ladder, price) or _at_ref)
         try:
             high, low = bands.compute(cfg.bands[r.venue_id], r.ticker, ref,
                                       tick, venue.min_price, venue.rounding)
@@ -1340,6 +1361,22 @@ def self_test() -> int:
     check("its down leg keeps the close's 100, because 110250 is nowhere "
           "near the boundary - only the UP leg crossed it",
           k2[0]["LimitDownPrice"], "110300")
+
+    print("\nand Indonesia does NOT take the coarser tick - the R job's rule")
+    #  LimitUpDown.r:315-324 picks the tick from PX_YEST_CLOSE and floors
+    #  BOTH legs on it.  A 4500 close is the case that separates the two
+    #  rules: its up leg 5625 crosses the 5000 floor, where the tick goes
+    #  from 10 to 25.
+    jkt = price_computed(
+        cfg, [row("X.JK", "X IJ", "X.ID", "JKT-MAIN")],
+        {"X.JK": Decimal("4500")})[0]
+    check("A 4500 CLOSE PUBLISHES 5620, NOT 5625 - the up leg crosses into "
+          "the 25 tick but Indonesia rounds on the CLOSE's 10, and changing "
+          "that would silently move every Indonesian name near a tier",
+          jkt[0]["LimitUpPrice"], "5620")
+    check("which is markets.csv's choice, not this file's",
+          (cfg.venues["JKT-MAIN"].tick_from,
+           cfg.venues["KSC-MAIN"].tick_from), ("close", "coarser"))
     check("A NAME KDB HAS NO LADDER FOR IS REPORTED, NOT PUBLISHED "
           "UNROUNDED - an unrounded limit is one the exchange will reject",
           [d.ric for d in
@@ -1585,11 +1622,24 @@ def self_test() -> int:
                 (Path(d) / f.name).write_text(f.read_text(encoding="utf-8"),
                                               encoding="utf-8")
 
+        def switch_source(text, to):
+            """Rewrite the SOURCE column only.
+
+            This was a blind text replace until NoCloseFallback started
+            carrying the word "bloomberg" too, at which point swapping every
+            ",bloomberg," rewrote that column as well and the config was
+            refused for the wrong reason."""
+            rows = [r.split(",") for r in text.strip().splitlines()]
+            col = rows[0].index("Source")
+            for r in rows[1:]:
+                r[col] = to
+            return "\n".join(",".join(r) for r in rows) + "\n"
+
         #  EVERY venue can go to bloomberg, because asking needs no tiers.
         #  That is the direction which rescues a market whose rule turns out
         #  to be wrong: one word, no code.
         (Path(d) / "markets.csv").write_text(
-            header.replace(",computed,", ",bloomberg,"), encoding="utf-8")
+            switch_source(header, "bloomberg"), encoding="utf-8")
         cfg2 = marketcfg.load(Path(d), Path(d))
         check("every venue flips to bloomberg by editing ONE word in "
               "markets.csv, with no code change",
@@ -1598,7 +1648,7 @@ def self_test() -> int:
 
         #  The other direction is not free, and must not silently be.
         (Path(d) / "markets.csv").write_text(
-            header.replace(",bloomberg,", ",computed,"), encoding="utf-8")
+            switch_source(header, "computed"), encoding="utf-8")
         try:
             marketcfg.load(Path(d), Path(d))
             got = "loaded"
