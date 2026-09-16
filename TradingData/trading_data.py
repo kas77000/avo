@@ -54,13 +54,14 @@ supports: Volatility10D's spread cannot be measured from a sample.  The CSV
 is uncapped.
 
     status,code,column,old,new
-    only_in_old,005930 KP,,,
-    differs,BHP AU,Volatility10D,18.40,19.75
+    only_in_old,005930.KP,,,
+    differs,BHP.AU,Volatility10D,18.40,19.75
 
-`code` is the BloombergCode, which THE OUTPUT ITSELF DOES NOT CARRY - the
-twenty columns start at #FidessaCode and never mention one - so it is joined
-from the crosscode.  A name the crosscode cannot resolve keeps its Fidessa
-code, and an unreadable crosscode costs the nicer name, not the comparison.
+`code` is the #FidessaCode.  LimitUpDown's report names rows by
+BloombergCode instead, because ITS output carries one and this job's does
+not: the twenty columns start at #FidessaCode and never mention a Bloomberg
+code, so putting one here would mean joining the crosscode into a
+comparison that is otherwise two output files and nothing else.
 
 NOTE THAT --compare RUNS THE JOB FIRST, and a run copies to OUTPUT_PATH.
 Comparing publishes.  Point OUTPUT_PATH somewhere harmless for a diff that
@@ -387,7 +388,7 @@ def compare(old_rows, new_rows) -> dict:
             "columns": cols}
 
 
-def differences(old_rows, new_rows, bloomberg=None):
+def differences(old_rows, new_rows):
     """Every disagreement, one record each - NOT the five per column that
     print_compare shows.  The printed form is the summary; this is the
     record, and Volatility10D's spread is only measurable from all of it.
@@ -396,27 +397,23 @@ def differences(old_rows, new_rows, bloomberg=None):
     the file sorts the way the question is asked: which column disagrees,
     and on how many names.
 
-    `bloomberg` maps #FidessaCode -> BloombergCode, and the report names a
-    row by that.  IT HAS TO BE PASSED IN: unlike LimitUpDown's, THIS JOB'S
-    OUTPUT DOES NOT CARRY A BLOOMBERG CODE - the twenty columns start at
-    #FidessaCode and never mention one - so the two files being compared
-    cannot supply it and the crosscode has to.  A code the crosscode cannot
-    resolve keeps its Fidessa code, because an unidentified row in a
-    cutover report is worse than one identified the other way."""
-    bloomberg = bloomberg or {}
+    A row is named by its #FidessaCode, which is the key the two files
+    agree on and the first column of the output.  LimitUpDown's report names
+    rows by BloombergCode instead, and the difference is not an oversight:
+    ITS OUTPUT CARRIES ONE AND THIS JOB'S DOES NOT.  The twenty columns
+    start at #FidessaCode and never mention a Bloomberg code, so putting one
+    here would mean joining the crosscode into a comparison that is
+    otherwise two output files and nothing else."""
     old = {r["#FidessaCode"]: r for r in old_rows}
     new = {r["#FidessaCode"]: r for r in new_rows}
     shared = sorted(set(old) & set(new))
 
-    def code(k):
-        return bloomberg.get(k) or k
-
     out = []
     for k in sorted(set(old) - set(new)):
-        out.append({"status": "only_in_old", "code": code(k), "column": "",
+        out.append({"status": "only_in_old", "code": k, "column": "",
                     "old": "", "new": ""})
     for k in sorted(set(new) - set(old)):
-        out.append({"status": "only_in_new", "code": code(k), "column": "",
+        out.append({"status": "only_in_new", "code": k, "column": "",
                     "old": "", "new": ""})
 
     for c in OUTPUT_COLUMNS:
@@ -425,23 +422,9 @@ def differences(old_rows, new_rows, bloomberg=None):
         for k in shared:
             a, b = old[k].get(c, ""), new[k].get(c, "")
             if a != b:
-                out.append({"status": "differs", "code": code(k),
-                            "column": c, "old": a, "new": b})
+                out.append({"status": "differs", "code": k, "column": c,
+                            "old": a, "new": b})
     return out
-
-
-def bloomberg_codes(crosscode_path) -> dict:
-    """#FidessaCode -> BloombergCode, for naming rows in the report.
-
-    Returns empty rather than raising if the crosscode cannot be read.  The
-    comparison is two output files and does not otherwise need it; losing
-    the nicer name is a worse report, losing the comparison is no report at
-    all."""
-    try:
-        rows, _ = crosscode.load(crosscode_path)
-    except (OSError, ValueError):
-        return {}
-    return {r.fidessa_code: r.bbg for r in rows if r.bbg}
 
 
 def write_compare_report(path, records) -> str:
@@ -682,11 +665,7 @@ def main(argv=None) -> int:
     if args.compare:
         old, new = read_output(args.compare), read_output(s.OUTPUT_PATH)
         print_compare(compare(old, new))
-        bbg = bloomberg_codes(s.CROSSCODE_PATH)
-        if not bbg:
-            say("  the crosscode could not be read, so the report names "
-                "rows by Fidessa code")
-        records = differences(old, new, bbg)
+        records = differences(old, new)
         print(f"\n  {len(records)} difference(s) written to "
               f"{write_compare_report(args.report, records)}")
     return rc
@@ -913,37 +892,17 @@ def self_test() -> int:
           d["columns"]["Beta"]["examples"][0], ("A", "1.0", "1.1"))
 
     print("\nthe same comparison, as the report carries it")
-    #  THIS JOB'S OUTPUT CARRIES NO BLOOMBERG CODE - the twenty columns
-    #  start at #FidessaCode - so the crosscode has to supply it.
-    BBG = {"A": "A AU", "B": "B AU"}
-    recs = differences(old, new, BBG)
+    recs = differences(old, new)
     check("a row for every difference and every name only one file has, "
-          "each named by its BloombergCode",
+          "each named by its #FidessaCode - the key the two files agree on, "
+          "and the only name this job's output carries",
           recs,
-          [{"status": "only_in_old", "code": "B AU", "column": "",
+          [{"status": "only_in_old", "code": "B", "column": "",
             "old": "", "new": ""},
            {"status": "only_in_new", "code": "C", "column": "",
             "old": "", "new": ""},
-           {"status": "differs", "code": "A AU", "column": "Beta",
+           {"status": "differs", "code": "A", "column": "Beta",
             "old": "1.0", "new": "1.1"}])
-    check("A NAME THE CROSSCODE CANNOT RESOLVE KEEPS ITS FIDESSA CODE - C "
-          "above - because an unidentified row in a cutover report is worse "
-          "than one identified the other way",
-          [r["code"] for r in recs if r["status"] == "only_in_new"], ["C"])
-    check("and with no crosscode at all every row is still identified",
-          [r["code"] for r in differences(old, new)], ["B", "C", "A"])
-
-    with tempfile.TemporaryDirectory() as dd:
-        p = Path(dd) / "cc.csv"
-        p.write_text("#FidessaCode,RicCode,Type,BloombergCode,"
-                     "BloombergSecurityType,FidessaMarket,Currency\n"
-                     "BHP.AU,BHP.AX,Equity,BHP AU,Equity,ASX-MAIN,AUD\n",
-                     encoding="utf-8")
-        check("the map comes off the crosscode",
-              bloomberg_codes(p), {"BHP.AU": "BHP AU"})
-        check("a crosscode that is not there costs the nicer name, not the "
-              "comparison",
-              bloomberg_codes(Path(dd) / "nope.csv"), {})
 
     #  The printed form caps at five a column.  A cutover needs all of them:
     #  Volatility10D's spread cannot be measured from a sample.
@@ -964,8 +923,8 @@ def self_test() -> int:
         check("the report is the columns, then a row per difference",
               lines,
               [",".join(COMPARE_COLUMNS),
-               "only_in_old,B AU,,,", "only_in_new,C,,,",
-               "differs,A AU,Beta,1.0,1.1"])
+               "only_in_old,B,,,", "only_in_new,C,,,",
+               "differs,A,Beta,1.0,1.1"])
         write_compare_report(p, [])
         check("nothing to report still writes the header",
               p.read_text(encoding="utf-8").splitlines(),
