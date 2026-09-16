@@ -399,8 +399,8 @@ Nine countries, nineteen venues:
 | | venues | cutoff | source |
 |---|---|---|---|
 | Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | **bloomberg** |
-| Korea | `KSC-MAIN` | 07:30 | computed, ±30%, rounded on kdb's ladder |
-| Korea | `KOE-MAIN` | 07:30 | computed, ±30%, **not rounded** |
+| Korea | `KSC-MAIN` (KP, KOSPI) | 07:30 | computed, ±30%, rounded on kdb's ladder |
+| Korea | `KOE-MAIN` (KQ, KOSDAQ) | 07:30 | computed, ±30%, rounded on kdb's ladder |
 | Malaysia | `KLS-MAIN` | 07:59 | computed, ±30% |
 | Taiwan | `TAI-MAIN` | 07:59 | computed, ±10% |
 | Indonesia | `JKT-MAIN` | 07:59 | computed, tiered + tick |
@@ -422,13 +422,15 @@ and the one where that leg actually lands. A ladder is a function of price and
 the two legs are at different prices, so a band spanning a tier boundary has two
 ticks, not one.
 
-Two Bloomberg-confirmed Korean names pin the rule down, and they point opposite
-ways — which is why it is not simply "the leg's own tick":
+Two Bloomberg-confirmed Korean names pin the rule down — **one per venue**, and
+they point opposite ways, which is why it is not simply "the leg's own tick".
+Note `KOE-MAIN` is **KQ/KOSDAQ** and `KSC-MAIN` is **KP/KOSPI**; that mapping is
+counterintuitive and was verified against `config_cash.xml`:
 
-| | close | leg | tick at close | tick at leg | Bloomberg |
-|---|---|---|---|---|---|
-| `000250 KQ` up | 157,500 | 204,750 | 100 | **500** | 204,500 |
-| `000020 KP` down | 5,150 | 3,605 | **10** | 5 | 3,610 |
+| | venue | close | leg | tick at close | tick at leg | Bloomberg |
+|---|---|---|---|---|---|---|
+| `000250 KQ` up | `KOE-MAIN` | 157,500 | 204,750 | 100 | **500** | 204,500 |
+| `000020 KP` down | `KSC-MAIN` | 5,150 | 3,605 | **10** | 5 | 3,610 |
 
 The first needs the leg's tick (204,750 crosses 200,000 into the 500 band). The
 second needs the close's: 3,605 is *already* a valid price on its own tick of 5,
@@ -444,7 +446,7 @@ round have different verified answers:
 | `TickFrom` | venue | source |
 |---|---|---|
 | `close` (blank) | Indonesia | `LimitUpDown.r:315-324` — the tick comes from `PX_YEST_CLOSE` and both legs floor/ceil on it |
-| `coarser` | Korea `KSC-MAIN` | Bloomberg, on the two names above |
+| `coarser` | Korea `KSC-MAIN` and `KOE-MAIN` | Bloomberg, one verified name each |
 
 **Only a venue that rounds carries it**, because only a venue that rounds
 resolves a tick at all. The nine computed venues with `Rounding` blank publish

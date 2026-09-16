@@ -961,6 +961,9 @@ def demo() -> int:
             _row("688001.SS", "688001 CG", "688001.CN", "SHA-MAIN"),
             _row("NOCL.SS", "NOCL CG", "NOCL.CN", "SHA-MAIN"),
             _row("005930.KS", "005930 KP", "005930.KR", "KSC-MAIN"),
+            #  KOSDAQ, and the name that proved the coarser tick: its up
+            #  leg crosses 200,000 where the tick goes 100 -> 500.
+            _row("000250.KQ", "000250 KQ", "000250.KR", "KOE-MAIN"),
             _row("MAYBANK.KL", "MAYBANK MK", "MAYBANK.MY", "KLS-MAIN"),
             _row("BBCA.JK", "BBCA IJ", "BBCA.ID", "JKT-MAIN"),
             _row("TLKM.JK", "TLKM IJ", "TLKM.ID", "JKT-MAIN"),
@@ -1010,6 +1013,7 @@ def demo() -> int:
     closes = {"600001.SS": Decimal("12.34"),
               "688001.SS": Decimal("50"),      # STAR board, the 688 prefix
               "005930.KS": Decimal("70000"),
+              "000250.KQ": Decimal("157500"),
               "MAYBANK.KL": Decimal("9.50"),
               "BBCA.JK": Decimal("8000"), "TLKM.JK": Decimal("3000"),
               "TINY.JK": Decimal("10")}
@@ -1017,10 +1021,11 @@ def demo() -> int:
     #  Korea's real table 6132, as ticksizetbl carries it, through the same
     #  conversion a live run uses - so the demo exercises the kdb ladder
     #  rather than pretending rounding does not happen.
-    ladders = {"005930.KS": ticks.from_kdb(
+    KR_6132 = ticks.from_kdb(
         [(Decimal(p), Decimal(t)) for p, t in
          (("2000", "1"), ("5000", "5"), ("20000", "10"), ("50000", "50"),
-          ("200000", "100"), ("500000", "500"), ("1000001000", "1000"))])}
+          ("200000", "100"), ("500000", "500"), ("1000001000", "1000"))])
+    ladders = {"005930.KS": KR_6132, "000250.KQ": KR_6132}
 
     #  The two NOCL names are the fallback: computed venues with no close.
     #  Bloomberg can price one of them and not the other, which is the pair
@@ -1351,9 +1356,14 @@ def self_test() -> int:
     #  THE TWO NAMES THAT SETTLE WHICH PRICE THE TICK COMES FROM, and they
     #  point opposite ways under either single rule.  Only the coarser of
     #  the two ticks satisfies both.
+    #
+    #  ONE PER VENUE, AND KOE-MAIN IS KOSDAQ.  markets.csv maps KOE-MAIN to
+    #  KQ and KSC-MAIN to KP - counterintuitive, verified against
+    #  config_cash.xml, and recorded in the design for that reason.  So
+    #  000020 KP is this venue's evidence and 000250 KQ is the other's.
     k2 = price_computed(
-        cfg, [row("000250.KS", "000250 KQ", "000250.KR", "KSC-MAIN")],
-        {"000250.KS": Decimal("157500")}, {"000250.KS": ladder})[0]
+        cfg, [row("000250.KQ", "000250 KQ", "000250.KR", "KOE-MAIN")],
+        {"000250.KQ": Decimal("157500")}, {"000250.KQ": ladder})[0]
     check("000250 KQ at 157500 publishes 204500, which is what Bloomberg "
           "publishes: the close's tick is 100 but the LIMIT lands over "
           "200000 where the tick is 500, and 204750 floors there",
@@ -1383,12 +1393,13 @@ def self_test() -> int:
           "Taiwan, China or the Philippines",
           sorted(v.venue_id for v in cfg.venues.values()
                  if v.tick_from != "close"),
-          ["KSC-MAIN"])
-    check("and the one other venue that rounds is Indonesia, which keeps "
-          "the R script's rule",
+          ["KOE-MAIN", "KSC-MAIN"])
+    check("BOTH KOREAN VENUES ROUND AND EACH HAS ITS OWN VERIFIED NAME - "
+          "KSC-MAIN is KOSPI and 000020 KP, KOE-MAIN is KOSDAQ and "
+          "000250 KQ - and Indonesia is the third, on the R script's rule",
           sorted(v.venue_id for v in cfg.venues.values()
                  if v.rounding != "none"),
-          ["JKT-MAIN", "KSC-MAIN"])
+          ["JKT-MAIN", "KOE-MAIN", "KSC-MAIN"])
     check("A NAME KDB HAS NO LADDER FOR IS REPORTED, NOT PUBLISHED "
           "UNROUNDED - an unrounded limit is one the exchange will reject",
           [d.ric for d in

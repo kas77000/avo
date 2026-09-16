@@ -2,7 +2,7 @@ Country,FidessaVenueID,BBGComposite,Time,Source,TickSource,MinPrice,Rounding,Exc
 Japan,TYO-MAIN,JP,07:30:00,bloomberg,,,,,,
 Japan,JNX-MAIN,JP,07:30:00,bloomberg,,,,,,
 Japan,CHJ-MAIN,JP,07:30:00,bloomberg,,,,,,
-Korea,KOE-MAIN,KS,07:30:00,computed,,,,,bloomberg,
+Korea,KOE-MAIN,KS,07:30:00,computed,,,inward,,bloomberg,coarser
 Korea,KSC-MAIN,KS,07:30:00,computed,,,inward,,bloomberg,coarser
 Malaysia,KLS-MAIN,MK,07:59:00,computed,,,,,bloomberg,
 Taiwan,TAI-MAIN,TT,07:59:00,computed,,,,,bloomberg,
