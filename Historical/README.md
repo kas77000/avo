@@ -198,8 +198,59 @@ python settings.py --self-test       python universe.py --self-test
 python logs.py --self-test           python ticksfile.py --self-test
 python marketcfg.py --self-test      python misscache.py --self-test
 python crosscode.py --self-test      python qattsource.py --self-test
-python qatt_time_probe.py --self-test
+python qatt_time_probe.py --self-test    python compare.py --self-test
 ```
+
+## Checking it against the old process
+
+```
+python compare.py OLD_DIR OUTPUT_DIR
+python compare.py OLD_DIR OUTPUT_DIR --report somewhere/else.csv
+```
+
+The cutover instrument, and the folder equivalent of LimitUpDown's and
+TradingData's `--compare`. **Every file this process generated must exist in
+the old process's folder, and its content must agree.**
+
+**One direction only.** A file the old folder has and this one does not is not
+a finding and is never looked for — a run fetches only the days it has not
+already tried, so the old tree is always the larger of the two and the
+difference says nothing. That is also why it is cheap: **the old tree is never
+walked**, only stat'd one path at a time, so the work is proportional to what
+a run produced rather than to the million files it is measured against.
+
+Byte equality is not the bar — these files came from Bloomberg and ours come
+from qatt. So `3833` and `3833.0` are one price, and the order of prints
+*inside a single second* is not a difference, because the two sources have no
+reason to sequence a second the same way. Everything else is.
+
+```
+600000 C1/raw-600000 CG-20260817.csv  MISSING
+  the new process generated it; the old folder has no such file
+7203 JT/raw-7203 JT-20260817.csv  DIFFERS
+  rows      old 4   new 5   matched 3
+  Last         differ 1
+      09:58:58  old='3840'  new='3900'
+  times only in new 1
+
+  files generated            4
+  missing from old           2
+  content differs            1
+  identical                  1
+  skipped (not ours)         1
+```
+
+Every problem file lands in `compare-report.csv`; the terminal shows the
+first five. **Exit code is 1 when anything is missing or differs**, so it can
+gate a cutover step — unlike `LimitUpDown --compare`, which returns 0 whatever
+it finds.
+
+> **If Chinese names report `missing` in bulk, suspect the folder, not the
+> data.** The folder is named for the crosscode code and the file for the MIC
+> code — `600000 C1/raw-600000 CG-…` — and they differ only for Shanghai and
+> Shenzhen. `folder` and `code` are separate columns in the report so that is
+> visible at a glance. The design note is
+> `../docs/superpowers/specs/2026-09-16-historical-compare-design.md`.
 
 ## First run
 
@@ -228,6 +279,7 @@ sits on the order side (`:5010`) and `qatt` on its own (`:5011`).
 | `ticksfile.py` | what a file is called, what is on disk, the CSV itself. Pure. |
 | `historical_ticks.py` | orchestration, the plan, the report |
 | `qatt_time_probe.py` | which time column is the exchange's clock |
+| `compare.py` | this output against the old process's, one direction. Pure but for the two trees. |
 
 `universe.py` keeps every row it drops, with a reason, and the run prints the
 counts. A universe that quietly shrinks is the failure this job is most
