@@ -46,6 +46,20 @@ and a port that quietly diverges is worse than one that diverges loudly.
     python trading_data.py --self-test
     python trading_data.py --demo
     python trading_data.py --compare OLD.csv
+
+--compare prints the per-column summary AND writes every difference to
+compare-report.csv (--report moves it).  The printed form caps at five
+examples a column, which is right for reading and wrong for the decision it
+supports: Volatility10D's spread cannot be measured from a sample.  The CSV
+is uncapped.
+
+    status,code,column,old,new
+    only_in_old,005930.KP,,,
+    differs,BHP.AU,Volatility10D,18.40,19.75
+
+NOTE THAT --compare RUNS THE JOB FIRST, and a run copies to OUTPUT_PATH.
+Comparing publishes.  Point OUTPUT_PATH somewhere harmless for a diff that
+should not.
 """
 
 from __future__ import annotations
@@ -75,6 +89,11 @@ OUTPUT_COLUMNS = [
 
 # The columns the six-field brief names.  Their fill rates are reported.
 KEY_COLUMNS = ("Close", "Beta", "Volatility10D", "Index", "MarketCap")
+
+# Where --compare writes its full list of differences.  What it prints is a
+# summary capped at five examples a column; this is the record.
+COMPARE_REPORT = "compare-report.csv"
+COMPARE_COLUMNS = ["status", "code", "column", "old", "new"]
 
 # equity_master stores volatility as a fraction; Volatility10D is a
 # percentage.
@@ -363,6 +382,51 @@ def compare(old_rows, new_rows) -> dict:
             "columns": cols}
 
 
+def differences(old_rows, new_rows):
+    """Every disagreement, one record each - NOT the five per column that
+    print_compare shows.  The printed form is the summary; this is the
+    record, and Volatility10D's spread is only measurable from all of it.
+
+    Grouped by column rather than by name, matching the printed order, so
+    the file sorts the way the question is asked: which column disagrees,
+    and on how many names."""
+    old = {r["#FidessaCode"]: r for r in old_rows}
+    new = {r["#FidessaCode"]: r for r in new_rows}
+    shared = sorted(set(old) & set(new))
+
+    out = []
+    for k in sorted(set(old) - set(new)):
+        out.append({"status": "only_in_old", "code": k, "column": "",
+                    "old": "", "new": ""})
+    for k in sorted(set(new) - set(old)):
+        out.append({"status": "only_in_new", "code": k, "column": "",
+                    "old": "", "new": ""})
+
+    for c in OUTPUT_COLUMNS:
+        if c == "#FidessaCode":
+            continue
+        for k in shared:
+            a, b = old[k].get(c, ""), new[k].get(c, "")
+            if a != b:
+                out.append({"status": "differs", "code": k, "column": c,
+                            "old": a, "new": b})
+    return out
+
+
+def write_compare_report(path, records) -> str:
+    """A run with nothing to report still writes the header, which is the
+    readable way to say there was nothing to report."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=COMPARE_COLUMNS,
+                           lineterminator="\n")
+        w.writeheader()
+        for d in records:
+            w.writerow(d)
+    return str(path)
+
+
 def print_compare(d):
     print(f"\n  rows in both        {d['shared']}")
     print(f"  only in the old     {len(d['only_old'])}")
@@ -556,6 +620,9 @@ def main(argv=None) -> int:
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--demo", action="store_true")
     ap.add_argument("--compare", metavar="OLD.csv")
+    ap.add_argument("--report", default=COMPARE_REPORT, metavar="CSV",
+                    help=f"where --compare writes every difference "
+                         f"(default {COMPARE_REPORT})")
     ap.add_argument("--date", metavar="YYYY-MM-DD")
     args = ap.parse_args(argv)
 
@@ -582,8 +649,11 @@ def main(argv=None) -> int:
         return 1
 
     if args.compare:
-        print_compare(compare(read_output(args.compare),
-                              read_output(s.OUTPUT_PATH)))
+        old, new = read_output(args.compare), read_output(s.OUTPUT_PATH)
+        print_compare(compare(old, new))
+        records = differences(old, new)
+        print(f"\n  {len(records)} difference(s) written to "
+              f"{write_compare_report(args.report, records)}")
     return rc
 
 
@@ -806,6 +876,43 @@ def self_test() -> int:
     check("a column that does not", d["columns"]["Beta"]["differ"], 1)
     check("and it shows an example",
           d["columns"]["Beta"]["examples"][0], ("A", "1.0", "1.1"))
+
+    print("\nthe same comparison, as the report carries it")
+    recs = differences(old, new)
+    check("a row for every difference and every name only one file has",
+          recs,
+          [{"status": "only_in_old", "code": "B", "column": "",
+            "old": "", "new": ""},
+           {"status": "only_in_new", "code": "C", "column": "",
+            "old": "", "new": ""},
+           {"status": "differs", "code": "A", "column": "Beta",
+            "old": "1.0", "new": "1.1"}])
+
+    #  The printed form caps at five a column.  A cutover needs all of them:
+    #  Volatility10D's spread cannot be measured from a sample.
+    many_old = [{"#FidessaCode": f"N{i}", "Volatility10D": "10.0"}
+                for i in range(20)]
+    many_new = [{"#FidessaCode": f"N{i}", "Volatility10D": "11.0"}
+                for i in range(20)]
+    check("THE REPORT IS NOT CAPPED AT THE FIVE EXAMPLES THE SCREEN SHOWS",
+          len(differences(many_old, many_new)), 20)
+    check("while the printed form still shows five",
+          len(compare(many_old, many_new)["columns"]["Volatility10D"]
+              ["examples"]), 5)
+
+    with tempfile.TemporaryDirectory() as dd:
+        p = Path(dd) / "report.csv"
+        write_compare_report(p, recs)
+        lines = p.read_text(encoding="utf-8").splitlines()
+        check("the report is the columns, then a row per difference",
+              lines,
+              [",".join(COMPARE_COLUMNS),
+               "only_in_old,B,,,", "only_in_new,C,,,",
+               "differs,A,Beta,1.0,1.1"])
+        write_compare_report(p, [])
+        check("nothing to report still writes the header",
+              p.read_text(encoding="utf-8").splitlines(),
+              [",".join(COMPARE_COLUMNS)])
 
     print("\nthe demo runs end to end with no kdb")
     check("demo returns success", demo(), 0)

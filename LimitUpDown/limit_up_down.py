@@ -54,7 +54,9 @@ market whose rule nobody has written down is still publishable.
     python limit_up_down.py --demo             a whole run on canned data
     python limit_up_down.py ""                 real run, publish nowhere
     python limit_up_down.py "Test|Pilot|Prod"  real run, publish
-    python limit_up_down.py --compare OLD.csv  diff against another file
+    python limit_up_down.py --compare OLD.csv  diff against another file,
+                                               printed and written to
+                                               compare-report.csv
     python limit_up_down.py --kdb-check        only the kdb path, verbosely
 
 REPORT, NEVER SILENTLY DROP, and NOTHING PARTIALLY PUBLISHED - both carried
@@ -99,6 +101,11 @@ CROSSCODE_PATH = r"CHANGEME\CrossCode.csv"
 #  the trading system - and so India's exclusions are read at all.
 TSR_DIR = str(Path(__file__).resolve().parent / "config")
 OUT_TEMP = str(Path(__file__).resolve().parent / "out" / "limitUpDown.csv")
+
+#  Where --compare writes its full list of differences.  The printed lines
+#  are a summary; this is the record.
+COMPARE_REPORT = "compare-report.csv"
+COMPARE_COLUMNS = ["status", "venue", "code", "column", "old", "new"]
 OUT_TEST = ""
 OUT_PILOT = ""
 OUT_PROD = ""
@@ -444,10 +451,30 @@ def copy_to_envs(temp, envs, targets):
     return failures
 
 
-def compare(old_rows, new_rows):
+def _same_price(a, b) -> bool:
+    """Two price cells, as values rather than as spellings: 3833 and 3833.0
+    are one price.
+
+    A cell that will not parse falls back to text.  An R file that does not
+    carry the column at all hands us None, and Decimal(None) raises - which
+    would take out the one tool the cutover depends on, at the moment it is
+    being pointed at an unfamiliar file."""
+    if a == b:
+        return True
+    try:
+        return Decimal(a) == Decimal(b)
+    except (TypeError, ArithmeticError):
+        return False
+
+
+def differences(old_rows, new_rows):
     """Differences between two output files, worst first: venue row counts,
     names present in one only, then prices that moved.  The cutover
-    instrument - run it against yesterday's file, or against v1's."""
+    instrument - run it against yesterday's file, or against v1's.
+
+    One record per difference, so the CSV report is the complete list.  The
+    printed lines are rendered from these by compare(), which keeps the two
+    from ever disagreeing about what was found."""
     out = []
     old = {r["#ReutersCode"]: r for r in old_rows}
     new = {r["#ReutersCode"]: r for r in new_rows}
@@ -458,19 +485,56 @@ def compare(old_rows, new_rows):
         o = sum(1 for r in old_rows if r["Venue"] == v)
         n = sum(1 for r in new_rows if r["Venue"] == v)
         if o != n:
-            out.append(f"{v}: {o} old, {n} new")
+            out.append({"status": "rowcount", "venue": v, "code": "",
+                        "column": "", "old": o, "new": n})
 
     for ric in sorted(set(old) - set(new)):
-        out.append(f"only in old: {ric}")
+        out.append({"status": "only_in_old", "venue": old[ric].get("Venue", ""),
+                    "code": ric, "column": "", "old": "", "new": ""})
     for ric in sorted(set(new) - set(old)):
-        out.append(f"only in new: {ric}")
+        out.append({"status": "only_in_new", "venue": new[ric].get("Venue", ""),
+                    "code": ric, "column": "", "old": "", "new": ""})
 
     for ric in sorted(set(old) & set(new)):
         for col in ("LimitUpPrice", "LimitDownPrice"):
             a, b = old[ric].get(col), new[ric].get(col)
-            if a != b and Decimal(a) != Decimal(b):
-                out.append(f"{ric} {col}: old {a}, new {b}")
+            if not _same_price(a, b):
+                out.append({"status": "price",
+                            "venue": new[ric].get("Venue", ""), "code": ric,
+                            "column": col, "old": a, "new": b})
     return out
+
+
+def _line(d) -> str:
+    """One difference, as it has always printed."""
+    if d["status"] == "rowcount":
+        return f"{d['venue']}: {d['old']} old, {d['new']} new"
+    if d["status"] == "only_in_old":
+        return f"only in old: {d['code']}"
+    if d["status"] == "only_in_new":
+        return f"only in new: {d['code']}"
+    return f"{d['code']} {d['column']}: old {d['old']}, new {d['new']}"
+
+
+def compare(old_rows, new_rows):
+    """The printed form.  Unchanged - the CSV is an addition, not a
+    replacement."""
+    return [_line(d) for d in differences(old_rows, new_rows)]
+
+
+def write_compare_report(path, records) -> str:
+    """Every difference, not the handful that fit on a screen.  A run with
+    nothing to report still writes the header, which is the readable way to
+    say there was nothing to report."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=COMPARE_COLUMNS,
+                           lineterminator="\n")
+        w.writeheader()
+        for d in records:
+            w.writerow(d)
+    return str(path)
 
 
 def run(envs_spec: str) -> int:
@@ -841,6 +905,9 @@ def main(argv=None) -> int:
                    help="run the whole pipeline on canned data and exit")
     p.add_argument("--compare", metavar="OLD_CSV",
                    help="diff the last output against another file")
+    p.add_argument("--report", default=COMPARE_REPORT, metavar="CSV",
+                   help=f"where --compare writes every difference "
+                        f"(default {COMPARE_REPORT})")
     p.add_argument("--kdb-check", action="store_true",
                    help="exercise ONLY the kdb path, verbosely, on a few "
                         "names. No Bloomberg, no files written.")
@@ -862,10 +929,16 @@ def main(argv=None) -> int:
         def read(path):
             with open(path, newline="", encoding="utf-8-sig") as fh:
                 return list(csv.DictReader(fh))
-        diffs = compare(read(a.compare), read(OUT_TEMP))
-        for d in diffs:
-            print(d)
-        print(f"\n{len(diffs)} difference(s)")
+        if not Path(OUT_TEMP).is_file():
+            raise SystemExit(
+                f"nothing to compare against: {OUT_TEMP} does not exist.\n"
+                "--compare diffs the LAST run's output, it does not run the "
+                "job.  Run it first.")
+        records = differences(read(a.compare), read(OUT_TEMP))
+        for d in records:
+            print(_line(d))
+        print(f"\n{len(records)} difference(s)")
+        print(f"written to {write_compare_report(a.report, records)}")
         return 0
 
     return run(a.envs)
@@ -1071,6 +1144,39 @@ def self_test() -> int:
           ["A.T LimitUpPrice: old 3833, new 3900"])
     check("the same price written differently is not a difference",
           compare(old, [dict(old[0], LimitUpPrice="3833.0"), old[1]]), [])
+    check("a column the other file does not carry at all does not take out "
+          "the comparison itself",
+          compare(old, [{k: v for k, v in old[0].items()
+                         if k != "LimitUpPrice"}, old[1]]),
+          ["A.T LimitUpPrice: old 3833, new None"])
+
+    print("\nthe same differences, as the report carries them")
+    recs = differences(old, [dict(old[0], LimitUpPrice="3900"), old[1]])
+    check("one record per difference", len(recs), 1)
+    check("with the venue, the name, the column and both values", recs[0],
+          {"status": "price", "venue": "TYO-MAIN", "code": "A.T",
+           "column": "LimitUpPrice", "old": "3833", "new": "3900"})
+    check("a missing name carries its venue, so the report can be read by "
+          "market without joining anything",
+          differences(old, old[:1])[1],
+          {"status": "only_in_old", "venue": "TYO-MAIN", "code": "B.T",
+           "column": "", "old": "", "new": ""})
+    check("and the printed lines are rendered from the same records, so the "
+          "two can never disagree about what was found",
+          [_line(d) for d in differences(old, old[:1])],
+          compare(old, old[:1]))
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "report.csv"
+        write_compare_report(p, recs)
+        check("the report is the columns, then a row per difference",
+              p.read_text(encoding="utf-8").splitlines(),
+              [",".join(COMPARE_COLUMNS),
+               "price,TYO-MAIN,A.T,LimitUpPrice,3833,3900"])
+        write_compare_report(p, [])
+        check("nothing to report still writes the header",
+              p.read_text(encoding="utf-8").splitlines(),
+              [",".join(COMPARE_COLUMNS)])
 
     print("\nthe entitlement csv")
     eid_reason = ("Bloomberg refused the security: Security Entitlement "

@@ -287,6 +287,25 @@ python limit_up_down.py --compare OLD.csv  diff the last output against another
 python limit_up_down.py --kdb-check        only the kdb path, verbosely
 ```
 
+`--compare` prints its differences **and writes every one of them** to
+`compare-report.csv` (`--report` moves it). The printed lines are for reading;
+the CSV is the record, and it sorts and filters when a cutover turns up more
+than fits on a screen:
+
+```
+status,venue,code,column,old,new
+rowcount,SSE-MAIN,,,0,1
+only_in_old,TSE-MAIN,6758.T,,,
+price,TSE-MAIN,7203.T,LimitUpPrice,3900,3833.0
+```
+
+`only_in_old` and `only_in_new` carry the venue too, so the report reads by
+market without joining anything back to the crosscode. A run with nothing to
+report still writes the header.
+
+**`--compare` does not run the job** — it diffs whatever the last run left in
+`out/`. Run it first, or it now says so by name instead of raising.
+
 **kdb runs before Bloomberg.** The Bloomberg fetch is sixteen thousand names
 and minutes of it, so running it first meant every kdb fault cost a whole run
 to see once. The cheap, fragile side now fails fast.
