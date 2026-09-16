@@ -417,6 +417,27 @@ A venue rounds only if its `Rounding` column says so. Today that is Korea's
 `KSC-MAIN` and Indonesia; the other nine computed venues publish the raw band,
 which is a config decision and a one-word edit.
 
+**Each leg rounds on the coarser of two ticks** — the one at the previous close
+and the one where that leg actually lands. A ladder is a function of price and
+the two legs are at different prices, so a band spanning a tier boundary has two
+ticks, not one.
+
+Two Bloomberg-confirmed Korean names pin the rule down, and they point opposite
+ways — which is why it is not simply "the leg's own tick":
+
+| | close | leg | tick at close | tick at leg | Bloomberg |
+|---|---|---|---|---|---|
+| `000250 KQ` up | 157,500 | 204,750 | 100 | **500** | 204,500 |
+| `000020 KP` down | 5,150 | 3,605 | **10** | 5 | 3,610 |
+
+The first needs the leg's tick (204,750 crosses 200,000 into the 500 band). The
+second needs the close's: 3,605 is *already* a valid price on its own tick of 5,
+so only the coarser 10 lifts it to 3,610. The coarser of the two gives both.
+
+Because a ladder is monotonic, "coarser of the two" is just "the tick at the
+higher price" — so **every down leg is unchanged** (the close is the higher
+there) and an up leg changes only when the limit crosses into a coarser band.
+
 **The ladder is per name, not per venue, and it comes out of kdb** —
 `ticksizeids` maps a sym to a tick-table id, `ticksizetbl` holds that table's
 tiers. Both sit beside `equity_master` on `EQUITY_MASTER_SERVER`, so this needs

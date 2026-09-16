@@ -435,17 +435,24 @@ def price_computed(cfg, rows, closes, ladders=None):
             #  (the close is the higher) and changes an UP leg only when
             #  the limit crosses into a coarser band.
             #
-            #  000250 KQ is that case and is why this exists.  Close
-            #  157,500 is under 200,000 so its tick is 100, but the limit
-            #  204,750 is over it, where the tick is 500.  On the close's
-            #  tick we published 204,700; Bloomberg says 204,500, which is
-            #  204,750 floored on 500.
+            #  DO NOT SIMPLIFY THIS TO THE LEG'S OWN TICK.  Two names
+            #  settle it and they point opposite ways.  BOTH expected
+            #  values below are Bloomberg's, not inferred:
             #
-            #  Taking the leg's own tick INSTEAD of the close's would break
-            #  the other direction: 000020 KP at 5,150 has a down leg of
-            #  3,605, whose own tick is 5 and which is already a valid
-            #  price, so it would stay 3,605 where the answer is 3,610.
-            #  The coarser of the two satisfies both.
+            #    000250 KQ  close 157,500 (tick 100, under 200,000)
+            #               up   204,750  (tick 500, over it)
+            #               the close's tick gives 204,700; Bloomberg
+            #               publishes 204,500, which is 204,750 on 500.
+            #
+            #    000020 KP  close 5,150   (tick 10)
+            #               down 3,605    (tick 5, and ALREADY a valid
+            #               price, so its own tick would leave it at
+            #               3,605); Bloomberg publishes 3,610, which is
+            #               3,605 raised on 10.
+            #
+            #  So the close's tick alone is wrong for the first and the
+            #  leg's own tick alone is wrong for the second.  The coarser
+            #  of the two is the only rule that gives both.
             def tick(price, _ladder=ladder, _at_ref=at_ref):
                 return max(_at_ref, ticks.tick_for(_ladder, price) or _at_ref)
         try:
@@ -1314,8 +1321,9 @@ def self_test() -> int:
     kout, kexcl = price_computed(
         cfg, kor, {"000020.KS": Decimal("5150"), "ZZZZ.KS": Decimal("5150")},
         {"000020.KS": ladder})
-    check("000020 KP at 5150 publishes 3610/6690 - the raw band is "
-          "3605/6695, and the 10 tick at that close is the difference",
+    check("000020 KP at 5150 publishes 3610/6690, which is Bloomberg's - "
+          "the raw band is 3605/6695, and 3605 is ALREADY valid on its own "
+          "tick of 5, so only the close's coarser 10 lifts it to 3610",
           (kout[0]["LimitUpPrice"], kout[0]["LimitDownPrice"]),
           ("6690", "3610"))
 

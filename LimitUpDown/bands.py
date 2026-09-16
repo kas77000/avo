@@ -29,11 +29,13 @@ not one.
   Korea's 000250 KQ is the case that proved it.  Previous close 157,500,
   which is under 200,000, so the tick THERE is 100.  The limit up is
   204,750, which is over it, where the tick is 500.  Rounded on the close's
-  tick we published 204,700; Bloomberg says 204,500, which is 204,750
+  tick we published 204,700; Bloomberg publishes 204,500, which is 204,750
   floored on 500.
 
-The caller decides what each leg's tick is - see price_computed, which
-takes the COARSER of the close's tick and the leg's own, and says why.
+The caller decides what each leg's tick is - see price_computed, which takes
+the COARSER of the close's tick and the leg's own.  Two Bloomberg-confirmed
+names pin that down and they point opposite ways, so neither price alone is
+the rule; the comment there has both.
 
 DECIMAL, NOT FLOAT.  floor(Decimal('1.15') / Decimal('0.05')) is 23.  In
 binary floating point it is 22.  Tick rounding is exactly where that bites,
