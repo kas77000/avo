@@ -1,0 +1,6 @@
+# Python 3.13.  Everything else this job needs is in the standard library.
+#
+# pykx is imported lazily, inside connect(), so --self-test and --demo - and
+# every module that is not qattsource.py - run on a machine with no kdb and
+# no q licence.
+pykx        # qattsource.py - the historical ticks out of qatt

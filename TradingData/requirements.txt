@@ -1,0 +1,7 @@
+# Python 3.13.  Everything else this job needs is in the standard library:
+# decimal for every price, csv for every file.
+#
+# pykx is imported lazily, inside connect(), so --self-test and --demo - and
+# every module that is not equitymaster.py - run on a machine with no kdb and
+# no q licence.
+pykx        # equitymaster.py - shares outstanding and the equity master

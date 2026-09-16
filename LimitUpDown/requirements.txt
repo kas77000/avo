@@ -1,0 +1,12 @@
+# Python 3.13.  Everything else this job needs is in the standard library.
+#
+# Both are imported lazily, inside the function that needs them, so every
+# other mode - --self-test, --demo, a file-sourced venue - runs on a machine
+# with neither installed.
+#
+# blpapi is not on PyPI.  It comes from Bloomberg's own index, and the line
+# below points pip at it, so `pip install -r requirements.txt` is enough.
+--extra-index-url https://blpapi.bloomberg.com/repository/releases/python/simple/
+
+blpapi      # bpipe.py - reference prices off Bloomberg
+pykx        # kdbclose.py - reference prices off kdb
