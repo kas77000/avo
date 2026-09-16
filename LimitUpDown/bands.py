@@ -10,26 +10,30 @@ symmetric market is one tier with equal values; Indonesia is three tiers;
 Japan (later) is thirty-three tiers with kind='abs'.  None of them is a
 branch in this file.
 
-MOST MARKETS DO NOT ROUND, and rounding='none' is the common case.  The
-band is ref x (1 +/- pct) and that number is published as it comes out.
-Two reasons:
+MOST MARKETS DO NOT ROUND, and rounding='none' is still the common case: the
+band is ref x (1 +/- pct) and that number is published as it comes out.  A
+venue rounds only where markets.csv says so - Indonesia and Korea's KSC-MAIN
+today - and a venue with rounding='none' needs no tick at all.
 
-  Exactly ONE market rounds - Indonesia - because Indonesia is the one
-  market whose band is computed here rather than read from Bloomberg.
-  Every other market's limits arrive already struck by the exchange.
+Inward rounding does not change which orders the band admits.
+floor(raw/tick)*tick is the largest valid tick price <= raw, so for any
+order price m that is itself on a tick, m <= rounded exactly when m <= raw.
+Rounding makes the published number match what the exchange prints; it does
+not make the check stricter.
 
-  And inward rounding does not change which orders the band admits.
-  floor(raw/tick)*tick is the largest valid tick price <= raw, so for any
-  order price m that is itself on a tick, m <= rounded exactly when
-  m <= raw.  Korea at 71,300 with 100 KRW ticks: raw limit up 92,690,
-  rounded 92,600, and the only ticks nearby are 92,600 and 92,700.  Nothing
-  falls between them.  Rounding makes the published number match what the
-  exchange prints; it does not make the check stricter.
+EACH LEG ROUNDS ON ITS OWN TICK, which is why `tick` may be a callable
+rather than a value.  A ladder is a function of price and the two legs are
+at different prices, so a band that spans a tier boundary has two ticks and
+not one.
 
-So a market rounds only where we know it should: Indonesia today, Japan
-when it arrives.  A venue with rounding='none' needs no tick table at all,
-which is why there is no tick data to source for Korea, Malaysia, Taiwan,
-China or the Philippines.
+  Korea's 000250 KQ is the case that proved it.  Previous close 157,500,
+  which is under 200,000, so the tick THERE is 100.  The limit up is
+  204,750, which is over it, where the tick is 500.  Rounded on the close's
+  tick we published 204,700; Bloomberg says 204,500, which is 204,750
+  floored on 500.
+
+The caller decides what each leg's tick is - see price_computed, which
+takes the COARSER of the close's tick and the leg's own, and says why.
 
 DECIMAL, NOT FLOAT.  floor(Decimal('1.15') / Decimal('0.05')) is 23.  In
 binary floating point it is 22.  Tick rounding is exactly where that bites,
@@ -89,26 +93,39 @@ def raw_band(tier: Tier, ref: Decimal):
     raise BandError(f"unknown tier kind {tier.kind!r}")
 
 
+def _tick_at(tick, price: Decimal, rounding: str):
+    """The tick for one leg.
+
+    EACH LEG RESOLVES ITS OWN, because a tick ladder is a function of price
+    and the two legs are at different prices.  `tick` may be a plain value,
+    which both legs then share, or a callable taking the price being
+    rounded - which is what a caller holding a ladder passes."""
+    got = tick(price) if callable(tick) else tick
+    if got is None:
+        raise BandError(f"rounding {rounding!r} needs a tick and none was "
+                        f"resolved")
+    if got <= 0:
+        raise BandError("tick is not positive")
+    return got
+
+
 def round_band(up: Decimal, down: Decimal, tick, rounding: str):
     """Most markets do not round at all - see the note in the module
     docstring.  'none' ignores the tick, which may be None."""
     if rounding == "none":
         return up, down
-    if tick is None:
-        raise BandError(f"rounding {rounding!r} needs a tick and none was "
-                        f"resolved")
-    if tick <= 0:
-        raise BandError("tick is not positive")
+    if rounding not in ("inward", "outward", "nearest"):
+        raise BandError(f"unknown rounding mode {rounding!r}")
+    ut = _tick_at(tick, up, rounding)
+    dt = _tick_at(tick, down, rounding)
     if rounding == "inward":
-        return ((up / tick).to_integral_value(ROUND_FLOOR) * tick,
-                (down / tick).to_integral_value(ROUND_CEILING) * tick)
+        return ((up / ut).to_integral_value(ROUND_FLOOR) * ut,
+                (down / dt).to_integral_value(ROUND_CEILING) * dt)
     if rounding == "outward":
-        return ((up / tick).to_integral_value(ROUND_CEILING) * tick,
-                (down / tick).to_integral_value(ROUND_FLOOR) * tick)
-    if rounding == "nearest":
-        return ((up / tick).to_integral_value(ROUND_HALF_UP) * tick,
-                (down / tick).to_integral_value(ROUND_HALF_UP) * tick)
-    raise BandError(f"unknown rounding mode {rounding!r}")
+        return ((up / ut).to_integral_value(ROUND_CEILING) * ut,
+                (down / dt).to_integral_value(ROUND_FLOOR) * dt)
+    return ((up / ut).to_integral_value(ROUND_HALF_UP) * ut,
+            (down / dt).to_integral_value(ROUND_HALF_UP) * dt)
 
 
 def compute(tiers, ticker: str, ref: Decimal, tick,
@@ -233,6 +250,28 @@ def self_test() -> int:
     check("the float trap: 1.15 over a 0.05 tick is 23 ticks, not 22",
           round_band(D("1.15"), D("1.15"), D("0.05"), "inward"),
           (D("1.15"), D("1.15")))
+
+    print("\neach leg on its own tick, when the caller passes a callable")
+    #  Korea's table 6132 around the 200,000 boundary: 100 below, 500 at or
+    #  above.  000250 KQ's band straddles it.
+    def kr(price):
+        return D("500") if price >= D("200000") else D("100")
+
+    check("A BAND THAT SPANS A TIER BOUNDARY HAS TWO TICKS - 204,750 "
+          "floors on 500 to 204,500, which is what Bloomberg publishes, "
+          "while the down leg keeps the 100 it sits on",
+          round_band(D("204750"), D("110250"), kr, "inward"),
+          (D("204500"), D("110300")))
+    check("a callable that answers the same everywhere is the old "
+          "behaviour, unchanged",
+          round_band(D("204750"), D("110250"), lambda p: D("100"), "inward"),
+          round_band(D("204750"), D("110250"), D("100"), "inward"))
+    raises("a callable that cannot resolve a leg is a bug, not a silent pass",
+           lambda: round_band(D("110"), D("90"), lambda p: None, "inward"),
+           "rounding 'inward' needs a tick and none was resolved")
+    raises("nor may it answer zero",
+           lambda: round_band(D("110"), D("90"), lambda p: D("0"), "inward"),
+           "tick is not positive")
 
     print("\ncompute, end to end")
     check("Indonesia at 100 with a 1 tick",

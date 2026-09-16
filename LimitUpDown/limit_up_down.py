@@ -423,10 +423,31 @@ def price_computed(cfg, rows, closes, ladders=None):
             if not ladder:
                 drop("no tick ladder for this name", r)
                 continue
-            tick = ticks.tick_for(ladder, ref)
-            if tick is None:
+            at_ref = ticks.tick_for(ladder, ref)
+            if at_ref is None:
                 drop("no tick tier for the previous close", r, f"price {ref}")
                 continue
+
+            #  THE COARSER OF THE TWO TICKS: the one at the close, and the
+            #  one where the leg being rounded actually lands.  A ladder is
+            #  monotonic, so this is just "the tick at the higher of the
+            #  two prices" - which leaves every DOWN leg exactly as it was
+            #  (the close is the higher) and changes an UP leg only when
+            #  the limit crosses into a coarser band.
+            #
+            #  000250 KQ is that case and is why this exists.  Close
+            #  157,500 is under 200,000 so its tick is 100, but the limit
+            #  204,750 is over it, where the tick is 500.  On the close's
+            #  tick we published 204,700; Bloomberg says 204,500, which is
+            #  204,750 floored on 500.
+            #
+            #  Taking the leg's own tick INSTEAD of the close's would break
+            #  the other direction: 000020 KP at 5,150 has a down leg of
+            #  3,605, whose own tick is 5 and which is already a valid
+            #  price, so it would stay 3,605 where the answer is 3,610.
+            #  The coarser of the two satisfies both.
+            def tick(price, _ladder=ladder, _at_ref=at_ref):
+                return max(_at_ref, ticks.tick_for(_ladder, price) or _at_ref)
         try:
             high, low = bands.compute(cfg.bands[r.venue_id], r.ticker, ref,
                                       tick, venue.min_price, venue.rounding)
@@ -1297,6 +1318,20 @@ def self_test() -> int:
           "3605/6695, and the 10 tick at that close is the difference",
           (kout[0]["LimitUpPrice"], kout[0]["LimitDownPrice"]),
           ("6690", "3610"))
+
+    #  THE TWO NAMES THAT SETTLE WHICH PRICE THE TICK COMES FROM, and they
+    #  point opposite ways under either single rule.  Only the coarser of
+    #  the two ticks satisfies both.
+    k2 = price_computed(
+        cfg, [row("000250.KS", "000250 KQ", "000250.KR", "KSC-MAIN")],
+        {"000250.KS": Decimal("157500")}, {"000250.KS": ladder})[0]
+    check("000250 KQ at 157500 publishes 204500, which is what Bloomberg "
+          "publishes: the close's tick is 100 but the LIMIT lands over "
+          "200000 where the tick is 500, and 204750 floors there",
+          k2[0]["LimitUpPrice"], "204500")
+    check("its down leg keeps the close's 100, because 110250 is nowhere "
+          "near the boundary - only the UP leg crossed it",
+          k2[0]["LimitDownPrice"], "110300")
     check("A NAME KDB HAS NO LADDER FOR IS REPORTED, NOT PUBLISHED "
           "UNROUNDED - an unrounded limit is one the exchange will reject",
           [d.ric for d in
