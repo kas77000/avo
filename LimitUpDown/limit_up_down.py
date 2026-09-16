@@ -237,8 +237,42 @@ SHOW_NAMES = 5
 #  reading and useless for answering "which names, exactly".  This is the
 #  list.  Written beside OUT_TEMP, not published.
 EXCLUDED_CSV = "excluded.csv"
-EXCLUDED_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Reason",
-                   "Detail"]
+EXCLUDED_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Missing",
+                   "Reason", "Detail"]
+
+#  WHAT WAS MISSING, in one word, so the file sorts and filters by it.  The
+#  reason already says it in prose; this is the same fact as a token,
+#  because "how many names did we lose for want of a close" should be a
+#  filter and not a reading exercise.
+#
+#  Derived from the reason rather than carried alongside it, deliberately:
+#  the reason is what GROUPS the run report, so it is already the stable
+#  string, and threading a second field through every drop site would give
+#  two things to keep in step.  Anything unrecognised is "other" rather
+#  than blank, so a new reason shows up as a gap to fill instead of an
+#  empty cell that reads like "nothing was missing".
+MISSING_TOKENS = (
+    ("no close in equity_master, then", "close-and-bloomberg"),
+    ("no previous close", "close"),
+    ("no tick ladder", "ladder"),
+    ("no tick tier", "tick-tier"),
+    ("no band tier", "band-tier"),
+    ("Security Entitlement Check Failed", "entitlement"),
+    ("Bloomberg refused", "refused"),
+    ("no answer from Bloomberg", "no-answer"),
+    ("MARKET_STATUS", "market-status"),
+    ("outside the limits", "sanity-check"),
+    ("MIN_LIMIT", "min-limit"),
+    ("MAX_LIMIT", "max-limit"),
+)
+
+
+def missing_token(reason: str) -> str:
+    """One word for what a name was dropped for want of."""
+    for fragment, token in MISSING_TOKENS:
+        if fragment in reason:
+            return token
+    return "other"
 
 ENTITLEMENT_CSV = "entitlement_refused.csv"
 ENTITLEMENT_HEADER = ["ReutersCode", "BloombergCode", "Venue", "EIDs",
@@ -272,8 +306,9 @@ def excluded_rows(excluded):
     for e in excluded:
         for d in e.rows:
             rows.append({"ReutersCode": d.ric, "BloombergCode": d.bbg,
-                         "Venue": d.venue_id, "Reason": e.reason,
-                         "Detail": d.detail})
+                         "Venue": d.venue_id,
+                         "Missing": missing_token(e.reason),
+                         "Reason": e.reason, "Detail": d.detail})
     return rows
 
 
@@ -432,7 +467,7 @@ def price_computed(cfg, rows, closes, ladders=None):
             #  ticksizetbl - the same two tables blp_lib.q rounds by.
             ladder = cfg.ticks.get(r.venue_id) or ladders.get(r.ric)
             if not ladder:
-                drop("no tick ladder for this name", r)
+                drop("no tick ladder for this name", r, f"close {ref}")
                 continue
             at_ref = ticks.tick_for(ladder, ref)
             if at_ref is None:
@@ -889,6 +924,17 @@ def run(envs_spec: str) -> int:
             Path(OUT_TEMP).parent / EXCLUDED_CSV, excluded)
         report.append(f"  excluded    {exc_count:6d}  names with their "
                       f"reason written to {exc_path}")
+        #  WHAT WAS MISSING, totalled.  The per-reason lines above already
+        #  say it, but they split one cause across several wordings - three
+        #  different Bloomberg refusals are three lines and one missing
+        #  thing - so the totals are what answers "what did we lose names
+        #  for".
+        totals = {}
+        for e in excluded:
+            token = missing_token(e.reason)
+            totals[token] = totals.get(token, 0) + len(e.rows)
+        for token, n in sorted(totals.items(), key=lambda kv: -kv[1]):
+            report.append(f"    missing {token:<20} {n:6d}")
     except Exception as e:                                  # noqa: BLE001
         report.append(f"  excluded csv FAILED: {type(e).__name__}: {e}")
 
@@ -1626,6 +1672,28 @@ def self_test() -> int:
           rows[0]["Reason"], "no previous close in equity_master")
     check("and the per-name detail, where there is one",
           rows[2]["Detail"], "price 10")
+    check("AND WHAT WAS MISSING, in one word, so the file filters by it "
+          "rather than being read",
+          [r["Missing"] for r in rows], ["close", "close", "band-tier"])
+    check("a name that lost its close AND got nothing from Bloomberg says "
+          "both, because either one alone would be the wrong story",
+          missing_token("no close in equity_master, then no answer from "
+                        "Bloomberg"), "close-and-bloomberg")
+    check("every reason this file can produce has a word",
+          [missing_token(r) for r in
+           ("no answer from Bloomberg", "no previous close in equity_master",
+            "no tick ladder for this name",
+            "no tick tier for the previous close",
+            "no band tier for the previous close",
+            "Bloomberg refused the security: Security Entitlement Check "
+            "Failed! EID(s) needed: 1", "MARKET_STATUS is DLST, not ACTV",
+            "last price outside the limits", "no MIN_LIMIT", "no MAX_LIMIT")],
+          ["no-answer", "close", "ladder", "tick-tier", "band-tier",
+           "entitlement", "market-status", "sanity-check", "min-limit",
+           "max-limit"])
+    check("and one nobody has written yet reads as a gap to fill, not as "
+          "an empty cell that looks like nothing was missing",
+          missing_token("some new thing"), "other")
     with tempfile.TemporaryDirectory() as d:
         target = Path(d) / "sub" / EXCLUDED_CSV
         path, n = write_excluded_csv(target, exc)

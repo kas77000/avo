@@ -530,10 +530,18 @@ column is blank too.
 `excluded.csv`, written beside the output every run:
 
 ```
-ReutersCode,BloombergCode,Venue,Reason,Detail
-A.KS,A KP,KSC-MAIN,no previous close in equity_master,
-T.JK,T IJ,JKT-MAIN,no band tier for the previous close,price 10
+ReutersCode,BloombergCode,Venue,Missing,Reason,Detail
+A.KS,A KP,KSC-MAIN,close,no previous close in equity_master,
+B.KQ,B KQ,KOE-MAIN,ladder,no tick ladder for this name,close 5150
+C.JK,C IJ,JKT-MAIN,close-and-bloomberg,"no close ..., then no answer ...",
 ```
+
+**`Missing` names the input that was absent**, in one word, so the file filters
+by it — `close`, `ladder`, `band-tier`, `entitlement`, `no-answer` and so on.
+The `Reason` says the same thing in prose; `Missing` is what makes "how many
+names did we lose for want of a close" a filter rather than a reading exercise.
+`Detail` carries what we *did* have, so a name dropped for want of a ladder
+still shows the close it had. The run report totals the same tokens.
 
 **Every** dropped name with its reason — the run report shows the first five per
 venue and then `(+N more)`, which is right for reading and useless for answering
