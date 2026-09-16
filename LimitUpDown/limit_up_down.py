@@ -1103,8 +1103,19 @@ def kdb_check(sample: int = 5) -> int:
     if not to_compute:
         print("\nno computed rows in the crosscode")
         return 1
-    chosen = to_compute[:max(1, sample)]
-    print(f"\n{len(to_compute)} computed rows; using {len(chosen)}")
+    #  SAMPLE EVERY COMPUTED VENUE, not the first N rows of the universe.
+    #  The first N are all one market - the crosscode is ordered - so the
+    #  old sampling could only ever check whichever venue happened to sort
+    #  first, and "does kdb have a ladder for Malaysia" was unanswerable
+    #  without turning Malaysia's rounding on to find out.
+    per_venue = {}
+    for r in to_compute:
+        rows_here = per_venue.setdefault(r.venue_id, [])
+        if len(rows_here) < max(1, sample):
+            rows_here.append(r)
+    chosen = [r for v in sorted(per_venue) for r in per_venue[v]]
+    print(f"\n{len(to_compute)} computed rows across {len(per_venue)} "
+          f"venues; using {len(chosen)}, up to {max(1, sample)} each")
 
     wanted = []
     for r in chosen:
@@ -1134,12 +1145,15 @@ def kdb_check(sample: int = 5) -> int:
     #  worth checking before a real run: a name kdb has no ladder for is a
     #  name a rounding venue will not publish, and the count says how many
     #  that would be.
+    #  EVERY computed venue, whether or not it rounds today.  Whether kdb
+    #  HAS a ladder for a market is the question you ask BEFORE deciding to
+    #  round on it, so asking it only of the venues already rounding had
+    #  the dependency backwards.  Indonesia is excluded because its ladder
+    #  is the ATS's file and does not come from here.
     rounds = [r for r in chosen
-              if cfg.venues[r.venue_id].rounding != "none"
-              and not cfg.venues[r.venue_id].tick_source]
+              if not cfg.venues[r.venue_id].tick_source]
     if not rounds:
-        print("\nno sampled name is on a venue that rounds from kdb, so "
-              "there is no ladder to check")
+        print("\nno sampled name takes its ladder from kdb")
         return 0 if closes else 1
 
     print(f"\nfetching tick ladders for {len(rounds)} of them")
@@ -1154,6 +1168,19 @@ def kdb_check(sample: int = 5) -> int:
 
     ladders, no_ladder = kdbclose.ladders_for(rounds, cfg.venues, found)
     print(f"\n{len(ladders)} of {len(rounds)} names got a ladder")
+
+    #  BY VENUE, because that is the unit the decision is made in: a market
+    #  with no coverage cannot round yet, one with full coverage can.
+    print(f"\n  {'venue':<14} {'rounds':<8} {'sampled':>7} {'ladders':>7}"
+          f"  tier counts seen")
+    for vid in sorted({r.venue_id for r in rounds}):
+        here = [r for r in rounds if r.venue_id == vid]
+        got = [ladders[r.ric] for r in here if r.ric in ladders]
+        sizes = sorted({len(lad) for lad in got})
+        print(f"  {vid:<14} {cfg.venues[vid].rounding:<8} {len(here):>7} "
+              f"{len(got):>7}  {sizes or '-'}")
+
+    print()
     for r in rounds[:20]:
         ladder = ladders.get(r.ric)
         ref = closes.get(r.ric)
@@ -1202,7 +1229,8 @@ def main(argv=None) -> int:
                    help="exercise ONLY the kdb path, verbosely, on a few "
                         "names. No Bloomberg, no files written.")
     p.add_argument("--sample", type=int, default=5,
-                   help="how many names --kdb-check uses (default 5)")
+                   help="how many names PER VENUE --kdb-check uses "
+                        "(default 5)")
     a = p.parse_args(argv)
 
     if a.self_test:
