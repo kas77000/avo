@@ -353,14 +353,15 @@ finishes last is the file that gets published.
 | `bpipe.py` | session, authorization, batched fetch. The only module that imports blpapi. |
 | `kdbclose.py` | the previous close out of equity_master. The only module that imports pykx. |
 | `bands.py` | tier selection, band arithmetic, tick rounding. Pure. Copied from v1. |
-| `ticks.py` | tick ladders from a `.tsr` file. Pure. Copied from v1. |
+| `ticks.py` | tick ladders, from `config/ticks.csv` or a `.tsr`. Pure. Copied from v1. |
 | `marketcfg.py` | loads the config **and enforces the split** |
 | `crosscode.py` | CrossCode.csv → the universe, filtered and deduplicated |
 | `india.py` | the ATS strategy files, and the BSE listings with no row of their own |
 | `limit_up_down.py` | orchestration, validation, environment copy |
 | `config/markets.csv` | one row per venue: cutoff, which side of the split, and India's `ExcludeFile` |
 | `config/bands.csv` | tiers per venue. Present for twelve; they are what make a venue switchable |
-| `config/spol_JKT.tsr` | **placeholder.** Point `TSR_DIR` at the ATS share, which also holds India's two `.stra` files. |
+| `config/ticks.csv` | tick ladders, for every venue whose ladder is the exchange's published schedule |
+| `config/spol_JKT.tsr` | **placeholder, and Indonesia only.** Point `TSR_DIR` at the ATS share, which also holds India's two `.stra` files. |
 
 `marketcfg` refuses a half-configured venue: a `bloomberg` venue carrying a tick
 file, tiers for a venue Bloomberg prices, a `computed` venue with no tiers. Each
@@ -399,7 +400,8 @@ Nine countries, nineteen venues:
 | | venues | cutoff | source |
 |---|---|---|---|
 | Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | **bloomberg** |
-| Korea | `KOE-MAIN`, `KSC-MAIN` | 07:30 | computed, ±30% |
+| Korea | `KSC-MAIN` | 07:30 | computed, ±30% + tick |
+| Korea | `KOE-MAIN` | 07:30 | computed, ±30%, **no tick** |
 | Malaysia | `KLS-MAIN` | 07:59 | computed, ±30% |
 | Taiwan | `TAI-MAIN` | 07:59 | computed, ±10% |
 | Indonesia | `JKT-MAIN` | 07:59 | computed, tiered + tick |

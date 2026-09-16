@@ -6,6 +6,5 @@ out/
 no_git/
 *.tsr
 !LimitUpDown/config/spol_JKT.tsr
-!LimitUpDown/config/spol_KSC.tsr
 docs/
 .claude/

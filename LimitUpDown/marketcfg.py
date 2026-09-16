@@ -33,6 +33,18 @@ the tick table and the strategy files live in the same place - the ATS
 share.  markets.csv therefore names the file and never the machine, and
 moving the share is one setting rather than three edits.
 
+TWO PLACES A TICK LADDER CAN COME FROM, and which one is not a preference:
+
+    TickSource names a .tsr    the ATS's own ladder, off the share
+    TickSource blank           rows in config/ticks.csv, shipped here
+
+ONLY INDONESIA NEEDS THE FIRST.  Its ladder IS the trading system's, so
+holding a copy would let the two drift and nobody would know which was
+right.  Every other market's ladder is the exchange's published schedule -
+there is nothing to drift from - so it lives in ticks.csv, needs no share to
+be reachable, and is diffable in this repo.  A venue that rounds with no
+ladder from either place is refused.
+
     python marketcfg.py --self-test
 """
 
@@ -167,10 +179,10 @@ def load(config_dir, tsr_dir=None) -> Config:
                 f"markets.csv {vid}: Rounding=none but TickSource is "
                 f"{tick_source!r}. A venue that does not round must not name "
                 f"a tick table.")
-        if effective != "none" and not tick_source:
-            raise ConfigError(
-                f"markets.csv {vid}: Rounding={rounding} needs a TickSource, "
-                f"which is blank")
+        #  A blank TickSource is NOT an error any more: it means the ladder
+        #  comes from ticks.csv, which is where every market but Indonesia
+        #  keeps one.  That a venue which rounds has a ladder at all is
+        #  still checked, below, once both sources have been read.
 
         venues[vid] = Venue(
             country=(r.get("Country") or "").strip(),
@@ -210,6 +222,23 @@ def load(config_dir, tsr_dir=None) -> Config:
                 up=_decimal(r["Up"], f"bands.csv {vid} Up"),
                 down=_decimal(r["Down"], f"bands.csv {vid} Down")))
 
+    #  The ladder every venue but Indonesia uses, shipped with the config
+    #  rather than fetched off the share.  ONLY INDONESIA NEEDS A .tsr: its
+    #  ladder is the ATS's own and must not be able to drift from it, which
+    #  is the entire reason TickSource exists.  A market whose ladder is the
+    #  exchange's published schedule has nothing to drift from, so keeping
+    #  it here costs no accuracy and removes a dependency on the share.
+    csv_ticks = {}
+    if (config_dir / "ticks.csv").is_file():
+        for r in _rows(config_dir / "ticks.csv"):
+            vid = (r.get("FidessaVenueID") or "").strip()
+            if not vid:
+                continue
+            if vid not in venues:
+                raise ConfigError(
+                    f"ticks.csv: venue {vid} is not defined in markets.csv")
+            csv_ticks.setdefault(vid, []).append(r)
+
     tick_map = {}
     for vid, v in venues.items():
         if v.computed and vid not in band_map:
@@ -217,14 +246,26 @@ def load(config_dir, tsr_dir=None) -> Config:
                 f"{vid} has Source=computed but no band tiers in bands.csv. "
                 f"Add its tiers, or leave it on Source=bloomberg - a market "
                 f"whose rule nobody has written down cannot be computed.")
-        if v.rounding == "none" or not v.tick_source:
+        if v.rounding == "none":
             continue
-        path = tsr_dir / v.tick_source
-        if not path.is_file():
-            raise ConfigError(f"{vid}: tick file {path} does not exist")
-        tick_map[vid] = ticks.parse_tsr(path.read_text(encoding="utf-8"))
+        if v.tick_source:
+            path = tsr_dir / v.tick_source
+            if not path.is_file():
+                raise ConfigError(f"{vid}: tick file {path} does not exist")
+            tick_map[vid] = ticks.parse_tsr(path.read_text(encoding="utf-8"))
+        else:
+            try:
+                tick_map[vid] = ticks.parse_rows(csv_ticks.get(vid, []))
+            except (KeyError, InvalidOperation):
+                raise ConfigError(
+                    f"ticks.csv {vid}: every row needs a numeric FloorFrom "
+                    f"and Tick")
         if not tick_map[vid]:
-            raise ConfigError(f"{vid}: tick table is empty")
+            raise ConfigError(
+                f"markets.csv {vid}: Rounding={v.rounding} but there is no "
+                f"tick ladder to round to. Give it rows in ticks.csv, or a "
+                f"TickSource naming a .tsr on the share - half a ladder "
+                f"rounds prices wrongly and silently.")
 
     return Config(venues=venues, bands=band_map, ticks=tick_map)
 
@@ -324,12 +365,37 @@ def self_test() -> int:
               "and VALIDATED, not rejected - they are the switch, and "
               "a typo found now beats one found by whoever flips it",
               [t.up for t in cfg.bands["SHA-MAIN"]], [Decimal("0.1")])
+    print("\nthe ladder comes from ticks.csv unless a .tsr is named")
+    KOR = "Korea,KSC-MAIN,07:30:00,computed,,,inward,\n"
+    KBD = ("FidessaVenueID,Kind,SymPrefix,FloorFrom,Up,Down\n"
+           "KSC-MAIN,pct,,0,0.30,0.30\n")
+    KTK = ("FidessaVenueID,FloorFrom,Tick\n"
+           "KSC-MAIN,0,1\nKSC-MAIN,2000,5\nKSC-MAIN,5000,10\n")
     with tempfile.TemporaryDirectory() as d:
-        raises("a computed venue that rounds but names no tick file",
-               lambda: load(write(d, mk=HDR +
-                                  "Indonesia,JKT-MAIN,07:59:00,computed,,50,"
-                                  "inward\n")),
-               "needs a TickSource")
+        cfg_dir = write(d, mk=HDR + KOR, bd=KBD)
+        (cfg_dir / "ticks.csv").write_text(KTK, encoding="utf-8")
+        c = load(cfg_dir)
+        check("A VENUE THAT ROUNDS NEEDS NO .tsr - only Indonesia does, "
+              "because only Indonesia's ladder is the ATS's own and can "
+              "drift from it",
+              c.ticks["KSC-MAIN"],
+              [(Decimal("0"), Decimal("1")), (Decimal("2000"), Decimal("5")),
+               (Decimal("5000"), Decimal("10"))])
+        check("and the tick at a 5150 close is 10, which is what rounds "
+              "3605 to 3610",
+              ticks.tick_for(c.ticks["KSC-MAIN"], Decimal("5150")),
+              Decimal("10"))
+    with tempfile.TemporaryDirectory() as d:
+        cfg_dir = write(d, mk=HDR + KOR, bd=KBD)
+        (cfg_dir / "ticks.csv").write_text(
+            KTK + "NOPE-MAIN,0,1\n", encoding="utf-8")
+        raises("a ticks.csv row for a venue markets.csv does not define",
+               lambda: load(cfg_dir), "not defined in markets.csv")
+    with tempfile.TemporaryDirectory() as d:
+        raises("A VENUE THAT ROUNDS WITH NO LADDER ANYWHERE is still "
+               "refused - half a ladder rounds wrongly and silently",
+               lambda: load(write(d, mk=HDR + KOR, bd=KBD)),
+               "no tick ladder to round to")
     with tempfile.TemporaryDirectory() as d:
         raises("a computed venue that does not round but names one anyway",
                lambda: load(write(d, mk=HDR +
@@ -413,9 +479,9 @@ def self_test() -> int:
     here = Path(__file__).resolve().parent / "config"
     with tempfile.TemporaryDirectory() as d:
         share = Path(d)
-        #  EVERY ladder, not a named one: the share carries all of them, and
-        #  naming one here meant the next venue to start rounding broke this
-        #  test rather than the config that was wrong.
+        #  Every .tsr the share carries.  Indonesia's is the only one and by
+        #  design stays that way - everywhere else keeps its ladder in
+        #  ticks.csv - but the glob means a second would not break this.
         for tsr in here.glob("*.tsr"):
             (share / tsr.name).write_text(tsr.read_text(encoding="utf-8"),
                                           encoding="utf-8")
