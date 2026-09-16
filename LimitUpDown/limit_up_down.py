@@ -1377,6 +1377,16 @@ def self_test() -> int:
     check("which is markets.csv's choice, not this file's",
           (cfg.venues["JKT-MAIN"].tick_from,
            cfg.venues["KSC-MAIN"].tick_from), ("close", "coarser"))
+    check("INDONESIA IS THE ONLY EXCEPTION - every other computable venue "
+          "takes the coarser tick, so a venue that starts rounding later "
+          "does not have to rediscover 000250 KQ",
+          sorted(v.venue_id for v in cfg.venues.values()
+                 if v.computed and v.tick_from != "coarser"),
+          ["JKT-MAIN"])
+    check("and no venue Bloomberg prices carries it, because a venue that "
+          "does not compute a band has no leg to round",
+          [v.venue_id for v in cfg.venues.values()
+           if not v.computed and v.tick_from != "close"], [])
     check("A NAME KDB HAS NO LADDER FOR IS REPORTED, NOT PUBLISHED "
           "UNROUNDED - an unrounded limit is one the exchange will reject",
           [d.ric for d in
