@@ -1258,9 +1258,12 @@ def self_test() -> int:
         (Path(d) / "bands.csv").write_text(
             (real / "bands.csv").read_text(encoding="utf-8"),
             encoding="utf-8")
-        (Path(d) / "spol_JKT.tsr").write_text(
-            (real / "spol_JKT.tsr").read_text(encoding="utf-8"),
-            encoding="utf-8")
+        #  EVERY ladder, not a named one: the share carries all of them, and
+        #  naming one meant the next venue to start rounding broke this test
+        #  rather than the config that was wrong.
+        for tsr in real.glob("*.tsr"):
+            (Path(d) / tsr.name).write_text(tsr.read_text(encoding="utf-8"),
+                                            encoding="utf-8")
 
         #  EVERY venue can go to bloomberg, because asking needs no tiers.
         #  That is the direction which rescues a market whose rule turns out

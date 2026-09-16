@@ -413,9 +413,12 @@ def self_test() -> int:
     here = Path(__file__).resolve().parent / "config"
     with tempfile.TemporaryDirectory() as d:
         share = Path(d)
-        (share / "spol_JKT.tsr").write_text(
-            (here / "spol_JKT.tsr").read_text(encoding="utf-8"),
-            encoding="utf-8")
+        #  EVERY ladder, not a named one: the share carries all of them, and
+        #  naming one here meant the next venue to start rounding broke this
+        #  test rather than the config that was wrong.
+        for tsr in here.glob("*.tsr"):
+            (share / tsr.name).write_text(tsr.read_text(encoding="utf-8"),
+                                          encoding="utf-8")
         moved = load(here, share)
         check("a bare ExcludeFile is resolved against TSR_DIR - the "
               "strategy files sit beside spol_JKT.tsr on the ATS share, so "
