@@ -490,30 +490,49 @@ def differences(old_rows, new_rows):
 
     for ric in sorted(set(old) - set(new)):
         out.append({"status": "only_in_old", "venue": old[ric].get("Venue", ""),
-                    "code": ric, "column": "", "old": "", "new": ""})
+                    "code": _code(old[ric], ric), "ric": ric, "column": "",
+                    "old": "", "new": ""})
     for ric in sorted(set(new) - set(old)):
         out.append({"status": "only_in_new", "venue": new[ric].get("Venue", ""),
-                    "code": ric, "column": "", "old": "", "new": ""})
+                    "code": _code(new[ric], ric), "ric": ric, "column": "",
+                    "old": "", "new": ""})
 
     for ric in sorted(set(old) & set(new)):
         for col in ("LimitUpPrice", "LimitDownPrice"):
             a, b = old[ric].get(col), new[ric].get(col)
             if not _same_price(a, b):
                 out.append({"status": "price",
-                            "venue": new[ric].get("Venue", ""), "code": ric,
+                            "venue": new[ric].get("Venue", ""),
+                            "code": _code(new[ric], ric), "ric": ric,
                             "column": col, "old": a, "new": b})
     return out
 
 
+def _code(row, ric: str) -> str:
+    """What the report calls a name: its BloombergCode.
+
+    The comparison still KEYS on #ReutersCode - that is what the two files
+    agree on, and what the ATS contract puts first - but a report is read by
+    people who work in Bloomberg codes, and 7203 JT says more at a glance
+    than 7203.T.
+
+    Falls back to the RIC when the column is absent, because an unidentified
+    row in a cutover report is worse than one identified the old way."""
+    return (row.get("BloombergCode") or "").strip() or ric
+
+
 def _line(d) -> str:
-    """One difference, as it has always printed."""
+    """One difference, as it has always printed - on the RIC, which is what
+    the ATS contract puts first and what the two files are keyed on.  The
+    report names the same row by its BloombergCode; both are carried so the
+    two forms stay what each of their readers expects."""
     if d["status"] == "rowcount":
         return f"{d['venue']}: {d['old']} old, {d['new']} new"
     if d["status"] == "only_in_old":
-        return f"only in old: {d['code']}"
+        return f"only in old: {d['ric']}"
     if d["status"] == "only_in_new":
-        return f"only in new: {d['code']}"
-    return f"{d['code']} {d['column']}: old {d['old']}, new {d['new']}"
+        return f"only in new: {d['ric']}"
+    return f"{d['ric']} {d['column']}: old {d['old']}, new {d['new']}"
 
 
 def compare(old_rows, new_rows):
@@ -533,7 +552,9 @@ def write_compare_report(path, records) -> str:
                            lineterminator="\n")
         w.writeheader()
         for d in records:
-            w.writerow(d)
+            #  Selected explicitly: a record also carries the RIC, which the
+            #  printed form uses and the report does not.
+            w.writerow({c: d.get(c, "") for c in COMPARE_COLUMNS})
     return str(path)
 
 
@@ -1151,18 +1172,33 @@ def self_test() -> int:
           ["A.T LimitUpPrice: old 3833, new None"])
 
     print("\nthe same differences, as the report carries them")
-    recs = differences(old, [dict(old[0], LimitUpPrice="3900"), old[1]])
+    #  with the BloombergCode the real output carries, which the RIC-only
+    #  rows above deliberately do not have
+    bbg = [dict(r, BloombergCode=b)
+           for r, b in zip(old, ("A JT", "B JT"))]
+    recs = differences(bbg, [dict(bbg[0], LimitUpPrice="3900"), bbg[1]])
     check("one record per difference", len(recs), 1)
-    check("with the venue, the name, the column and both values", recs[0],
-          {"status": "price", "venue": "TYO-MAIN", "code": "A.T",
-           "column": "LimitUpPrice", "old": "3833", "new": "3900"})
-    check("a missing name carries its venue, so the report can be read by "
+    check("THE REPORT NAMES A ROW BY ITS BLOOMBERG CODE - it is read by "
+          "people who work in those, and A JT says more than A.T",
+          recs[0],
+          {"status": "price", "venue": "TYO-MAIN", "code": "A JT",
+           "ric": "A.T", "column": "LimitUpPrice",
+           "old": "3833", "new": "3900"})
+    check("a missing name carries its venue too, so the report reads by "
           "market without joining anything",
-          differences(old, old[:1])[1],
-          {"status": "only_in_old", "venue": "TYO-MAIN", "code": "B.T",
-           "column": "", "old": "", "new": ""})
-    check("and the printed lines are rendered from the same records, so the "
-          "two can never disagree about what was found",
+          differences(bbg, bbg[:1])[1],
+          {"status": "only_in_old", "venue": "TYO-MAIN", "code": "B JT",
+           "ric": "B.T", "column": "", "old": "", "new": ""})
+    check("a file with no BloombergCode column falls back to the RIC, "
+          "because an unidentified row in a cutover report is worse than "
+          "one identified the old way",
+          differences(old, old[:1])[1]["code"], "B.T")
+    check("but the PRINTED form still says the RIC, which is what the ATS "
+          "contract puts first and what the two files are keyed on",
+          [_line(d) for d in differences(bbg, bbg[:1])],
+          ["TYO-MAIN: 2 old, 1 new", "only in old: B.T"])
+    check("and it is rendered from the same records, so the two can never "
+          "disagree about what was found",
           [_line(d) for d in differences(old, old[:1])],
           compare(old, old[:1]))
 
@@ -1172,7 +1208,9 @@ def self_test() -> int:
         check("the report is the columns, then a row per difference",
               p.read_text(encoding="utf-8").splitlines(),
               [",".join(COMPARE_COLUMNS),
-               "price,TYO-MAIN,A.T,LimitUpPrice,3833,3900"])
+               "price,TYO-MAIN,A JT,LimitUpPrice,3833,3900"])
+        check("and the RIC the record also carries is not one of them",
+              "A.T" in p.read_text(encoding="utf-8"), False)
         write_compare_report(p, [])
         check("nothing to report still writes the header",
               p.read_text(encoding="utf-8").splitlines(),

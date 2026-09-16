@@ -295,9 +295,16 @@ than fits on a screen:
 ```
 status,venue,code,column,old,new
 rowcount,SSE-MAIN,,,0,1
-only_in_old,TSE-MAIN,6758.T,,,
-price,TSE-MAIN,7203.T,LimitUpPrice,3900,3833.0
+only_in_old,TSE-MAIN,6758 JT,,,
+price,TSE-MAIN,7203 JT,LimitUpPrice,3900,3833.0
 ```
+
+**`code` is the BloombergCode**, because that is what the report is read in.
+The comparison still *keys* on `#ReutersCode` — that is what the two files
+agree on and what the ATS contract puts first — and the printed lines still
+say the RIC, so each form names a row the way its reader expects. A file with
+no `BloombergCode` column falls back to the RIC rather than leaving the row
+unidentified.
 
 `only_in_old` and `only_in_new` carry the venue too, so the report reads by
 market without joining anything back to the crosscode. A run with nothing to
