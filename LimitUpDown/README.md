@@ -448,6 +448,56 @@ unrounded limit is one the exchange rejects. The run prints the count and lists
 the first few, and `--kdb-check` fetches ladders for its sample so coverage can
 be checked in seconds rather than discovered by a live run.
 
+### A computed name with no close falls back to Bloomberg
+
+A `computed` name that `equity_master` has no close for is **asked of Bloomberg
+rather than dropped.** A `PX_LAST` of zero counts as no close and always has —
+`kdbclose._to_decimal` refuses anything `<= 0`, because a zero close otherwise
+computes a band of zero to zero.
+
+This is the reason the kdb side runs first. Those names are known *before* the
+B-PIPE request is built, so they ride along in the **same** request; the
+fallback costs no extra round trip, only a longer security list.
+
+They are priced off **Bloomberg's own limits, not the venue's band** — a
+different arithmetic from their neighbours on the same venue. That is the point
+(it is what recovers a name the tiers cannot price) but it does mean a venue's
+output is not uniformly one method.
+
+A name that fails *both* keeps both halves of the story:
+
+```
+excluded  1  no close in equity_master, then no answer from Bloomberg
+  JKT-MAIN  1  NOCL.JK (NOCL IJ)
+```
+
+Dropping it under a bare Bloomberg reason would hide that kdb is what failed
+first.
+
+> This applies to **every** computed venue, with no config switch. If a venue is
+> computed precisely because B-PIPE will not serve it, the fallback will produce
+> an entitlement refusal per missing name — visible in
+> `entitlement_refused.csv`, and no worse than the silent drop it replaces. If
+> that noise becomes a problem it wants a per-venue column in `markets.csv`
+> rather than a code change.
+
+### Which names did not make the file
+
+`excluded.csv`, written beside the output every run:
+
+```
+ReutersCode,BloombergCode,Venue,Reason,Detail
+A.KS,A KP,KSC-MAIN,no previous close in equity_master,
+T.JK,T IJ,JKT-MAIN,no band tier for the previous close,price 10
+```
+
+**Every** dropped name with its reason — the run report shows the first five per
+venue and then `(+N more)`, which is right for reading and useless for answering
+"which names, exactly". A run that dropped nothing still writes the header, so
+an empty file is never yesterday's left behind. `entitlement_refused.csv` is
+still written alongside it and still covers only the EID refusals, which are
+what a market-data team acts on.
+
 ### The one arithmetic gap, and it is China's
 
 The China tiers key the wider band off the **ticker prefix**: `688` for the

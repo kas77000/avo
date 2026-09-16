@@ -232,6 +232,14 @@ SHOW_NAMES = 5
 #  Written beside OUT_TEMP.  Not published to Test/Pilot/Prod - it is a
 #  diagnostic for whoever owns the B-PIPE contract, not something the ATS
 #  reads.
+#  EVERY name that did not make the file, with the reason.  The run report
+#  shows the first few per venue and then "(+N more)", which is right for
+#  reading and useless for answering "which names, exactly".  This is the
+#  list.  Written beside OUT_TEMP, not published.
+EXCLUDED_CSV = "excluded.csv"
+EXCLUDED_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Reason",
+                   "Detail"]
+
 ENTITLEMENT_CSV = "entitlement_refused.csv"
 ENTITLEMENT_HEADER = ["ReutersCode", "BloombergCode", "Venue", "EIDs",
                       "Message"]
@@ -254,6 +262,34 @@ def entitlement_rows(excluded):
                          "Message": e.reason})
     rows.sort(key=lambda r: (r["Venue"], r["EIDs"], r["BloombergCode"]))
     return rows
+
+
+def excluded_rows(excluded):
+    """Every dropped name, one row each, worst-populated reason first is not
+    attempted - the order is the order the run produced them, so the file
+    reads the same way the report does."""
+    rows = []
+    for e in excluded:
+        for d in e.rows:
+            rows.append({"ReutersCode": d.ric, "BloombergCode": d.bbg,
+                         "Venue": d.venue_id, "Reason": e.reason,
+                         "Detail": d.detail})
+    return rows
+
+
+def write_excluded_csv(path, excluded):
+    """Returns (path, count).  A run that dropped nothing still writes the
+    header, which is the readable way to say it dropped nothing - and, more
+    to the point, means an empty file is never yesterday's."""
+    rows = excluded_rows(excluded)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=EXCLUDED_HEADER,
+                                lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return path, len(rows)
 
 
 def write_entitlement_csv(path, excluded):
@@ -628,7 +664,7 @@ def run(envs_spec: str) -> int:
         #  cheap, fragile side now fails fast; the expensive side is only
         #  started once the other has worked.
         closes, sym_hits, unresolved = {}, {}, []
-        ladders, no_ladder = {}, []
+        ladders, no_ladder, fallback = {}, [], []
         date_asked = date_used = date_how = None
         if compute:
             host, port = kdbclose.parse_server(EQUITY_MASTER_SERVER)
@@ -651,6 +687,26 @@ def run(envs_spec: str) -> int:
             print(f"  equity_master {kdbclose.date_text(date_used)} "
                   f"({date_how}): {len(closes)} closes for "
                   f"{len(compute)} names")
+
+            #  A COMPUTED NAME WITH NO CLOSE IS ASKED OF BLOOMBERG RATHER
+            #  THAN DROPPED.  A zero PX_LAST counts as no close and always
+            #  has - kdbclose._to_decimal refuses anything <= 0, because a
+            #  zero close would otherwise compute a band of zero to zero.
+            #
+            #  This is the whole reason the kdb side runs first: these
+            #  names are known before the B-PIPE request is built, so they
+            #  ride along in the SAME request rather than costing a second
+            #  one.  They are removed from `compute` so that the run
+            #  reports them once, under what actually happened to them,
+            #  instead of dropping them here and publishing them there.
+            if unresolved:
+                fallback = unresolved
+                #  Built once, not once per row: `compute` is thousands of
+                #  names and the set is hundreds.
+                dropped = set(unresolved)
+                compute = [r for r in compute if r not in dropped]
+                print(f"  no close for {len(fallback)}, asking Bloomberg "
+                      f"for them instead of dropping them")
 
             #  ONLY IF SOMETHING ACTUALLY ROUNDS.  Two more round trips on
             #  the connection already open, and none at all when every
@@ -678,14 +734,20 @@ def run(envs_spec: str) -> int:
                           f"{[r.ric for r in no_ladder[:5]]}")
 
         limits, refused, field_problems = {}, {}, {}
-        if ask or secondary:
+        if ask or secondary or fallback:
             session, identity = bpipe.connect(BPIPE_HOST, BPIPE_PORT,
                                               BPIPE_APP)
             print(f"connected to {BPIPE_HOST}:{BPIPE_PORT} as {BPIPE_APP}")
+            #  The fallback names ride in the SAME request.  Deduplicated
+            #  because a security asked for twice is a wasted slot in a
+            #  request already sixteen thousand long, and bpipe.fetch keys
+            #  its answer on the security anyway.
+            securities = list(dict.fromkeys(
+                [r.security for r in ask]
+                + [r.security for r in secondary]
+                + [r.security for r in fallback]))
             limits, refused, field_problems = bpipe.fetch(
-                session, identity,
-                [r.security for r in ask] + [r.security for r in secondary],
-                progress=progress("limits"))
+                session, identity, securities, progress=progress("limits"))
             print()
     except Exception as e:                           # noqa: BLE001
         #  A KdbError already names the query, the label and the q type of
@@ -706,9 +768,22 @@ def run(envs_spec: str) -> int:
     #  One set of limits, two venues.  R writes the same rows twice, once
     #  under each, and the ATS reads both.
     sec_out, sec_excluded = price_from_bloomberg(secondary, limits, refused)
-    out = out + computed_out + sec_out + india.publish_both(sec_out)
+
+    #  The computed names equity_master had no close for.  Priced off
+    #  Bloomberg's OWN limits, not off a band - which is a DIFFERENT
+    #  arithmetic from the venue's tiers, so the reason says where each one
+    #  ended up rather than leaving a mixed venue unexplained.
+    fb_out, fb_excluded = price_from_bloomberg(fallback, limits, refused)
+    fb_excluded = [crosscode.Excluded(
+        reason=f"no close in equity_master, then {e.reason}", rows=e.rows)
+        for e in fb_excluded]
+    if fallback:
+        print(f"{len(fb_out)} of {len(fallback)} names with no close were "
+              f"rescued from Bloomberg")
+
+    out = out + computed_out + sec_out + fb_out + india.publish_both(sec_out)
     excluded = (list(excluded) + list(more) + list(computed_excluded)
-                + list(sec_excluded))
+                + list(sec_excluded) + list(fb_excluded))
 
     problems = validate(out)
     if problems:
@@ -742,6 +817,14 @@ def run(envs_spec: str) -> int:
     #  is already written and published; losing the report as well would
     #  leave the operator unable to tell whether the run worked at all.
     #  That is exactly what happened on 2026-09-05.
+    try:
+        exc_path, exc_count = write_excluded_csv(
+            Path(OUT_TEMP).parent / EXCLUDED_CSV, excluded)
+        report.append(f"  excluded    {exc_count:6d}  names with their "
+                      f"reason written to {exc_path}")
+    except Exception as e:                                  # noqa: BLE001
+        report.append(f"  excluded csv FAILED: {type(e).__name__}: {e}")
+
     try:
         eid_path, eid_count = write_entitlement_csv(
             Path(OUT_TEMP).parent / ENTITLEMENT_CSV, excluded)
@@ -844,7 +927,13 @@ def demo() -> int:
               "RIL IN Equity": {"MIN_LIMIT": 1200.0, "MAX_LIMIT": 1600.0,
                                 "LAST_PRICE": 1400.0},
               "500325 IB Equity": {"MIN_LIMIT": 1190.0, "MAX_LIMIT": 1610.0,
-                                   "LAST_PRICE": 1400.0}}
+                                   "LAST_PRICE": 1400.0},
+              #  A COMPUTED name, on a computed venue, that equity_master
+              #  has no close for.  Bloomberg does, so it is published
+              #  rather than dropped.  Its Indonesian twin NOCL.JK has no
+              #  answer here either, and is the one that stays lost.
+              "NOCL CG Equity": {"MIN_LIMIT": 9.0, "MAX_LIMIT": 11.0,
+                                 "LAST_PRICE": 10.0}}
     refused = {"NOPX JT Equity":
                "Security Entitlement Check Failed! EID(s) needed: 64487 "
                "or 64488 [nid:58106]"}
@@ -866,11 +955,21 @@ def demo() -> int:
          (("2000", "1"), ("5000", "5"), ("20000", "10"), ("50000", "50"),
           ("200000", "100"), ("500000", "500"), ("1000001000", "1000"))])}
 
+    #  The two NOCL names are the fallback: computed venues with no close.
+    #  Bloomberg can price one of them and not the other, which is the pair
+    #  worth showing - a rescue and a name that was beyond rescuing.
+    fallback = [r for r in compute if r.ric not in closes]
+    compute = [r for r in compute if r.ric in closes]
+
     out, excluded = price_from_bloomberg(ask, limits, refused)
     computed, computed_excluded = price_computed(cfg, compute, closes,
                                                  ladders)
     sec_out, sec_excluded = price_from_bloomberg(secondary, limits, refused)
-    out = out + computed + sec_out + india.publish_both(sec_out)
+    fb_out, fb_excluded = price_from_bloomberg(fallback, limits, refused)
+    fb_excluded = [crosscode.Excluded(
+        reason=f"no close in equity_master, then {e.reason}", rows=e.rows)
+        for e in fb_excluded]
+    out = out + computed + sec_out + fb_out + india.publish_both(sec_out)
 
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=OUT_HEADER, lineterminator="\n")
@@ -880,7 +979,8 @@ def demo() -> int:
 
     print(f"--- {len(ask)} asked, {len(compute)} computed, "
           f"{len(secondary)} BSE secondary ---", file=sys.stderr)
-    every = list(excluded) + list(computed_excluded) + list(sec_excluded)
+    every = (list(excluded) + list(computed_excluded) + list(sec_excluded)
+             + list(fb_excluded))
     for line in _venue_summary(cfg, out, every):
         print(line, file=sys.stderr)
     for line in _exclusion_lines(every):
@@ -1185,6 +1285,31 @@ def self_test() -> int:
            {e.reason: e.rows for e in kexcl}["no tick ladder for this name"]],
           ["ZZZZ.KS"])
 
+    print("\na computed name with no close falls back to Bloomberg")
+    #  A zero PX_LAST is no close and always has been - kdbclose._to_decimal
+    #  refuses anything <= 0 - so both of these arrive here the same way.
+    fb = [row("AAA.KS", "AAA KP", "AAA.KR", "KSC-MAIN"),
+          row("BBB.KS", "BBB KP", "BBB.KR", "KSC-MAIN")]
+    fb_out, fb_exc = price_from_bloomberg(
+        fb, {"AAA KP Equity": {"MIN_LIMIT": 900.0, "MAX_LIMIT": 1100.0,
+                               "LAST_PRICE": 1000.0}}, {})
+    check("the one Bloomberg can price is PUBLISHED rather than dropped, "
+          "which is the whole point",
+          [(r["#ReutersCode"], r["LimitUpPrice"], r["LimitDownPrice"])
+           for r in fb_out],
+          [("AAA.KS", "1100", "900")])
+    check("and it is priced off Bloomberg's own limits, NOT the venue's "
+          "band - a different arithmetic from its neighbours",
+          fb_out[0]["Venue"], "KSC-MAIN")
+    wrapped = [crosscode.Excluded(
+        reason=f"no close in equity_master, then {e.reason}", rows=e.rows)
+        for e in fb_exc]
+    check("THE ONE IT CANNOT SAYS BOTH HALVES - dropping it under a bare "
+          "Bloomberg reason would hide that kdb is what failed first",
+          [(e.reason, [d.ric for d in e.rows]) for e in wrapped],
+          [("no close in equity_master, then no answer from Bloomberg",
+            ["BBB.KS"])])
+
     print("\nthe two branches meet the same output contract")
     check("a computed row has the same seven columns as an asked one",
           sorted(cout[0]), sorted(out[0]))
@@ -1319,6 +1444,36 @@ def self_test() -> int:
         check("nothing to report still writes the header",
               p.read_text(encoding="utf-8").splitlines(),
               [",".join(COMPARE_COLUMNS)])
+
+    print("\nthe excluded csv - which names, exactly")
+    exc = [crosscode.Excluded(
+        reason="no previous close in equity_master",
+        rows=[crosscode.Dropped("A.KS", "A KP", "KSC-MAIN"),
+              crosscode.Dropped("B.KS", "B KP", "KSC-MAIN")]),
+        crosscode.Excluded(
+            reason="no band tier for the previous close",
+            rows=[crosscode.Dropped("T.JK", "T IJ", "JKT-MAIN",
+                                    "price 10")])]
+    rows = excluded_rows(exc)
+    check("EVERY dropped name, not the handful the report shows before it "
+          "says '+N more'",
+          [r["ReutersCode"] for r in rows], ["A.KS", "B.KS", "T.JK"])
+    check("each carrying the reason it was dropped for",
+          rows[0]["Reason"], "no previous close in equity_master")
+    check("and the per-name detail, where there is one",
+          rows[2]["Detail"], "price 10")
+    with tempfile.TemporaryDirectory() as d:
+        target = Path(d) / "sub" / EXCLUDED_CSV
+        path, n = write_excluded_csv(target, exc)
+        check("written under a directory that did not exist", n, 3)
+        check("with the header we promised",
+              Path(path).read_text(encoding="utf-8").splitlines()[0],
+              ",".join(EXCLUDED_HEADER))
+        path, n = write_excluded_csv(target, [])
+        check("A RUN THAT DROPPED NOTHING STILL WRITES THE HEADER, so an "
+              "empty file is never yesterday's left behind",
+              (n, Path(path).read_text(encoding="utf-8").splitlines()),
+              (0, [",".join(EXCLUDED_HEADER)]))
 
     print("\nthe entitlement csv")
     eid_reason = ("Bloomberg refused the security: Security Entitlement "
