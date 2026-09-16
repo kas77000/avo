@@ -452,7 +452,19 @@ def fetch_ladders(conn, syms, log=None) -> dict:
     say(f"      {len(by_sym)} of {len(syms)} syms have a tick table")
     if not by_sym:
         return {}
-    say(f"      {len(set(by_sym.values()))} distinct tables")
+
+    #  HOW THE NAMES SPLIT ACROSS TABLES.  A market whose names all share
+    #  one ladder could lend it to a name that has none; one with several
+    #  cannot, because the one to lend is then a guess - and Korea prices
+    #  ETFs on a different scale from shares.  The split is what says which
+    #  of those this is, so it is reported rather than assumed.
+    spread = {}
+    for tid in by_sym.values():
+        spread[tid] = spread.get(tid, 0) + 1
+    ranked = sorted(spread.items(), key=lambda kv: -kv[1])
+    say(f"      {len(spread)} distinct tables: "
+        + ", ".join(f"{tid} x{n}" for tid, n in ranked[:6])
+        + (" ..." if len(ranked) > 6 else ""))
 
     tbl = _rows(ask(conn, "tick tables", TBL_Q, (), log))
     say(f"      {len(tbl)} tick table rows")

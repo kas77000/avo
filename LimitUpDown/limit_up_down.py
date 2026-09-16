@@ -1165,6 +1165,21 @@ def kdb_check(sample: int = 5) -> int:
               + (f", tick {tier} at {ref}" if ref is not None else ""))
     if no_ladder:
         print(f"  without one: {[r.ric for r in no_ladder]}")
+
+    #  THE DISTINCT LADDERS, SIDE BY SIDE.  A name kdb has no ladder for
+    #  could borrow one from another name on the same venue - but only if
+    #  the venue's names all share a ladder.  This prints what they
+    #  actually have, so that is a question with an answer rather than an
+    #  assumption.  Korea prices ETFs on a different scale from shares.
+    distinct = {}
+    for r in rounds:
+        lad = ladders.get(r.ric)
+        if lad:
+            distinct.setdefault(tuple(lad), []).append(r.bbg)
+    print(f"\n{len(distinct)} distinct ladder(s) among the sampled names")
+    for lad, names in sorted(distinct.items(), key=lambda kv: -len(kv[1])):
+        print(f"  {len(names):5d} names, e.g. {names[:3]}")
+        print("        " + "  ".join(f"{f}+:{t}" for f, t in lad))
     return 0 if closes else 1
 
 
