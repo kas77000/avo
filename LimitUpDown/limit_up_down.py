@@ -699,14 +699,23 @@ def run(envs_spec: str) -> int:
             #  one.  They are removed from `compute` so that the run
             #  reports them once, under what actually happened to them,
             #  instead of dropping them here and publishing them there.
-            if unresolved:
-                fallback = unresolved
+            fallback = [
+                r for r in unresolved
+                if cfg.venues[r.venue_id].no_close_fallback == "bloomberg"]
+            if fallback:
                 #  Built once, not once per row: `compute` is thousands of
                 #  names and the set is hundreds.
-                dropped = set(unresolved)
-                compute = [r for r in compute if r not in dropped]
-                print(f"  no close for {len(fallback)}, asking Bloomberg "
-                      f"for them instead of dropping them")
+                moved = set(fallback)
+                compute = [r for r in compute if r not in moved]
+                print(f"  no close for {len(unresolved)}; asking Bloomberg "
+                      f"for {len(fallback)} of them")
+            if len(fallback) != len(unresolved):
+                #  The rest keep the old behaviour and are dropped by
+                #  price_computed under "no previous close in
+                #  equity_master", which is where they have always been
+                #  reported.
+                print(f"  {len(unresolved) - len(fallback)} with no close "
+                      f"are on venues that do not ask Bloomberg")
 
             #  ONLY IF SOMETHING ACTUALLY ROUNDS.  Two more round trips on
             #  the connection already open, and none at all when every
@@ -722,10 +731,19 @@ def run(envs_spec: str) -> int:
                         r, cfg.venues.get(r.venue_id)))
                 found = kdbclose.fetch_ladders(conn, sorted(set(want)),
                                                log=print)
-                ladders, no_ladder = kdbclose.ladders_for(
+                ladders, no_ladder, via_composite = kdbclose.ladders_for(
                     rounds, cfg.venues, found)
                 print(f"  tick ladders: {len(ladders)} of {len(rounds)} "
                       f"names that round")
+                #  A LADDER THAT CAME OFF THE COMPOSITE IS SUSPECT.  It is
+                #  a different board's, and Korea is the case in point -
+                #  000250 KQ is KOSDAQ and 000250.KS is not.  Counted here
+                #  so a wrong tick is visible in the run rather than in a
+                #  limit somebody queries days later.
+                if via_composite:
+                    print(f"  {len(via_composite)} took the COMPOSITE's "
+                          f"ladder, not their own sym's - first few "
+                          f"{[r.bbg for r in via_composite[:5]]}")
                 #  Named here as well as in the exclusions, because a
                 #  ladder that stopped resolving is a whole market about to
                 #  go missing and it should not need the report to notice.

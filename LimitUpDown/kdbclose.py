@@ -484,22 +484,30 @@ def fetch_ladders(conn, syms, log=None) -> dict:
 
 
 def ladders_for(rows, venues, fetched):
-    """(ladder per row key, the rows with nothing).
+    """(ladder per row key, the rows with nothing, the rows that only
+    matched on the venue composite).
 
-    Keyed on the RIC and resolved through the same sym candidates as the
-    close, so a name whose close came from the composite gets the ladder
-    from the composite too, rather than the two disagreeing about which
-    listing this is."""
-    ladders, missing = {}, []
+    THE COMPOSITE IS NOT THE SAME BOARD, and that third return value is
+    why.  Falling back to it is harmless for a CLOSE - same company, same
+    price - but a tick ladder is a property of the board, and Korea is the
+    case in point: 000250 KQ is KOSDAQ and 000250.KS is not.  Taking the
+    composite's ladder there produces a limit on the wrong tick.
+
+    Nothing is refused here yet, because how many names that would cost is
+    not known; they are counted and named so a run says so out loud."""
+    ladders, missing, composite = {}, [], []
     for r in rows:
         venue = venues.get(r.venue_id)
-        for candidate in sym_candidates(r, venue):
+        cands = sym_candidates(r, venue)
+        for n, candidate in enumerate(cands):
             if candidate in fetched:
                 ladders[r.ric] = fetched[candidate]
+                if n > 0:
+                    composite.append(r)
                 break
         else:
             missing.append(r)
-    return ladders, missing
+    return ladders, missing, composite
 
 
 def closes_for(rows, venues, fetched):
@@ -729,7 +737,7 @@ def self_test() -> int:
               ["000020.KS"])["000020.KS"],
           [(Decimal("0"), Decimal("5"))])
 
-    lad, none = ladders_for(
+    lad, none, comp = ladders_for(
         [Row("005930.KS", "005930 KP", "005930", "KSC-MAIN"),
          Row("ZZZ.KS", "ZZZ KP", "ZZZ", "KSC-MAIN")],
         {"KSC-MAIN": Venue("KS")}, got)
@@ -739,6 +747,19 @@ def self_test() -> int:
     check("and the name kdb had no ladder for is handed back to be "
           "reported, not dropped in silence",
           [r.ric for r in none], ["ZZZ.KS"])
+    ladder = got["000020.KS"]
+    kq = Row("000250.KQ", "000250 KQ", "000250", "KSC-MAIN")
+    venues = {"KSC-MAIN": Venue("KS")}
+
+    _, _, comp = ladders_for([kq], venues, {"000250.KQ": ladder})
+    check("a name that matched on its OWN sym is not flagged", comp, [])
+
+    #  KOSDAQ: its own sym has no tick table, so the composite answers - and
+    #  the composite is KOSPI, a different board with a different ladder.
+    _, _, comp = ladders_for([kq], venues, {"000250.KS": ladder})
+    check("A LADDER TAKEN OFF THE COMPOSITE IS FLAGGED - 000250 KQ is "
+          "KOSDAQ and 000250.KS is not, so that ladder is another board's",
+          [r.bbg for r in comp], ["000250 KQ"])
 
     print("the queries themselves, kept plain")
     check("no cast - pykx sends symbol atoms and `$ refuses them",

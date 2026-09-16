@@ -68,6 +68,7 @@ import ticks
 VALID_SOURCE = ("bloomberg", "computed")
 VALID_ROUNDING = ("none", "inward", "outward", "nearest")
 VALID_KIND = ("pct", "abs")
+VALID_FALLBACK = ("bloomberg",)
 
 class ConfigError(Exception):
     pass
@@ -82,6 +83,9 @@ class Venue:
     tick_source: str
     min_price: Optional[Decimal]
     rounding: str
+    #  What to do with a computed name equity_master has no close for:
+    #  "bloomberg" asks B-PIPE for it, blank drops it as before.
+    no_close_fallback: str = ""
     bbg_composite: str = ""
     #  The ATS strategy file listing names this venue must NOT publish a
     #  limit for.  India only; read by india.py, at its cutoff, not here.
@@ -189,6 +193,17 @@ def load(config_dir, tsr_dir=None) -> Config:
         #  keeps one.  That a venue which rounds has a ladder at all is
         #  still checked, below, once both sources have been read.
 
+        #  BLANK MEANS DROP, and that is the safe default on purpose: a
+        #  venue only asks Bloomberg for its missing closes when someone
+        #  has written it down.  Japan, Thailand and India are
+        #  Source=bloomberg and never reach the fallback at all; Indonesia
+        #  is computed and deliberately does not use it.
+        fallback = (r.get("NoCloseFallback") or "").strip().lower()
+        if fallback and fallback not in VALID_FALLBACK:
+            raise ConfigError(
+                f"markets.csv {vid}: NoCloseFallback {fallback!r} is not "
+                f"one of {VALID_FALLBACK} (blank means drop, as before)")
+
         venues[vid] = Venue(
             country=(r.get("Country") or "").strip(),
             venue_id=vid, cutoff=cutoff, source=source,
@@ -197,6 +212,7 @@ def load(config_dir, tsr_dir=None) -> Config:
             min_price=(_decimal(raw_min, f"markets.csv {vid} MinPrice")
                        if raw_min else None),
             rounding=rounding or "none",
+            no_close_fallback=fallback,
             exclude_file=exclude_file)
 
     if not venues:

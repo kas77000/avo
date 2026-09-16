@@ -474,12 +474,13 @@ excluded  1  no close in equity_master, then no answer from Bloomberg
 Dropping it under a bare Bloomberg reason would hide that kdb is what failed
 first.
 
-> This applies to **every** computed venue, with no config switch. If a venue is
-> computed precisely because B-PIPE will not serve it, the fallback will produce
-> an entitlement refusal per missing name — visible in
-> `entitlement_refused.csv`, and no worse than the silent drop it replaces. If
-> that noise becomes a problem it wants a per-venue column in `markets.csv`
-> rather than a code change.
+**It is per venue**, in `markets.csv`'s `NoCloseFallback` column: `bloomberg`
+asks, blank drops as before. Blank is the default on purpose — a venue only
+asks once someone has written it down.
+
+As shipped, every computed venue asks **except Indonesia**. Japan, Thailand and
+India are `Source=bloomberg` and never reach the fallback at all, so their
+column is blank too.
 
 ### Which names did not make the file
 
