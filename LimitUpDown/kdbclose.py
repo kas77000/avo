@@ -97,10 +97,29 @@ FETCH_Q = ("{[d;s] select sym, " + CLOSE_FIELD +
 #  oversight.
 #
 #  Same three rules as FETCH_Q, for the same three reasons: no `$ cast, no
-#  cond in a where clause, no `by` - and `id` is a SYMBOL, not an int, so
-#  `6132 is the value and 6132 would match nothing.
+#  cond in a where clause, no `by`.
 IDS_Q = "{[s] select sym, id from ticksizeids where sym in s}"
-TBL_Q = "{[i] select id, price, ticksize from ticksizetbl where id in i}"
+
+#  THE WHOLE TABLE, UNFILTERED, and that is the fix for a live 'type:
+#
+#    2026-09-16  select ... from ticksizetbl where id in i   'type
+#
+#  The ids query beside it, `sym in s`, took the same general list of
+#  symbols and worked - so the argument was never the problem.  The two
+#  tables simply do not agree on how an id is stored: load_ticksizeids.q
+#  builds ids as `$string last ivalue, a symbol made FROM an int, and
+#  ticksizetbl keeps the int.  `id in i` then compares two types.
+#
+#  Rather than guess the type and cast - which is how FETCH_Q collected its
+#  three lessons - nothing is passed at all.  This is REFERENCE DATA, a few
+#  hundred rows: the run that hit the error reported 3 distinct tables for
+#  4,264 syms.  Filtering it was an optimisation that bought nothing and
+#  cost a type dependency.  Matching happens in python, on text, where
+#  `6132 and 6132 are the same table whatever either side stores.
+#
+#  A PLAIN EXPRESSION, NOT A LAMBDA: ask() sends a no-argument query as
+#  conn(query), and {...} with nothing applied to it returns the lambda.
+TBL_Q = "select id, price, ticksize from ticksizetbl"
 
 
 class KdbError(Exception):
@@ -390,12 +409,33 @@ def fetch(conn, date, syms, log=None) -> dict:
     return out
 
 
+def _id_text(value) -> str:
+    """A tick table id as text, whatever either table stores it as.
+
+    THE TWO TABLES DISAGREE.  ticksizeids holds a symbol built from an int
+    (`$string last ivalue, in load_ticksizeids.q); ticksizetbl keeps the
+    number.  So `6132, 6132 and 6132.0 all have to key the same, and the
+    float case is the one that would otherwise silently miss - str() on it
+    gives '6132.0'."""
+    t = _text(value)
+    if not t:
+        return ""
+    try:
+        d = Decimal(t)
+    except (InvalidOperation, ValueError):
+        return t
+    if d.is_finite() and d == d.to_integral_value():
+        return str(int(d))
+    return t
+
+
 def fetch_ladders(conn, syms, log=None) -> dict:
     """sym -> tick ladder, for the syms that have one.
 
     TWO ROUND TRIPS FOR THE WHOLE UNIVERSE, not two per name: every sym's
-    id, then every ladder for the ids that came back.  The second list is
-    tiny - thousands of names share a few hundred tables.
+    id, then every tick table there is.  The second is unfiltered on
+    purpose - see TBL_Q - and small, because thousands of names share a few
+    tables.
 
     A sym with no id, or an id with no rows, is simply absent.  The caller
     reports it rather than rounding to a tick it had to guess."""
@@ -406,20 +446,20 @@ def fetch_ladders(conn, syms, log=None) -> dict:
     ids = _rows(ask(conn, "tick table ids", IDS_Q, (list(syms),), log))
     by_sym = {}
     for r in ids:
-        sym, tid = _text(_cell(r, "sym")), _text(_cell(r, "id"))
+        sym, tid = _text(_cell(r, "sym")), _id_text(_cell(r, "id"))
         if sym and tid:
             by_sym[sym] = tid
     say(f"      {len(by_sym)} of {len(syms)} syms have a tick table")
     if not by_sym:
         return {}
+    say(f"      {len(set(by_sym.values()))} distinct tables")
 
-    wanted = sorted(set(by_sym.values()))
-    say(f"      {len(wanted)} distinct tables")
-    tbl = _rows(ask(conn, "tick tables", TBL_Q, (wanted,), log))
+    tbl = _rows(ask(conn, "tick tables", TBL_Q, (), log))
+    say(f"      {len(tbl)} tick table rows")
 
     by_id = {}
     for r in tbl:
-        tid = _text(_cell(r, "id"))
+        tid = _id_text(_cell(r, "id"))
         price = _to_decimal(_cell(r, "price"))
         tick = _to_decimal(_cell(r, "ticksize"))
         #  _to_decimal rejects nulls and anything <= 0, which is what we
@@ -433,6 +473,13 @@ def fetch_ladders(conn, syms, log=None) -> dict:
         if ladder:
             out[sym] = ladder
     say(f"      {len(out)} ladders built")
+    #  A TABLE ID THAT MATCHED NOTHING IS WORTH SAYING OUT LOUD: it is the
+    #  shape the id types disagreeing would take if it ever came back.
+    unmatched = sorted(set(by_sym.values()) - set(by_id))
+    if unmatched:
+        say(f"      NO ROWS for table id(s) {unmatched[:5]} - "
+            f"{len(by_id)} ids in ticksizetbl, first few "
+            f"{sorted(by_id)[:5]}")
     return out
 
 
@@ -620,7 +667,7 @@ def self_test() -> int:
             self.asked = []
 
         def __call__(self, query, *args):
-            self.asked.append(query)
+            self.asked.append((query, args))
             return self.ids if query is IDS_Q else self.tbl
 
     conn = TickConn()
@@ -635,10 +682,41 @@ def self_test() -> int:
           ticks.tick_for(got["000020.KS"], Decimal("5150")), Decimal("10"))
     check("TWO ROUND TRIPS FOR THE WHOLE UNIVERSE, not two per name",
           len(conn.asked), 2)
+    check("and the tick tables are asked for with NO ARGUMENT, which is "
+          "what stopped the live 'type - there is nothing left to mistype",
+          conn.asked[1], (TBL_Q, ()))
+    check("so it is a plain expression, not a lambda that would come back "
+          "unapplied",
+          TBL_Q.startswith("{"), False)
     check("names sharing a table share it rather than fetching it twice",
           got["000020.KS"] == got["005930.KS"], True)
     check("no syms, no round trips at all",
           (fetch_ladders(TickConn(), []), len(TickConn().asked)), ({}, 0))
+
+    #  THE LIVE FAILURE, as a test: the two tables need not agree on how an
+    #  id is stored, and after the fix they no longer have to.
+    mixed = TickConn(
+        ids=[{"sym": "000020.KS", "id": "6132"}],
+        tbl=[{"id": 6132, "price": 2000.0, "ticksize": 1.0},
+             {"id": 6132, "price": 5000.0, "ticksize": 5.0},
+             {"id": 6132, "price": 20000.0, "ticksize": 10.0}])
+    check("A SYMBOL ID ON ONE SIDE AND AN INT ON THE OTHER STILL JOIN - "
+          "this is the 'type that killed a live run",
+          ticks.tick_for(fetch_ladders(mixed, ["000020.KS"])["000020.KS"],
+                         Decimal("5150")),
+          Decimal("10"))
+    floats = TickConn(
+        ids=[{"sym": "000020.KS", "id": "6132"}],
+        tbl=[{"id": 6132.0, "price": 2000.0, "ticksize": 1.0},
+             {"id": 6132.0, "price": 20000.0, "ticksize": 10.0}])
+    check("and a float id joins too, which str() alone would have missed "
+          "by calling it '6132.0'",
+          list(fetch_ladders(floats, ["000020.KS"])), ["000020.KS"])
+    check("6132, `6132 and 6132.0 are one table",
+          {_id_text("6132"), _id_text(6132), _id_text(6132.0)}, {"6132"})
+    check("something that is not a number keeps its text rather than "
+          "becoming empty",
+          _id_text("KRX-A"), "KRX-A")
     check("a sym with no id is absent, not guessed at",
           fetch_ladders(TickConn(ids=[]), ["000020.KS"]), {})
     check("nor is an id whose table has no rows",
