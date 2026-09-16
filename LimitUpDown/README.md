@@ -443,14 +443,15 @@ round have different verified answers:
 
 | `TickFrom` | venue | source |
 |---|---|---|
-| `close` (blank) | **Indonesia only** | `LimitUpDown.r:315-324` — the tick comes from `PX_YEST_CLOSE` and both legs floor/ceil on it |
-| `coarser` | every other computable venue | Bloomberg, on the two Korean names above |
+| `close` (blank) | Indonesia | `LimitUpDown.r:315-324` — the tick comes from `PX_YEST_CLOSE` and both legs floor/ceil on it |
+| `coarser` | Korea `KSC-MAIN` | Bloomberg, on the two names above |
 
-Indonesia is the single exception, and it is one because the R script it
-replaces is the authority there. Every other computed venue carries `coarser`
-whether or not it rounds today, so a venue that starts rounding later does not
-have to rediscover `000250 KQ`. A venue Bloomberg prices carries neither — it
-computes no band, so it has no leg to round.
+**Only a venue that rounds carries it**, because only a venue that rounds
+resolves a tick at all. The nine computed venues with `Rounding` blank publish
+the raw band and never touch a ladder, so the column is blank for them — and
+`coarser` is Bloomberg's answer for *Korea*, not a rule anyone has checked for
+Malaysia, Taiwan, China or the Philippines. A venue that starts rounding later
+picks its own.
 
 Not a detail: an Indonesian close of 4,500 has an up leg of 5,625, which
 crosses the 5,000 floor where the tick goes 10 → 25. The R job publishes

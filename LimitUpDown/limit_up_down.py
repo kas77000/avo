@@ -1377,16 +1377,18 @@ def self_test() -> int:
     check("which is markets.csv's choice, not this file's",
           (cfg.venues["JKT-MAIN"].tick_from,
            cfg.venues["KSC-MAIN"].tick_from), ("close", "coarser"))
-    check("INDONESIA IS THE ONLY EXCEPTION - every other computable venue "
-          "takes the coarser tick, so a venue that starts rounding later "
-          "does not have to rediscover 000250 KQ",
+    check("ONLY A VENUE THAT ROUNDS CARRIES IT, because only a venue that "
+          "rounds resolves a tick at all - and coarser is Bloomberg's "
+          "answer for KOREA, not a rule anyone has checked for Malaysia, "
+          "Taiwan, China or the Philippines",
           sorted(v.venue_id for v in cfg.venues.values()
-                 if v.computed and v.tick_from != "coarser"),
-          ["JKT-MAIN"])
-    check("and no venue Bloomberg prices carries it, because a venue that "
-          "does not compute a band has no leg to round",
-          [v.venue_id for v in cfg.venues.values()
-           if not v.computed and v.tick_from != "close"], [])
+                 if v.tick_from != "close"),
+          ["KSC-MAIN"])
+    check("and the one other venue that rounds is Indonesia, which keeps "
+          "the R script's rule",
+          sorted(v.venue_id for v in cfg.venues.values()
+                 if v.rounding != "none"),
+          ["JKT-MAIN", "KSC-MAIN"])
     check("A NAME KDB HAS NO LADDER FOR IS REPORTED, NOT PUBLISHED "
           "UNROUNDED - an unrounded limit is one the exchange will reject",
           [d.ric for d in
