@@ -51,6 +51,40 @@ def parse_rows(rows) -> Tiers:
     return sorted(out.items())
 
 
+def from_kdb(rows) -> Tiers:
+    """kdb's `ticksizetbl` rows -> the same ladder everything else here uses.
+
+    THE TWO CONVENTIONS ARE OPPOSITE, and getting this backwards would round
+    every price to its neighbouring tier:
+
+        kdb      `price` is an EXCLUSIVE UPPER bound.  blp_lib.q's own
+                 lookup is `first ticksize from r where px < price`, over
+                 rows sorted ascending, falling back to the LAST ticksize
+                 when px is above every bound.
+        here     `floor` is an INCLUSIVE LOWER bound - the highest tier at
+                 or below the price.
+
+    So each kdb tick starts where the previous row's bound left off, and the
+    first starts at zero.  Korea's table 6132 is the worked example:
+
+        price 2000 tick 1        ->  (0, 1)
+        price 5000 tick 5        ->  (2000, 5)
+        price 20000 tick 10      ->  (5000, 10)
+
+    which resolves a 5150 close to a tick of 10, the same answer blp_lib.q
+    gives.  kdb's fall-through above the last bound is the last tick, and
+    that is exactly what the final floor already means here, so it needs no
+    special case.
+
+    Rows arrive unordered; they are sorted here rather than trusted."""
+    rows = sorted((p, t) for p, t in rows)
+    out, floor = [], Decimal(0)
+    for price, tick in rows:
+        out.append((floor, tick))
+        floor = price
+    return out
+
+
 def tick_for(tiers: Tiers, ref: Decimal):
     """The tick of the highest tier at or below ref, or None if ref is below
     every floor - which is a row we must not price, not a row we may guess
@@ -119,6 +153,41 @@ def self_test() -> int:
           parse_rows([{"FloorFrom": "0", "Tick": "0.01"},
                       {"FloorFrom": "10", "Tick": "0.05"}]),
           [(D("0"), D("0.01")), (D("10"), D("0.05"))])
+
+    print("\nkdb's ladder, whose bounds run the other way")
+    #  Korea's table 6132, exactly as ticksizetbl carries it.
+    K = [(D("2000"), D("1")), (D("5000"), D("5")), (D("20000"), D("10")),
+         (D("50000"), D("50")), (D("200000"), D("100")),
+         (D("500000"), D("500")), (D("1000001000"), D("1000"))]
+    k = from_kdb(K)
+    check("an EXCLUSIVE UPPER bound becomes the floor the next tick starts "
+          "at, and the first tick starts at zero",
+          k[:3],
+          [(D("0"), D("1")), (D("2000"), D("5")), (D("5000"), D("10"))])
+    check("rows are sorted here rather than trusted to arrive in order",
+          from_kdb(list(reversed(K))), k)
+    check("nothing in, nothing out", from_kdb([]), [])
+
+    def blp(px):
+        """blp_lib.q's own lookup, transcribed, to check ours against."""
+        r = sorted(K)
+        for price, tick in r:
+            if px < price:
+                return tick
+        return r[-1][1]
+
+    same = [px for px in ("1", "1999", "2000", "4999", "5000", "5150",
+                          "19999", "20000", "55000", "250000", "600000",
+                          "2000000000")
+            if blp(D(px)) != tick_for(k, D(px))]
+    check("EVERY BOUNDARY AGREES WITH blp_lib.q, which is the whole point - "
+          "getting this backwards rounds every price to its neighbour",
+          same, [])
+    check("and 5150 is a tick of 10, which is what turns 3605 into 3610",
+          tick_for(k, D("5150")), D("10"))
+    check("above the last bound kdb falls through to the last tick, and the "
+          "final floor already means that",
+          tick_for(k, D("2000000000")), D("1000"))
 
     print("\nresolving a price to a tick")
     t = [(D("0"), D("1")), (D("200"), D("2")), (D("500"), D("5"))]

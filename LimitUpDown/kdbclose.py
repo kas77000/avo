@@ -49,6 +49,8 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
+import ticks
+
 #  What we need, and nothing else.  equity_master carries a lot more; asking
 #  for one column keeps the response small enough to read in a log.
 CLOSE_FIELD = "PX_LAST"
@@ -82,6 +84,23 @@ MAXDATE_SERVER_Q = ("{[n] exec max date from equity_master "
 #  cast nor a licence.  It is what Historical/qattsource.py does.
 FETCH_Q = ("{[d;s] select sym, " + CLOSE_FIELD +
            " from equity_master where date=d, sym in s}")
+
+#  THE TICK LADDER, from the two tables the trading system itself rounds by.
+#  Both live beside equity_master on EQUITY_MASTER_SERVER, so this needs no
+#  new connection and no new setting.
+#
+#    ticksizeids    sym -> id        both symbols
+#    ticksizetbl    id, price, ticksize
+#
+#  Neither is partitioned by date: a tick ladder is reference data, not a
+#  daily fact, so there is no `date=d` here and its absence is not an
+#  oversight.
+#
+#  Same three rules as FETCH_Q, for the same three reasons: no `$ cast, no
+#  cond in a where clause, no `by` - and `id` is a SYMBOL, not an int, so
+#  `6132 is the value and 6132 would match nothing.
+IDS_Q = "{[s] select sym, id from ticksizeids where sym in s}"
+TBL_Q = "{[i] select id, price, ticksize from ticksizetbl where id in i}"
 
 
 class KdbError(Exception):
@@ -371,6 +390,71 @@ def fetch(conn, date, syms, log=None) -> dict:
     return out
 
 
+def fetch_ladders(conn, syms, log=None) -> dict:
+    """sym -> tick ladder, for the syms that have one.
+
+    TWO ROUND TRIPS FOR THE WHOLE UNIVERSE, not two per name: every sym's
+    id, then every ladder for the ids that came back.  The second list is
+    tiny - thousands of names share a few hundred tables.
+
+    A sym with no id, or an id with no rows, is simply absent.  The caller
+    reports it rather than rounding to a tick it had to guess."""
+    say = log or (lambda line: None)
+    if not syms:
+        return {}
+
+    ids = _rows(ask(conn, "tick table ids", IDS_Q, (list(syms),), log))
+    by_sym = {}
+    for r in ids:
+        sym, tid = _text(_cell(r, "sym")), _text(_cell(r, "id"))
+        if sym and tid:
+            by_sym[sym] = tid
+    say(f"      {len(by_sym)} of {len(syms)} syms have a tick table")
+    if not by_sym:
+        return {}
+
+    wanted = sorted(set(by_sym.values()))
+    say(f"      {len(wanted)} distinct tables")
+    tbl = _rows(ask(conn, "tick tables", TBL_Q, (wanted,), log))
+
+    by_id = {}
+    for r in tbl:
+        tid = _text(_cell(r, "id"))
+        price = _to_decimal(_cell(r, "price"))
+        tick = _to_decimal(_cell(r, "ticksize"))
+        #  _to_decimal rejects nulls and anything <= 0, which is what we
+        #  want: a zero tick would round every price to zero.
+        if tid and price is not None and tick is not None:
+            by_id.setdefault(tid, []).append((price, tick))
+
+    out = {}
+    for sym, tid in by_sym.items():
+        ladder = ticks.from_kdb(by_id.get(tid, []))
+        if ladder:
+            out[sym] = ladder
+    say(f"      {len(out)} ladders built")
+    return out
+
+
+def ladders_for(rows, venues, fetched):
+    """(ladder per row key, the rows with nothing).
+
+    Keyed on the RIC and resolved through the same sym candidates as the
+    close, so a name whose close came from the composite gets the ladder
+    from the composite too, rather than the two disagreeing about which
+    listing this is."""
+    ladders, missing = {}, []
+    for r in rows:
+        venue = venues.get(r.venue_id)
+        for candidate in sym_candidates(r, venue):
+            if candidate in fetched:
+                ladders[r.ric] = fetched[candidate]
+                break
+        else:
+            missing.append(r)
+    return ladders, missing
+
+
 def closes_for(rows, venues, fetched):
     """(close per row key, which candidate hit, the rows with nothing).
 
@@ -521,9 +605,73 @@ def self_test() -> int:
     check("naming a real sym so the next command can be pasted",
           "600001.CH" in got, True)
 
-    print("the query itself, kept plain")
+    print("\nthe tick ladder, out of the two tables blp_lib.q rounds by")
+
+    class TickConn:
+        """ticksizeids and ticksizetbl, holding Korea's real table 6132."""
+        def __init__(self, ids=None, tbl=None):
+            self.ids = ids if ids is not None else [
+                {"sym": "000020.KS", "id": "6132"},
+                {"sym": "005930.KS", "id": "6132"}]
+            self.tbl = tbl if tbl is not None else [
+                {"id": "6132", "price": 2000.0, "ticksize": 1.0},
+                {"id": "6132", "price": 5000.0, "ticksize": 5.0},
+                {"id": "6132", "price": 20000.0, "ticksize": 10.0}]
+            self.asked = []
+
+        def __call__(self, query, *args):
+            self.asked.append(query)
+            return self.ids if query is IDS_Q else self.tbl
+
+    conn = TickConn()
+    got = fetch_ladders(conn, ["000020.KS", "005930.KS"])
+    check("a ladder per sym, converted to the floor form everything else "
+          "here uses",
+          got["000020.KS"],
+          [(Decimal("0"), Decimal("1")), (Decimal("2000"), Decimal("5")),
+           (Decimal("5000"), Decimal("10"))])
+    check("and 000020.KS at 5150 takes a tick of 10 - the worked example "
+          "that started this",
+          ticks.tick_for(got["000020.KS"], Decimal("5150")), Decimal("10"))
+    check("TWO ROUND TRIPS FOR THE WHOLE UNIVERSE, not two per name",
+          len(conn.asked), 2)
+    check("names sharing a table share it rather than fetching it twice",
+          got["000020.KS"] == got["005930.KS"], True)
+    check("no syms, no round trips at all",
+          (fetch_ladders(TickConn(), []), len(TickConn().asked)), ({}, 0))
+    check("a sym with no id is absent, not guessed at",
+          fetch_ladders(TickConn(ids=[]), ["000020.KS"]), {})
+    check("nor is an id whose table has no rows",
+          fetch_ladders(TickConn(tbl=[]), ["000020.KS"]), {})
+    check("A ZERO OR NULL TICK IS NOT A TICK - rounding to it would take "
+          "every price to zero",
+          fetch_ladders(TickConn(tbl=[
+              {"id": "6132", "price": 2000.0, "ticksize": 0.0},
+              {"id": "6132", "price": 5000.0, "ticksize": 5.0}]),
+              ["000020.KS"])["000020.KS"],
+          [(Decimal("0"), Decimal("5"))])
+
+    lad, none = ladders_for(
+        [Row("005930.KS", "005930 KP", "005930", "KSC-MAIN"),
+         Row("ZZZ.KS", "ZZZ KP", "ZZZ", "KSC-MAIN")],
+        {"KSC-MAIN": Venue("KS")}, got)
+    check("a resolved name is keyed on its RIC, the same key the close "
+          "uses, so the two cannot end up describing different listings",
+          list(lad), ["005930.KS"])
+    check("and the name kdb had no ladder for is handed back to be "
+          "reported, not dropped in silence",
+          [r.ric for r in none], ["ZZZ.KS"])
+
+    print("the queries themselves, kept plain")
     check("no cast - pykx sends symbol atoms and `$ refuses them",
           "`$" in FETCH_Q, False)
+    check("nor in either tick query, for the same reason",
+          "`$" in IDS_Q or "`$" in TBL_Q, False)
+    check("and no `by` in them either",
+          " by " in IDS_Q or " by " in TBL_Q, False)
+    check("NEITHER TICK TABLE IS ASKED FOR A DATE - a tick ladder is "
+          "reference data, not a daily fact",
+          "date" in IDS_Q or "date" in TBL_Q, False)
     check("no conditional - a cond in a where clause was the 'rank",
           "$[" in FETCH_Q, False)
     check("and NO `by`, because a keyed table needs local q to unkey and "

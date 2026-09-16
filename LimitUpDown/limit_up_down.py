@@ -346,7 +346,7 @@ def price_from_bloomberg(rows, values, refused=None):
     return out, _excluded(by_reason)
 
 
-def price_computed(cfg, rows, closes):
+def price_computed(cfg, rows, closes, ladders=None):
     """The band computed from a tier table and a close out of equity_master.
 
     `closes` is keyed on the RIC, because that is unique per row where an
@@ -362,6 +362,7 @@ def price_computed(cfg, rows, closes):
     Rounding before flooring would move prices near a tier boundary.  The
     tick too is chosen from the close, not from the limit being rounded."""
     out, by_reason = [], {}
+    ladders = ladders or {}
 
     def drop(reason, r, detail=""):
         by_reason.setdefault(reason, []).append(
@@ -377,7 +378,16 @@ def price_computed(cfg, rows, closes):
 
         tick = None
         if venue.rounding != "none":
-            tick = ticks.tick_for(cfg.ticks[r.venue_id], ref)
+            #  THE VENUE'S OWN LADDER WINS, and only Indonesia has one: its
+            #  .tsr IS the ATS's file, so a ladder from anywhere else could
+            #  disagree with what the trading system rounds by.  Everywhere
+            #  else takes the per-name ladder out of kdb's ticksizeids /
+            #  ticksizetbl - the same two tables blp_lib.q rounds by.
+            ladder = cfg.ticks.get(r.venue_id) or ladders.get(r.ric)
+            if not ladder:
+                drop("no tick ladder for this name", r)
+                continue
+            tick = ticks.tick_for(ladder, ref)
             if tick is None:
                 drop("no tick tier for the previous close", r, f"price {ref}")
                 continue
@@ -618,6 +628,7 @@ def run(envs_spec: str) -> int:
         #  cheap, fragile side now fails fast; the expensive side is only
         #  started once the other has worked.
         closes, sym_hits, unresolved = {}, {}, []
+        ladders, no_ladder = {}, []
         date_asked = date_used = date_how = None
         if compute:
             host, port = kdbclose.parse_server(EQUITY_MASTER_SERVER)
@@ -640,6 +651,31 @@ def run(envs_spec: str) -> int:
             print(f"  equity_master {kdbclose.date_text(date_used)} "
                   f"({date_how}): {len(closes)} closes for "
                   f"{len(compute)} names")
+
+            #  ONLY IF SOMETHING ACTUALLY ROUNDS.  Two more round trips on
+            #  the connection already open, and none at all when every
+            #  computed venue is Rounding=none - which is nine of the ten
+            #  today, so this normally costs nothing.
+            rounds = [r for r in compute
+                      if cfg.venues[r.venue_id].rounding != "none"
+                      and not cfg.venues[r.venue_id].tick_source]
+            if rounds:
+                want = []
+                for r in rounds:
+                    want.extend(kdbclose.sym_candidates(
+                        r, cfg.venues.get(r.venue_id)))
+                found = kdbclose.fetch_ladders(conn, sorted(set(want)),
+                                               log=print)
+                ladders, no_ladder = kdbclose.ladders_for(
+                    rounds, cfg.venues, found)
+                print(f"  tick ladders: {len(ladders)} of {len(rounds)} "
+                      f"names that round")
+                #  Named here as well as in the exclusions, because a
+                #  ladder that stopped resolving is a whole market about to
+                #  go missing and it should not need the report to notice.
+                if no_ladder:
+                    print(f"  NO LADDER for {len(no_ladder)}, first few "
+                          f"{[r.ric for r in no_ladder[:5]]}")
 
         limits, refused, field_problems = {}, {}, {}
         if ask or secondary:
@@ -665,7 +701,8 @@ def run(envs_spec: str) -> int:
             session.stop()
 
     out, more = price_from_bloomberg(ask, limits, refused)
-    computed_out, computed_excluded = price_computed(cfg, compute, closes)
+    computed_out, computed_excluded = price_computed(
+        cfg, compute, closes, ladders)
     #  One set of limits, two venues.  R writes the same rows twice, once
     #  under each, and the ATS reads both.
     sec_out, sec_excluded = price_from_bloomberg(secondary, limits, refused)
@@ -821,8 +858,17 @@ def demo() -> int:
               "BBCA.JK": Decimal("8000"), "TLKM.JK": Decimal("3000"),
               "TINY.JK": Decimal("10")}
 
+    #  Korea's real table 6132, as ticksizetbl carries it, through the same
+    #  conversion a live run uses - so the demo exercises the kdb ladder
+    #  rather than pretending rounding does not happen.
+    ladders = {"005930.KS": ticks.from_kdb(
+        [(Decimal(p), Decimal(t)) for p, t in
+         (("2000", "1"), ("5000", "5"), ("20000", "10"), ("50000", "50"),
+          ("200000", "100"), ("500000", "500"), ("1000001000", "1000"))])}
+
     out, excluded = price_from_bloomberg(ask, limits, refused)
-    computed, computed_excluded = price_computed(cfg, compute, closes)
+    computed, computed_excluded = price_computed(cfg, compute, closes,
+                                                 ladders)
     sec_out, sec_excluded = price_from_bloomberg(secondary, limits, refused)
     out = out + computed + sec_out + india.publish_both(sec_out)
 
@@ -911,6 +957,42 @@ def kdb_check(sample: int = 5) -> int:
     print(f"  suffix hits: {hits or 'none'}")
     if missing:
         print(f"  unresolved: {[r.ric for r in missing]}")
+
+    #  THE TICK LADDER IS THE OTHER HALF OF THE KDB PATH, and it is the one
+    #  worth checking before a real run: a name kdb has no ladder for is a
+    #  name a rounding venue will not publish, and the count says how many
+    #  that would be.
+    rounds = [r for r in chosen
+              if cfg.venues[r.venue_id].rounding != "none"
+              and not cfg.venues[r.venue_id].tick_source]
+    if not rounds:
+        print("\nno sampled name is on a venue that rounds from kdb, so "
+              "there is no ladder to check")
+        return 0 if closes else 1
+
+    print(f"\nfetching tick ladders for {len(rounds)} of them")
+    want = []
+    for r in rounds:
+        want.extend(kdbclose.sym_candidates(r, cfg.venues.get(r.venue_id)))
+    try:
+        found = kdbclose.fetch_ladders(conn, sorted(set(want)), log=say)
+    except Exception as e:                                  # noqa: BLE001
+        print(f"\nFAILED on the ladder fetch: {type(e).__name__}: {e}")
+        return 1
+
+    ladders, no_ladder = kdbclose.ladders_for(rounds, cfg.venues, found)
+    print(f"\n{len(ladders)} of {len(rounds)} names got a ladder")
+    for r in rounds[:20]:
+        ladder = ladders.get(r.ric)
+        ref = closes.get(r.ric)
+        if not ladder:
+            print(f"  {r.ric:<14} NO LADDER")
+            continue
+        tier = ticks.tick_for(ladder, ref) if ref is not None else None
+        print(f"  {r.ric:<14} {len(ladder)} tiers"
+              + (f", tick {tier} at {ref}" if ref is not None else ""))
+    if no_ladder:
+        print(f"  without one: {[r.ric for r in no_ladder]}")
     return 0 if closes else 1
 
 
@@ -1080,6 +1162,28 @@ def self_test() -> int:
     check("a name equity_master had no close for",
           [d.ric for d in creasons["no previous close in equity_master"]],
           ["NOCL.JK"])
+
+    print("\nKorea, rounded on the ladder kdb keeps per name")
+    #  Table 6132 as ticksizetbl carries it, through the same conversion a
+    #  live run uses.  The shipped config again, not a fixture.
+    kor = [row("000020.KS", "000020 KP", "000020.KR", "KSC-MAIN"),
+           row("ZZZZ.KS", "ZZZZ KP", "ZZZZ.KR", "KSC-MAIN")]
+    ladder = ticks.from_kdb(
+        [(Decimal(p), Decimal(t)) for p, t in
+         (("2000", "1"), ("5000", "5"), ("20000", "10"), ("50000", "50"),
+          ("200000", "100"), ("500000", "500"), ("1000001000", "1000"))])
+    kout, kexcl = price_computed(
+        cfg, kor, {"000020.KS": Decimal("5150"), "ZZZZ.KS": Decimal("5150")},
+        {"000020.KS": ladder})
+    check("000020 KP at 5150 publishes 3610/6690 - the raw band is "
+          "3605/6695, and the 10 tick at that close is the difference",
+          (kout[0]["LimitUpPrice"], kout[0]["LimitDownPrice"]),
+          ("6690", "3610"))
+    check("A NAME KDB HAS NO LADDER FOR IS REPORTED, NOT PUBLISHED "
+          "UNROUNDED - an unrounded limit is one the exchange will reject",
+          [d.ric for d in
+           {e.reason: e.rows for e in kexcl}["no tick ladder for this name"]],
+          ["ZZZZ.KS"])
 
     print("\nthe two branches meet the same output contract")
     check("a computed row has the same seven columns as an asked one",

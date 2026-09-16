@@ -351,16 +351,15 @@ finishes last is the file that gets published.
 | | |
 |---|---|
 | `bpipe.py` | session, authorization, batched fetch. The only module that imports blpapi. |
-| `kdbclose.py` | the previous close out of equity_master. The only module that imports pykx. |
+| `kdbclose.py` | the previous close, and the tick ladder, out of kdb. The only module that imports pykx. |
 | `bands.py` | tier selection, band arithmetic, tick rounding. Pure. Copied from v1. |
-| `ticks.py` | tick ladders, from `config/ticks.csv` or a `.tsr`. Pure. Copied from v1. |
+| `ticks.py` | tick ladders, from kdb's `ticksizetbl` or a `.tsr`. Pure. |
 | `marketcfg.py` | loads the config **and enforces the split** |
 | `crosscode.py` | CrossCode.csv → the universe, filtered and deduplicated |
 | `india.py` | the ATS strategy files, and the BSE listings with no row of their own |
 | `limit_up_down.py` | orchestration, validation, environment copy |
 | `config/markets.csv` | one row per venue: cutoff, which side of the split, and India's `ExcludeFile` |
 | `config/bands.csv` | tiers per venue. Present for twelve; they are what make a venue switchable |
-| `config/ticks.csv` | tick ladders, for every venue whose ladder is the exchange's published schedule |
 | `config/spol_JKT.tsr` | **placeholder, and Indonesia only.** Point `TSR_DIR` at the ATS share, which also holds India's two `.stra` files. |
 
 `marketcfg` refuses a half-configured venue: a `bloomberg` venue carrying a tick
@@ -400,8 +399,8 @@ Nine countries, nineteen venues:
 | | venues | cutoff | source |
 |---|---|---|---|
 | Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | **bloomberg** |
-| Korea | `KSC-MAIN` | 07:30 | computed, ±30% + tick |
-| Korea | `KOE-MAIN` | 07:30 | computed, ±30%, **no tick** |
+| Korea | `KSC-MAIN` | 07:30 | computed, ±30%, rounded on kdb's ladder |
+| Korea | `KOE-MAIN` | 07:30 | computed, ±30%, **not rounded** |
 | Malaysia | `KLS-MAIN` | 07:59 | computed, ±30% |
 | Taiwan | `TAI-MAIN` | 07:59 | computed, ±10% |
 | Indonesia | `JKT-MAIN` | 07:59 | computed, tiered + tick |
@@ -411,6 +410,43 @@ Nine countries, nineteen venues:
 | India | `NSI-MAIN`, `BSE-MAIN`, `BSE-SECONDARY` | 10:49 | **bloomberg**, less the ATS's own names |
 
 Thailand and India are the two that took more than a config row — see above.
+
+### Rounding, and where the tick comes from
+
+A venue rounds only if its `Rounding` column says so. Today that is Korea's
+`KSC-MAIN` and Indonesia; the other nine computed venues publish the raw band,
+which is a config decision and a one-word edit.
+
+**The ladder is per name, not per venue, and it comes out of kdb** —
+`ticksizeids` maps a sym to a tick-table id, `ticksizetbl` holds that table's
+tiers. Both sit beside `equity_master` on `EQUITY_MASTER_SERVER`, so this needs
+no new connection and no new setting, and they are the same two tables
+`blp_lib.q` rounds by. Per name rather than per venue matters: one venue can
+hold two boards whose ladders differ, and nothing here has to know that.
+
+```
+ticksizeids  sym=`000020.KS        ->  id `6132
+ticksizetbl  id=`6132              ->  price 2000 tick 1
+                                       price 5000 tick 5
+                                       price 20000 tick 10   ...
+```
+
+> **kdb's bounds run the opposite way to ours.** Its `price` is an *exclusive
+> upper* bound — `first ticksize where px < price` — while `ticks.tick_for`
+> takes the highest floor *at or below* the price. `ticks.from_kdb` converts
+> between them, and its self-test checks every boundary against a transcription
+> of `blp_lib.q`'s own lookup, because getting it backwards would round every
+> price to its neighbouring tier.
+
+Only Indonesia still names a `TickSource`, and that is deliberate: its ladder
+**is** the ATS's own file, so a copy from anywhere else could drift from what
+the trading system actually rounds by. A venue that names one uses it; every
+other venue asks kdb.
+
+**A name kdb has no ladder for is reported, not published unrounded** — an
+unrounded limit is one the exchange rejects. The run prints the count and lists
+the first few, and `--kdb-check` fetches ladders for its sample so coverage can
+be checked in seconds rather than discovered by a live run.
 
 ### The one arithmetic gap, and it is China's
 
