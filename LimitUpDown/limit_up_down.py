@@ -417,6 +417,35 @@ def price_from_bloomberg(rows, values, refused=None):
     return out, _excluded(by_reason)
 
 
+def split_for_retry(cfg, excluded, rows):
+    """(the rows a venue would compute a band for, what stays excluded).
+
+    Bloomberg's failures come back as Dropped - a RIC, a code and a venue -
+    and price_computed needs the crosscode Row they came from, so `rows` is
+    what maps back.
+
+    THE EXCLUSION IS NOT DISCARDED HERE, only split: a name that is retried
+    still failed at Bloomberg, and whether the retry rescues it is not
+    known yet.  The caller keeps the original list for the entitlement
+    report, because an EID we do not hold is a fact about the contract and
+    stays true whether or not arithmetic saved the name."""
+    by_ric = {r.ric: r for r in rows}
+    retry, keep = [], []
+    for e in excluded:
+        mine, theirs = [], []
+        for d in e.rows:
+            venue = cfg.venues.get(d.venue_id)
+            if (venue and venue.no_data_fallback == "computed"
+                    and d.ric in by_ric):
+                mine.append(by_ric[d.ric])
+            else:
+                theirs.append(d)
+        retry.extend(mine)
+        if theirs:
+            keep.append(crosscode.Excluded(reason=e.reason, rows=theirs))
+    return retry, keep
+
+
 def _coarser(ladder, at_ref):
     """A per-leg tick: the coarser of the close's and the leg's own.
 
@@ -760,14 +789,32 @@ def run(envs_spec: str) -> int:
             #  Every candidate for every name, in ONE round trip.  The
             #  wasted candidates cost a longer symbol list, not a second
             #  query; a per-name query would not finish before the open.
+            #  EVERY name whose close we might need, and that is more than
+            #  the computed ones: a venue with NoDataFallback=computed will
+            #  want a band for anything B-PIPE refuses, and B-PIPE has not
+            #  run yet.  We cannot know WHICH names those are in time, so
+            #  the closes for all of them are fetched here, in the request
+            #  already going out, and most are never used.
+            #
+            #  That costs nothing until someone sets the column - it is
+            #  blank on every venue today - and the alternative is a second
+            #  kdb round trip after Bloomberg, once this connection has
+            #  served its purpose.
+            retryable = [r for r in ask
+                         if cfg.venues[r.venue_id].no_data_fallback]
+            need_close = compute + retryable
+            if retryable:
+                print(f"  +{len(retryable)} names on a venue that would "
+                      f"compute a band if Bloomberg will not price them")
+
             wanted = []
-            for r in compute:
+            for r in need_close:
                 wanted.extend(kdbclose.sym_candidates(
                     r, cfg.venues.get(r.venue_id)))
             fetched = kdbclose.fetch(conn, date_used, sorted(set(wanted)),
                                      log=print)
             closes, sym_hits, unresolved = kdbclose.closes_for(
-                compute, cfg.venues, fetched)
+                need_close, cfg.venues, fetched)
             print(f"  equity_master {kdbclose.date_text(date_used)} "
                   f"({date_how}): {len(closes)} closes for "
                   f"{len(compute)} names")
@@ -783,9 +830,15 @@ def run(envs_spec: str) -> int:
             #  one.  They are removed from `compute` so that the run
             #  reports them once, under what actually happened to them,
             #  instead of dropping them here and publishing them there.
+            #  COMPUTED ROWS ONLY.  `unresolved` now covers the retryable
+            #  Bloomberg names too, and one of those is already IN the
+            #  B-PIPE request - adding it again would price it twice and
+            #  publish the name twice.
+            in_compute = set(compute)
             fallback = [
                 r for r in unresolved
-                if cfg.venues[r.venue_id].no_close_fallback == "bloomberg"]
+                if r in in_compute
+                and cfg.venues[r.venue_id].no_close_fallback == "bloomberg"]
             if fallback:
                 #  Built once, not once per row: `compute` is thousands of
                 #  names and the set is hundreds.
@@ -805,7 +858,7 @@ def run(envs_spec: str) -> int:
             #  the connection already open, and none at all when every
             #  computed venue is Rounding=none - which is nine of the ten
             #  today, so this normally costs nothing.
-            rounds = [r for r in compute
+            rounds = [r for r in need_close
                       if cfg.venues[r.venue_id].rounding != "none"
                       and not cfg.venues[r.venue_id].tick_source]
             if rounds:
@@ -865,6 +918,26 @@ def run(envs_spec: str) -> int:
             session.stop()
 
     out, more = price_from_bloomberg(ask, limits, refused)
+
+    #  THE OTHER DIRECTION: a name B-PIPE would not price, given the
+    #  venue's own band instead.  Only for venues that asked for it, and
+    #  marketcfg has already refused the column on a venue with no tiers,
+    #  so there is always something to fall back to.
+    #  KEPT BEFORE THE SPLIT, for the entitlement report.  A name rescued
+    #  by arithmetic is still a name B-PIPE refused, and the EID it needed
+    #  is still missing from the contract - dropping it from that file
+    #  because we published the row anyway would hide the only thing that
+    #  file exists to say.
+    bloomberg_failures = list(more)
+    retry, more = split_for_retry(cfg, more, ask)
+    cd_out, cd_excluded = price_computed(cfg, retry, closes, ladders)
+    cd_excluded = [crosscode.Excluded(
+        reason=f"no data from Bloomberg, then {e.reason}", rows=e.rows)
+        for e in cd_excluded]
+    if retry:
+        print(f"{len(cd_out)} of {len(retry)} names Bloomberg would not "
+              f"price were computed instead")
+
     computed_out, computed_excluded = price_computed(
         cfg, compute, closes, ladders)
     #  One set of limits, two venues.  R writes the same rows twice, once
@@ -883,9 +956,13 @@ def run(envs_spec: str) -> int:
         print(f"{len(fb_out)} of {len(fallback)} names with no close were "
               f"rescued from Bloomberg")
 
-    out = out + computed_out + sec_out + fb_out + india.publish_both(sec_out)
+    out = (out + computed_out + sec_out + fb_out + cd_out
+           + india.publish_both(sec_out))
     excluded = (list(excluded) + list(more) + list(computed_excluded)
-                + list(sec_excluded) + list(fb_excluded))
+                + list(sec_excluded) + list(fb_excluded) + list(cd_excluded))
+    #  Every refusal B-PIPE made, whether or not a band rescued the name.
+    entitlement_source = (bloomberg_failures + list(sec_excluded)
+                          + list(fb_excluded))
 
     problems = validate(out)
     if problems:
@@ -940,7 +1017,7 @@ def run(envs_spec: str) -> int:
 
     try:
         eid_path, eid_count = write_entitlement_csv(
-            Path(OUT_TEMP).parent / ENTITLEMENT_CSV, excluded)
+            Path(OUT_TEMP).parent / ENTITLEMENT_CSV, entitlement_source)
         if eid_count:
             report.append(f"  entitlement {eid_count:6d}  refused names "
                           f"written to {eid_path}")
@@ -1494,6 +1571,48 @@ def self_test() -> int:
           [d.ric for d in
            {e.reason: e.rows for e in kexcl}["no tick ladder for this name"]],
           ["ZZZZ.KS"])
+
+    print("\nand the other way: Bloomberg would not price it, so compute")
+    #  A venue Bloomberg prices, carrying NoDataFallback=computed.  Built
+    #  here rather than taken from the shipped config because no venue sets
+    #  it today - none of the six has band tiers to fall back on.
+    kr_cfg = marketcfg.Config(
+        venues={"X-MAIN": marketcfg.Venue(
+            country="X", venue_id="X-MAIN", cutoff=dt.time(7, 0),
+            source="bloomberg", tick_source="", min_price=None,
+            rounding="none", no_data_fallback="computed")},
+        bands={"X-MAIN": [bands.Tier("pct", "", Decimal(0), Decimal("0.3"),
+                                     Decimal("0.3"))]},
+        ticks={})
+    refused_msg = ("Bloomberg refused the security: Security Entitlement "
+                   "Check Failed! EID(s) needed: 64487")
+    asked = [row("A.X", "A XX", "A.X", "X-MAIN"),
+             row("B.X", "B XX", "B.X", "X-MAIN")]
+    _, failed = price_from_bloomberg(
+        asked, {}, {"A XX Equity": refused_msg, "B XX Equity": refused_msg})
+    retry, kept = split_for_retry(kr_cfg, failed, asked)
+    check("both names go back for a band, and nothing is left excluded "
+          "yet - whether the retry saves them is not known here",
+          ([r.ric for r in retry], kept), (["A.X", "B.X"], []))
+    got, still = price_computed(kr_cfg, retry, {"A.X": Decimal("100")})
+    check("THE ONE WITH A CLOSE IS PUBLISHED from the venue's own band, "
+          "which is the whole point of the column",
+          [(r["#ReutersCode"], r["LimitUpPrice"], r["LimitDownPrice"])
+           for r in got],
+          [("A.X", "130", "70")])
+    check("and the one with no close is reported with BOTH halves",
+          [(f"no data from Bloomberg, then {e.reason}",
+            [d.ric for d in e.rows]) for e in still],
+          [("no data from Bloomberg, then no previous close in "
+            "equity_master", ["B.X"])])
+    check("A RESCUED NAME IS STILL AN ENTITLEMENT WE DO NOT HOLD - the "
+          "EID report reads the refusals as B-PIPE made them, so "
+          "publishing the row does not hide the missing contract",
+          [r["ReutersCode"] for r in entitlement_rows(failed)],
+          ["A.X", "B.X"])
+    check("while a venue without the column keeps the old behaviour and "
+          "retries nothing",
+          split_for_retry(cfg, failed, asked)[0], [])
 
     print("\na computed name with no close falls back to Bloomberg")
     #  A zero PX_LAST is no close and always has been - kdbclose._to_decimal

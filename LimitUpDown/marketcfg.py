@@ -70,6 +70,7 @@ VALID_ROUNDING = ("none", "inward", "outward", "nearest")
 VALID_KIND = ("pct", "abs")
 VALID_FALLBACK = ("bloomberg",)
 VALID_TICK_FROM = ("close", "coarser")
+VALID_NO_DATA = ("computed",)
 
 class ConfigError(Exception):
     pass
@@ -90,6 +91,9 @@ class Venue:
     #  Which price resolves a leg's tick.  See load() for why this is
     #  per venue and not one rule.
     tick_from: str = "close"
+    #  What to do with a name Bloomberg would not price: "computed"
+    #  falls back to the venue's band, blank drops it as before.
+    no_data_fallback: str = ""
     bbg_composite: str = ""
     #  The ATS strategy file listing names this venue must NOT publish a
     #  limit for.  India only; read by india.py, at its cutoff, not here.
@@ -228,6 +232,21 @@ def load(config_dir, tsr_dir=None) -> Config:
                 f"markets.csv {vid}: TickFrom {tick_from!r} is not one of "
                 f"{VALID_TICK_FROM} (blank means close, as the R job did)")
 
+        #  THE OTHER DIRECTION.  NoCloseFallback rescues a computed name
+        #  equity_master has no close for; this rescues a name B-PIPE will
+        #  not price, by computing its band instead.  Blank drops it, which
+        #  is what every venue does today.
+        #
+        #  Whether the venue HAS a band to fall back on is checked below,
+        #  once bands.csv has been read - a venue that names this and has
+        #  no tiers is a half-finished edit, exactly like Source=computed
+        #  with no tiers.
+        no_data = (r.get("NoDataFallback") or "").strip().lower()
+        if no_data and no_data not in VALID_NO_DATA:
+            raise ConfigError(
+                f"markets.csv {vid}: NoDataFallback {no_data!r} is not one "
+                f"of {VALID_NO_DATA} (blank means drop, as before)")
+
         venues[vid] = Venue(
             country=(r.get("Country") or "").strip(),
             venue_id=vid, cutoff=cutoff, source=source,
@@ -238,6 +257,7 @@ def load(config_dir, tsr_dir=None) -> Config:
             rounding=rounding or "none",
             no_close_fallback=fallback,
             tick_from=tick_from,
+            no_data_fallback=no_data,
             exclude_file=exclude_file)
 
     if not venues:
@@ -281,6 +301,16 @@ def load(config_dir, tsr_dir=None) -> Config:
                 f"{vid} has Source=computed but no band tiers in bands.csv. "
                 f"Add its tiers, or leave it on Source=bloomberg - a market "
                 f"whose rule nobody has written down cannot be computed.")
+        #  The same refusal, for the same reason, one step further out: a
+        #  fallback TO the computed band needs a band to fall back on, and
+        #  a venue that names one without tiers would look covered and
+        #  silently drop every name it was meant to rescue.
+        if v.no_data_fallback and vid not in band_map:
+            raise ConfigError(
+                f"{vid} has NoDataFallback={v.no_data_fallback} but no band "
+                f"tiers in bands.csv. There is nothing to fall back TO - "
+                f"write its tiers first, or leave the column blank and let "
+                f"the names be reported as they are today.")
         if v.rounding == "none" or not v.tick_source:
             continue
         path = tsr_dir / v.tick_source
@@ -406,6 +436,33 @@ def self_test() -> int:
               "file and a copy could drift from what actually rounds",
               c.ticks["JKT-MAIN"],
               [(Decimal("0"), Decimal("1")), (Decimal("200"), Decimal("2"))])
+
+    print("\nfalling back TO the computed band needs a band to fall back to")
+    #  Its own header: HDR above predates these columns, and a row that does
+    #  not line up with its header reads as blank rather than as an error.
+    FB_HDR = ("Country,FidessaVenueID,Time,Source,TickSource,MinPrice,"
+              "Rounding,ExcludeFile,NoDataFallback\n")
+    with tempfile.TemporaryDirectory() as d:
+        raises("A VENUE THAT NAMES NoDataFallback AND HAS NO TIERS IS "
+               "REFUSED - it would look covered and silently drop every "
+               "name it was meant to rescue",
+               lambda: load(write(d, mk=FB_HDR + IDN.rstrip("\n") + ",\n"
+                                  + "China,SHA-MAIN,09:03:00,bloomberg,,,,"
+                                    ",computed\n")),
+               "nothing to fall back TO")
+    with tempfile.TemporaryDirectory() as d:
+        #  The same venue WITH tiers is accepted, so the refusal above is
+        #  about the missing band and not about the column itself.
+        c = load(write(d, mk=FB_HDR + IDN.rstrip("\n") + ",computed\n",
+                       bd=BD))
+        check("a venue that HAS tiers may name it",
+              c.venues["JKT-MAIN"].no_data_fallback, "computed")
+    real = load(Path(__file__).resolve().parent / "config",
+                Path(__file__).resolve().parent / "config")
+    check("and no shipped venue sets it today, because none of the ones "
+          "Bloomberg prices has a band written down",
+          [v.venue_id for v in real.venues.values() if v.no_data_fallback],
+          [])
     with tempfile.TemporaryDirectory() as d:
         raises("a computed venue that does not round but names one anyway",
                lambda: load(write(d, mk=HDR +

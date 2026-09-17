@@ -525,6 +525,33 @@ As shipped, every computed venue asks **except Indonesia**. Japan, Thailand and
 India are `Source=bloomberg` and never reach the fallback at all, so their
 column is blank too.
 
+### And the other way: Bloomberg would not price it, so compute
+
+`NoDataFallback=computed` in `markets.csv` does the reverse. A name B-PIPE
+refuses, has no answer for, or answers without a usable limit is given **the
+venue's own band** instead of being dropped.
+
+**Blank on every venue today, and it has to be** — `marketcfg` refuses the
+column on a venue with no tiers in `bands.csv`, and none of the six `bloomberg`
+venues has any. Tokyo's limits are an absolute step table nobody has
+transcribed; Thailand's and India's rules are not written down either. Write a
+venue's tiers and the column becomes available to it.
+
+**The ordering is the awkward part.** kdb runs *before* B-PIPE, so at the moment
+the closes are fetched we do not yet know which names Bloomberg will fail. So
+the closes for every name on a fallback venue are fetched up front, in the
+request already going out, and most are never used. That costs nothing while the
+column is blank, and the alternative is a second kdb round trip after Bloomberg.
+
+**A rescued name is still an entitlement we do not hold.** The EID report reads
+B-PIPE's refusals as B-PIPE made them, before any retry, so publishing a
+computed row does not quietly remove the name from `entitlement_refused.csv` —
+the missing contract is a fact about the contract, not about whether arithmetic
+saved the row.
+
+A name that fails both keeps both halves: `no data from Bloomberg, then no
+previous close in equity_master`.
+
 ### Which names did not make the file
 
 `excluded.csv`, written beside the output every run:
