@@ -1265,8 +1265,11 @@ def demo() -> int:
         [(Decimal(p), Decimal(t)) for p, t in
          (("2000", "1"), ("5000", "5"), ("20000", "10"), ("50000", "50"),
           ("200000", "100"), ("500000", "500"), ("1000001000", "1000"))])
+    #  The ETF is on Korea's flat 5 tick, not the equity ladder - kdb
+    #  gives it its own ticksizeids row, and it is what makes 12,840 round
+    #  to Bloomberg's 12,835 rather than to 12,830.
     ladders = {"005930.KS": KR_6132, "000250.KQ": KR_6132,
-               "0080Y0.KS": KR_6132}
+               "0080Y0.KS": [(Decimal(0), Decimal(5))]}
 
     #  What equity_master's LONG_COMP_NAME says.  0080Y0 KP is real: it
     #  closed at 8,025 and Bloomberg published 12,835/3,215, which is
@@ -1716,15 +1719,20 @@ def self_test() -> int:
     lev_names = {"0080Y0.KS": "Shinhan SOL Shipbuilding TOP3 Plus leverage "
                               "ETF",
                  "005930.KS": "Samsung Electronics Co Ltd"}
+    #  Korea prices ETFs on a FLAT 5 tick, not the equity ladder, and a
+    #  leveraged ETF has its own ticksizeids row saying so.  It matters
+    #  here: on the equity ladder 12840 is on a 10 tick and strict rounding
+    #  would publish 12830, where Bloomberg says 12835.
+    etf_ladder = [(Decimal(0), Decimal(5))]
     lev_out, lev_exc = price_computed(
         cfg, lev, {"0080Y0.KS": Decimal("8025"), "005930.KS": Decimal("8025")},
-        {"005930.KS": ladder, "0080Y0.KS": ladder}, lev_names)
-    check("THE LEVERAGED NAME TAKES ITS OWN BAND - bands.csv carries a "
-          "NameMarker=leverage row at 60%, and 8025 x 1.6 is 12840 where "
-          "the ordinary 30% row would have said 10430",
+        {"005930.KS": ladder, "0080Y0.KS": etf_ladder}, lev_names)
+    check("THE LEVERAGED NAME TAKES ITS OWN BAND and publishes exactly "
+          "what Bloomberg does - 8025 x 1.6 is 12840, one 5 tick inward is "
+          "12835, where the ordinary 30% row would have said 10430",
           [(r["BloombergCode"], r["LimitUpPrice"], r["LimitDownPrice"])
            for r in lev_out if r["BloombergCode"] == "0080Y0 KP"],
-          [("0080Y0 KP", "12840", "3210")])
+          [("0080Y0 KP", "12835", "3215")])
     check("while the ordinary name beside it is untouched, because the "
           "marker keys on the exchange NAME and not on the venue",
           [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in lev_out
@@ -1740,7 +1748,7 @@ def self_test() -> int:
     _, inv_exc = price_computed(
         cfg, lev, {"0080Y0.KS": Decimal("8025"),
                    "005930.KS": Decimal("8025")},
-        {"005930.KS": ladder, "0080Y0.KS": ladder}, inv_names)
+        {"005930.KS": ladder, "0080Y0.KS": etf_ladder}, inv_names)
     check("AN INVERSE IS STILL REFUSED, because bands.csv has a row for "
           "leverage and none for that - what is written down is used and "
           "what is not is reported, never guessed",
