@@ -534,8 +534,9 @@ insensitively; a blank marker is the venue default, exactly as `SymPrefix` is.
 ```
 KSC-MAIN,pct,,0,0.30,0.30,
 KSC-MAIN,pct,,0,0.60,0.60,leverage
-KSC-MAIN,pct,,0,0.60,0.60,inverse 2x
+KSC-MAIN,pct,,0,0.15,0.15,0.5x
 KSC-MAIN,pct,,0,0.60,0.60,2x
+KSC-MAIN,pct,,0,0.90,0.90,3x
 KSC-MAIN,pct,,0,0.30,0.30,inverse
 ```
 
@@ -543,17 +544,27 @@ KSC-MAIN,pct,,0,0.30,0.30,inverse
 anything else and takes the ordinary band; a ±2x takes twice it. Real names from
 a run's `excluded.csv` show why a rule keyed on the word would miss cases:
 
-| name | band |
-|---|---|
-| `SAMSUNG KODEX Inverse ETF` | 30% |
-| `Samsung KODEX 200 Futures Inverse 2X ETF` | 60% |
-| `Shinhan Bloomberg -2X WTI Futures ETN B 94` | 60% — no "inverse" in the name |
-| `Shinhan SOL ... leverage ETF` | 60% — leverage means 2x in Korea |
+| name | multiple | band |
+|---|---|---|
+| `SAMSUNG KODEX Inverse ETF` | −1x | 30% |
+| `SAMSUNG KODEX Inverse 0.5X ETN` | −0.5x | 15% |
+| `Samsung KODEX 200 Futures Inverse 2X ETF` | −2x | 60% |
+| `SAMSUNG KODEX Inverse 3X ETN` | −3x | 90% |
+| `Shinhan Bloomberg -2X WTI Futures ETN B 94` | −2x | 60% — no "inverse" in the name |
+| `Shinhan SOL ... leverage ETF` | 2x | 60% — leverage means 2x in Korea |
 
-`inverse 2x` is listed as well as `2x` so the longer marker wins for a name
-carrying both; `select_tier` prefers the most specific, exactly as it does for
-`SymPrefix`. Markers match on word boundaries, so `MATRIX 2XL` is not a 2x
-product and `Coverage Analytics` is not leveraged.
+**A multiple outranks a word marker**, whatever their lengths. `Inverse 3X`
+matches both `inverse` and `3x`, and on length alone the longer `inverse` would
+win and publish a 3x product at a third of its real width. The sign is dropped:
+a −2x and a 2x move the same distance, and a band is a width.
+
+**A multiple with no row is refused, never given the default.** `KODEX 4X
+Futures ETN` matches no marker at all, so without that guard it would fall
+through to the blank row and publish at a quarter of its width. It reports as
+`leveraged` instead, carrying the name.
+
+Markers match on word boundaries, so `MATRIX 2XL` is not a 2x product and
+`Coverage Analytics` is not leveraged.
 
 Korea prices a leveraged product at twice the ordinary band. `0080Y0 KP` closed
 at 8,025 and the exchange published 12,835/3,215 — ±60% where the plain row says

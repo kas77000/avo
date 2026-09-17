@@ -418,14 +418,30 @@ def price_from_bloomberg(rows, values, refused=None):
     return out, _excluded(by_reason)
 
 
-def _marked_tier(cfg, r, name: str) -> bool:
-    """Does this venue have a band written for what this name IS?
+def _uncovered(cfg, r, name: str) -> bool:
+    """Is this name something other than an ordinary share, with no band
+    written down for what it actually is?
 
-    Asked of the tiers rather than of a list of markers here, so the answer
-    is whatever bands.csv says and the two cannot drift apart."""
-    low = (name or "").lower()
-    return any(t.name_marker and t.name_marker in low
-               for t in cfg.bands.get(r.venue_id, ()))
+    THE MULTIPLE IS CHECKED FIRST AND ON ITS OWN.  A name carrying one is
+    priced by it, so a multiple nobody has written a row for must be
+    REFUSED - not quietly handed the default.  "KODEX 4X Futures ETN" would
+    otherwise match no marker at all, fall through to the blank row and
+    publish at a quarter of its real width, which is the failure this whole
+    rule exists to prevent.
+
+    Only when there is no multiple does the word matter: a plain inverse
+    tracks -1x and wants the `inverse` row.
+
+    Asked of the tiers rather than of a list kept here, so the answer is
+    whatever bands.csv says and the two cannot drift apart."""
+    markers = [t.name_marker for t in cfg.bands.get(r.venue_id, ())
+               if t.name_marker]
+    multiple = bands.multiple_in(name)
+    if multiple:
+        return not any(multiple in m for m in markers)
+    if kdbclose.is_leveraged(name):
+        return not any(bands.marker_matches(m, name) for m in markers)
+    return False
 
 
 def _whole_pct(fraction: Decimal) -> int:
@@ -561,7 +577,7 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
         #  inverse tracking -1x need not be 60 at all, and a wrong limit is
         #  worse than no limit because the wrong one is believed.
         name = names.get(r.ric, "")
-        if kdbclose.is_leveraged(name) and not _marked_tier(cfg, r, name):
+        if _uncovered(cfg, r, name):
             drop("leveraged or inverse product with no band of its own",
                  r, name)
             continue
@@ -1760,6 +1776,33 @@ def self_test() -> int:
           "moves no further than anything else",
           (got[0]["LimitUpPrice"], got[0]["LimitDownPrice"]),
           ("10430", "5620"))
+
+    #  EVERY MULTIPLE KOREA WRITES, on one 8025 close, so the ladder of
+    #  bands reads as a ladder.  0.5x and 3x were both being priced at 30%
+    #  until a multiple was made to outrank the word `inverse`.
+    mults = ["SAMSUNG KODEX Inverse 0.5X ETN",
+             "SAMSUNG KODEX Inverse 2X ETF",
+             "SAMSUNG KODEX Inverse 3X ETN",
+             "SOMEBODY KODEX 4X Futures ETN"]
+    m_rows = [row(f"M{i}.KS", f"M{i} KP", f"M{i}.KR", "KSC-MAIN")
+              for i in range(len(mults))]
+    m_out, m_exc = price_computed(
+        cfg, m_rows, {f"M{i}.KS": Decimal("8025") for i in range(4)},
+        {f"M{i}.KS": etf_ladder for i in range(4)},
+        {f"M{i}.KS": n for i, n in enumerate(mults)})
+    check("THE MULTIPLE SETS THE BAND, and it outranks the word `inverse` "
+          "however much longer that is - on length alone a 3x would take "
+          "the 1x row and publish at a third of its real width",
+          [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in m_out],
+          [("9225", "6825"), ("12835", "3215"), ("15245", "805")])
+    check("AND A MULTIPLE NOBODY HAS WRITTEN A ROW FOR IS REFUSED, not "
+          "quietly handed the default - 4X would otherwise match no marker "
+          "at all and publish at a quarter of its width",
+          [(e.reason, [d.detail for d in e.rows]) for e in m_exc],
+          [("leveraged or inverse product with no band of its own",
+            ["SOMEBODY KODEX 4X Futures ETN"])])
+    check("a company whose name merely contains 2XL is not a 2x product",
+          bands.multiple_in("MATRIX 2XL Holdings"), None)
     check("an Inverse 2X takes twice it, because 'inverse 2x' is the "
           "longer marker and select_tier prefers the most specific",
           [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in got[1:3]],
@@ -1772,22 +1815,15 @@ def self_test() -> int:
           (got[4]["LimitUpPrice"], got[4]["LimitDownPrice"]),
           ("12835", "3215"))
 
-    #  A multiple nobody has written a row for is STILL refused.
     inv_names = dict(lev_names)
-    inv_names["0080Y0.KS"] = "SOMEBODY KODEX 3X Futures ETN"
+    inv_names["0080Y0.KS"] = "SOMEBODY KODEX 4X Futures ETN"
     _, inv_exc = price_computed(
         cfg, lev, {"0080Y0.KS": Decimal("8025"),
                    "005930.KS": Decimal("8025")},
         {"005930.KS": ladder, "0080Y0.KS": etf_ladder}, inv_names)
-    check("A 3X IS STILL REFUSED, because bands.csv has rows for 2x and "
-          "none for that - what is written down is used and what is not is "
-          "reported, never guessed",
-          [(e.reason, [d.bbg for d in e.rows]) for e in inv_exc],
-          [("leveraged or inverse product with no band of its own",
-            ["0080Y0 KP"])])
     check("the refusal carries the name that caused it, so it can be "
           "checked rather than taken on trust",
-          inv_exc[0].rows[0].detail, "SOMEBODY KODEX 3X Futures ETN")
+          inv_exc[0].rows[0].detail, "SOMEBODY KODEX 4X Futures ETN")
     check("and it has its own word in the excluded report",
           missing_token("leveraged or inverse product with no band of its "
                         "own"), "leveraged")
@@ -1821,20 +1857,21 @@ def self_test() -> int:
                          "LAST_PRICE": 5150.0},
          "B KP Equity": {"MIN_LIMIT": 3610.0, "MAX_LIMIT": 6690.0,
                          "LAST_PRICE": 5150.0},
-         #  a name on a band bands.csv has no row for at all - 30 and 60
-         #  are both written down now, so the example has to be neither
-         "C KP Equity": {"MIN_LIMIT": 4377.0, "MAX_LIMIT": 5922.0,
+         #  a name on a band bands.csv has no row for at all.  Korea now
+         #  writes 15, 30, 60 and 90 down, so the example has to be none
+         #  of those.
+         "C KP Equity": {"MIN_LIMIT": 4120.0, "MAX_LIMIT": 6180.0,
                          "LAST_PRICE": 5150.0}},
         {"A.KS": Decimal("5150"), "B.KS": Decimal("5150"),
          "C.KS": Decimal("5150")})
     check("names group by the band the exchange actually gave them",
           {k: sorted(v) for k, v in got["KSC-MAIN"].items()},
-          {(30, 30): ["A KP", "B KP"], (15, 15): ["C KP"]})
+          {(30, 30): ["A KP", "B KP"], (20, 20): ["C KP"]})
     lines = implied_band_lines(cfg, got)
     check("A BAND bands.csv DOES NOT HAVE IS CALLED OUT, which is how a "
           "market where 30% is not for everybody becomes visible",
           [ln.strip() for ln in lines if "NOT IN bands.csv" in ln],
-          ["15/15 %       1  C KP   <- NOT IN bands.csv"])
+          ["20/20 %       1  C KP   <- NOT IN bands.csv"])
     check("and the one it does have is not",
           any("NOT IN" in ln and "30/30" in ln for ln in lines), False)
 

@@ -46,6 +46,7 @@ so every quantity here is a Decimal and the callers hand us Decimals.
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import NamedTuple, Optional
 
@@ -74,6 +75,20 @@ class BandError(Exception):
         super().__init__(reason if not detail else f"{reason}: {detail}")
         self.reason = reason
         self.detail = detail
+
+
+#  A multiple, as an exchange writes one: 2X, -2X, 0.5x, 3X.  Anchored so
+#  that MATRIX 2XL is not a 2x product and a bare "x" is not a multiple.
+MULTIPLE = re.compile(r"(?<![a-z0-9.])-?(\d+(?:\.\d+)?)x(?![a-z0-9])")
+
+
+def multiple_in(name: str):
+    """The multiple this name carries, as it is written, or None.
+
+    "SAMSUNG KODEX Inverse 3X ETN" -> "3x".  The SIGN is dropped: a -2x and
+    a 2x move the same distance, and the band is a width."""
+    m = MULTIPLE.search((name or "").lower())
+    return f"{m.group(1)}x" if m else None
 
 
 def marker_matches(marker: str, name: str) -> bool:
@@ -114,8 +129,16 @@ def select_tier(tiers, ticker: str, ref: Decimal,
                 if marker_matches(t.name_marker, name)]
     if not matching:
         return None
-    strongest = max(len(t.name_marker) for t in matching)
-    matching = [t for t in matching if len(t.name_marker) == strongest]
+
+    #  A MULTIPLE OUTRANKS A WORD, whatever their lengths.  "Inverse 3X"
+    #  matches both `inverse` and `3x`, and on length alone the longer
+    #  `inverse` would win and price a 3x product at the 1x band - a third
+    #  of its real width.  The multiple is what sets the band, so it wins.
+    def rank(t):
+        return (1 if multiple_in(t.name_marker) else 0, len(t.name_marker))
+
+    strongest = max(rank(t) for t in matching)
+    matching = [t for t in matching if rank(t) == strongest]
 
     matching = [t for t in matching
                 if t.sym_prefix == "" or ticker.startswith(t.sym_prefix)]
