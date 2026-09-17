@@ -55,6 +55,16 @@ import ticks
 #  for one column keeps the response small enough to read in a log.
 CLOSE_FIELD = "PX_LAST"
 
+#  The exchange's own name for the security, and the only thing in
+#  equity_master that says a product is LEVERAGED.  Korea prices a
+#  leveraged ETF at the multiple times the ordinary band - 0080Y0 KP closed
+#  at 8,025 and Bloomberg published 12,835/3,215, which is +/-60% where
+#  bands.csv says 30 - and nothing in the crosscode distinguishes it: its
+#  Type is ETF, exactly like an ordinary unleveraged one.
+#
+#  Its LONG_COMP_NAME is "Shinhan SOL Shipbuilding TOP3 Plus leverage ETF".
+NAME_FIELD = "LONG_COMP_NAME"
+
 #  TWO WAYS TO ASK FOR THE PARTITION, because the type of equity_master's
 #  `date` column is NOT established and a 2026-09-04 run died on 'type here.
 #
@@ -82,7 +92,7 @@ MAXDATE_SERVER_Q = ("{[n] exec max date from equity_master "
 #
 #  A plain select of two columns, read back through pandas, needs neither a
 #  cast nor a licence.  It is what Historical/qattsource.py does.
-FETCH_Q = ("{[d;s] select sym, " + CLOSE_FIELD +
+FETCH_Q = ("{[d;s] select sym, " + CLOSE_FIELD + ", " + NAME_FIELD +
            " from equity_master where date=d, sym in s}")
 
 #  THE TICK LADDER, from the two tables the trading system itself rounds by.
@@ -355,10 +365,12 @@ def _rows(result):
 
 
 def fetch(conn, date, syms, log=None) -> dict:
-    """sym -> Decimal close, for the syms that had one.
+    """(sym -> Decimal close, sym -> exchange name), for the syms that
+    had each.
 
-    A sym with no row, or a null close, is simply absent; the caller reports
-    it rather than guessing a price.
+    A sym with no row, or a null close, is simply absent from the first; the
+    caller reports it rather than guessing a price.  The names are a second,
+    independent fact - see LEVERAGE_MARKERS.
 
     THE SIMPLEST QUERY THAT WORKS, and it took three live runs to stop
     decorating it:
@@ -400,13 +412,47 @@ def fetch(conn, date, syms, log=None) -> dict:
             f"--sample {list(syms)[0]}",
             "    to see what the column actually holds."]))
 
-    out = {}
+    out, names = {}, {}
     for row in items:
         sym = _text(_cell(row, "sym"))
+        if not sym:
+            continue
         close = _to_decimal(_cell(row, CLOSE_FIELD))
-        if sym and close is not None:
+        if close is not None:
             out[sym] = close
-    return out
+        name = _text(_cell(row, NAME_FIELD))
+        if name:
+            names[sym] = name
+    #  NAMES COME BACK EVEN FOR A SYM WITH NO CLOSE.  The two are separate
+    #  facts and a name is what says a product is leveraged - the caller
+    #  needs it to refuse a band, not only to compute one.
+    return out, names
+
+
+#  A NAME THAT SAYS THE BAND IS NOT THE VENUE'S.  Korea prices a leveraged
+#  or inverse product at its multiple times the ordinary band, and nothing
+#  else we hold distinguishes one: the crosscode Type is ETF for both, and
+#  there is no ticker prefix the way China has 688 and 300.
+#
+#  WE DO NOT GUESS THE MULTIPLE.  0080Y0 KP is +/-60%, twice the ordinary
+#  30, but that one name does not establish what every leveraged or inverse
+#  product gets - an inverse tracking -1x need not be 60 at all.  So a name
+#  that matches is REFUSED a computed band rather than given one, which is
+#  the same call this codebase makes for a missing tick: a wrong limit is
+#  worse than no limit, because the wrong one is believed.
+LEVERAGE_MARKERS = ("leverage", "leveraged", "inverse", "2x", "3x")
+
+
+def is_leveraged(name: str) -> bool:
+    """Does this exchange name mark a product whose band is not its
+    venue's?  Matched on word-ish boundaries so a company that merely
+    contains the letters is not caught."""
+    low = f" {(name or '').lower()} "
+    for m in LEVERAGE_MARKERS:
+        for sep in (" ", "-", "(", ")", ",", "."):
+            if f"{sep}{m} " in low or f" {m}{sep}" in low:
+                return True
+    return False
 
 
 def _id_text(value) -> str:
@@ -492,6 +538,18 @@ def fetch_ladders(conn, syms, log=None) -> dict:
         say(f"      NO ROWS for table id(s) {unmatched[:5]} - "
             f"{len(by_id)} ids in ticksizetbl, first few "
             f"{sorted(by_id)[:5]}")
+    return out
+
+
+def names_for(rows, venues, fetched):
+    """RIC -> exchange name, through the same candidates as the close, so a
+    name and the price it describes always come from one listing."""
+    out = {}
+    for r in rows:
+        for candidate in sym_candidates(r, venues.get(r.venue_id)):
+            if candidate in fetched:
+                out[r.ric] = fetched[candidate]
+                break
     return out
 
 

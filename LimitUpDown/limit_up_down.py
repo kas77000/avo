@@ -253,6 +253,7 @@ EXCLUDED_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Missing",
 #  empty cell that reads like "nothing was missing".
 MISSING_TOKENS = (
     ("no close in equity_master, then", "close-and-bloomberg"),
+    ("leveraged or inverse", "leveraged"),
     ("no previous close", "close"),
     ("no tick ladder", "ladder"),
     ("no tick tier", "tick-tier"),
@@ -513,7 +514,7 @@ def _coarser(ladder, at_ref):
     return tick
 
 
-def price_computed(cfg, rows, closes, ladders=None):
+def price_computed(cfg, rows, closes, ladders=None, names=None):
     """The band computed from a tier table and a close out of equity_master.
 
     `closes` is keyed on the RIC, because that is unique per row where an
@@ -530,6 +531,7 @@ def price_computed(cfg, rows, closes, ladders=None):
     tick too is chosen from the close, not from the limit being rounded."""
     out, by_reason = [], {}
     ladders = ladders or {}
+    names = names or {}
 
     def drop(reason, r, detail=""):
         by_reason.setdefault(reason, []).append(
@@ -538,6 +540,18 @@ def price_computed(cfg, rows, closes, ladders=None):
 
     for r in rows:
         venue = cfg.venues[r.venue_id]
+        #  BEFORE THE CLOSE, because this is not about the price.  A
+        #  leveraged or inverse product does not get its venue's band -
+        #  0080Y0 KP closed at 8,025 and the exchange published +/-60%
+        #  where bands.csv says 30 - and we do not know the multiple, so
+        #  the band is refused rather than guessed.  Bloomberg prices these
+        #  correctly; this only bites when it could not.
+        name = names.get(r.ric, "")
+        if kdbclose.is_leveraged(name):
+            drop("leveraged or inverse product - its band is not the "
+                 "venue's", r, name)
+            continue
+
         ref = closes.get(r.ric)
         if ref is None:
             drop("no previous close in equity_master", r)
@@ -838,6 +852,7 @@ def run(envs_spec: str) -> int:
         #  started once the other has worked.
         closes, sym_hits, unresolved = {}, {}, []
         ladders, no_ladder, fallback = {}, [], []
+        names = {}
         date_asked = date_used = date_how = None
 
         #  WORKED OUT BEFORE THE GATE, and that is the whole point of it.
@@ -881,10 +896,11 @@ def run(envs_spec: str) -> int:
             for r in need_close:
                 wanted.extend(kdbclose.sym_candidates(
                     r, cfg.venues.get(r.venue_id)))
-            fetched = kdbclose.fetch(conn, date_used, sorted(set(wanted)),
-                                     log=print)
+            fetched, fetched_names = kdbclose.fetch(
+                conn, date_used, sorted(set(wanted)), log=print)
             closes, sym_hits, unresolved = kdbclose.closes_for(
                 need_close, cfg.venues, fetched)
+            names = kdbclose.names_for(need_close, cfg.venues, fetched_names)
             print(f"  equity_master {kdbclose.date_text(date_used)} "
                   f"({date_how}): {len(closes)} closes for "
                   f"{len(compute)} names")
@@ -1000,7 +1016,8 @@ def run(envs_spec: str) -> int:
     #  file exists to say.
     bloomberg_failures = list(more)
     retry, more = split_for_retry(cfg, more, ask)
-    cd_out, cd_excluded = price_computed(cfg, retry, closes, ladders)
+    cd_out, cd_excluded = price_computed(cfg, retry, closes, ladders,
+                                         names)
     cd_excluded = [crosscode.Excluded(
         reason=f"no data from Bloomberg, then {e.reason}", rows=e.rows)
         for e in cd_excluded]
@@ -1009,7 +1026,7 @@ def run(envs_spec: str) -> int:
               f"price were computed instead")
 
     computed_out, computed_excluded = price_computed(
-        cfg, compute, closes, ladders)
+        cfg, compute, closes, ladders, names)
     #  One set of limits, two venues.  R writes the same rows twice, once
     #  under each, and the ATS reads both.
     sec_out, sec_excluded = price_from_bloomberg(secondary, limits, refused)
@@ -1167,6 +1184,10 @@ def demo() -> int:
             #  KOSDAQ, and the name that proved the coarser tick: its up
             #  leg crosses 200,000 where the tick goes 100 -> 500.
             _row("000250.KQ", "000250 KQ", "000250.KR", "KOE-MAIN"),
+            #  A leveraged ETF Bloomberg will not price here, so it reaches
+            #  the computed fallback and must be refused rather than given
+            #  the venue's 30%.
+            _row("0080Y0.KS", "0080Y0 KP", "0080Y0.KR", "KSC-MAIN"),
             _row("MAYBANK.KL", "MAYBANK MK", "MAYBANK.MY", "KLS-MAIN"),
             _row("BBCA.JK", "BBCA IJ", "BBCA.ID", "JKT-MAIN"),
             _row("TLKM.JK", "TLKM IJ", "TLKM.ID", "JKT-MAIN"),
@@ -1217,6 +1238,7 @@ def demo() -> int:
               "688001.SS": Decimal("50"),      # STAR board, the 688 prefix
               "005930.KS": Decimal("70000"),
               "000250.KQ": Decimal("157500"),
+              "0080Y0.KS": Decimal("8025"),
               "MAYBANK.KL": Decimal("9.50"),
               "BBCA.JK": Decimal("8000"), "TLKM.JK": Decimal("3000"),
               "TINY.JK": Decimal("10")}
@@ -1230,6 +1252,14 @@ def demo() -> int:
           ("200000", "100"), ("500000", "500"), ("1000001000", "1000"))])
     ladders = {"005930.KS": KR_6132, "000250.KQ": KR_6132}
 
+    #  What equity_master's LONG_COMP_NAME says.  0080Y0 KP is real: it
+    #  closed at 8,025 and Bloomberg published 12,835/3,215, which is
+    #  +/-60% where bands.csv gives Korea 30.  Bloomberg prices it here, so
+    #  it publishes correctly; the demo carries it to show the band is
+    #  REFUSED when Bloomberg cannot.
+    names = {"005930.KS": "Samsung Electronics Co Ltd",
+             "0080Y0.KS": "Shinhan SOL Shipbuilding TOP3 Plus leverage ETF"}
+
     #  The two NOCL names are the fallback: computed venues with no close.
     #  Bloomberg can price one of them and not the other, which is the pair
     #  worth showing - a rescue and a name that was beyond rescuing.
@@ -1242,13 +1272,14 @@ def demo() -> int:
     #  the venue's own band.  With the shipped config asking Bloomberg for
     #  everything, this is the path most of the universe takes.
     retry, excluded = split_for_retry(cfg, excluded, ask)
-    cd_out, cd_excluded = price_computed(cfg, retry, closes, ladders)
+    cd_out, cd_excluded = price_computed(cfg, retry, closes, ladders,
+                                         names)
     cd_excluded = [crosscode.Excluded(
         reason=f"no data from Bloomberg, then {e.reason}", rows=e.rows)
         for e in cd_excluded]
 
     computed, computed_excluded = price_computed(cfg, compute, closes,
-                                                 ladders)
+                                                 ladders, names)
     sec_out, sec_excluded = price_from_bloomberg(secondary, limits, refused)
     fb_out, fb_excluded = price_from_bloomberg(fallback, limits, refused)
     fb_excluded = [crosscode.Excluded(
@@ -1339,8 +1370,8 @@ def kdb_check(sample: int = 5) -> int:
 
     print("\nfetching")
     try:
-        fetched = kdbclose.fetch(conn, date_used, sorted(set(wanted)),
-                                 log=say)
+        fetched, _ = kdbclose.fetch(conn, date_used, sorted(set(wanted)),
+                                    log=say)
     except Exception as e:                                  # noqa: BLE001
         print(f"\nFAILED on the fetch: {type(e).__name__}: {e}")
         return 1
@@ -1662,6 +1693,35 @@ def self_test() -> int:
           [d.ric for d in
            {e.reason: e.rows for e in kexcl}["no tick ladder for this name"]],
           ["ZZZZ.KS"])
+
+    print("\na leveraged product is refused the venue's band")
+    lev = [row("0080Y0.KS", "0080Y0 KP", "0080Y0.KR", "KSC-MAIN"),
+           row("005930.KS", "005930 KP", "005930.KR", "KSC-MAIN")]
+    lev_names = {"0080Y0.KS": "Shinhan SOL Shipbuilding TOP3 Plus leverage "
+                              "ETF",
+                 "005930.KS": "Samsung Electronics Co Ltd"}
+    lev_out, lev_exc = price_computed(
+        cfg, lev, {"0080Y0.KS": Decimal("8025"), "005930.KS": Decimal("8025")},
+        {"005930.KS": ladder, "0080Y0.KS": ladder}, lev_names)
+    check("THE ORDINARY NAME STILL GETS ITS BAND - the rule keys on the "
+          "exchange name, not on the venue",
+          [r["BloombergCode"] for r in lev_out], ["005930 KP"])
+    check("and the leveraged one is REFUSED rather than given 30%, because "
+          "0080Y0 KP is +/-60% and one name does not establish what every "
+          "leveraged product gets",
+          [(e.reason, [d.bbg for d in e.rows]) for e in lev_exc],
+          [("leveraged or inverse product - its band is not the venue's",
+            ["0080Y0 KP"])])
+    check("the refusal carries the name that caused it, so it can be "
+          "checked rather than taken on trust",
+          lev_exc[0].rows[0].detail,
+          "Shinhan SOL Shipbuilding TOP3 Plus leverage ETF")
+    check("and it has its own word in the excluded report",
+          missing_token("leveraged or inverse product - its band is not "
+                        "the venue's"), "leveraged")
+    check("A COMPANY THAT MERELY CONTAINS THE LETTERS IS NOT CAUGHT",
+          (kdbclose.is_leveraged("Coverage Analytics Inc"),
+           kdbclose.is_leveraged("Leverage Shares PLC")), (False, True))
 
     print("\nmeasuring the band Bloomberg published against the close")
     #  Korea's own numbers: 5150 close, 3610/6690 published.  The ratio is
