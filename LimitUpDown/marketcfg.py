@@ -459,10 +459,16 @@ def self_test() -> int:
               c.venues["JKT-MAIN"].no_data_fallback, "computed")
     real = load(Path(__file__).resolve().parent / "config",
                 Path(__file__).resolve().parent / "config")
-    check("and no shipped venue sets it today, because none of the ones "
-          "Bloomberg prices has a band written down",
-          [v.venue_id for v in real.venues.values() if v.no_data_fallback],
-          [])
+    check("EVERY SHIPPED VENUE WITH TIERS SETS IT - the config asks "
+          "Bloomberg for everything and keeps the band as the safety net",
+          sorted(v.venue_id for v in real.venues.values()
+                 if v.no_data_fallback) ==
+          sorted(v.venue_id for v in real.venues.values()
+                 if v.venue_id in real.bands), True)
+    check("and the ones without it are exactly the ones with no band",
+          sorted({v.country for v in real.venues.values()
+                  if not v.no_data_fallback}),
+          ["India", "Japan", "Thailand"])
     with tempfile.TemporaryDirectory() as d:
         raises("a computed venue that does not round but names one anyway",
                lambda: load(write(d, mk=HDR +
@@ -501,11 +507,15 @@ def self_test() -> int:
           sorted({v.country for v in real.venues.values()}),
           ["China", "India", "Indonesia", "Japan", "Korea", "Malaysia",
            "Philippines", "Taiwan", "Thailand"])
-    check("JAPAN, THAILAND and INDIA are the markets Bloomberg prices - "
-          "everything else is computed, so an entitlement refusal cannot "
-          "empty those",
+    check("EVERY VENUE ASKS BLOOMBERG, which is what the config now says - "
+          "the question is no longer which venue computes but which one can "
+          "fall back to computing when Bloomberg has nothing",
+          sorted(v.venue_id for v in real.venues.values() if v.computed), [])
+    check("and the seven that CANNOT fall back are Japan, Thailand and "
+          "India, whose band rules nobody has written down - an entitlement "
+          "refusal there still empties the venue",
           sorted(v.venue_id for v in real.venues.values()
-                 if not v.computed),
+                 if not v.no_data_fallback),
           ["BSE-MAIN", "BSE-SECONDARY", "CHJ-MAIN", "JNX-MAIN", "NSI-MAIN",
            "SET-MAIN", "TYO-MAIN"])
     check("and every computed venue has the tiers it needs, so the shipped "

@@ -1157,6 +1157,16 @@ def demo() -> int:
     compute = [r for r in compute if r.ric in closes]
 
     out, excluded = price_from_bloomberg(ask, limits, refused)
+
+    #  The same retry run() does: a name Bloomberg would not price, given
+    #  the venue's own band.  With the shipped config asking Bloomberg for
+    #  everything, this is the path most of the universe takes.
+    retry, excluded = split_for_retry(cfg, excluded, ask)
+    cd_out, cd_excluded = price_computed(cfg, retry, closes, ladders)
+    cd_excluded = [crosscode.Excluded(
+        reason=f"no data from Bloomberg, then {e.reason}", rows=e.rows)
+        for e in cd_excluded]
+
     computed, computed_excluded = price_computed(cfg, compute, closes,
                                                  ladders)
     sec_out, sec_excluded = price_from_bloomberg(secondary, limits, refused)
@@ -1164,7 +1174,8 @@ def demo() -> int:
     fb_excluded = [crosscode.Excluded(
         reason=f"no close in equity_master, then {e.reason}", rows=e.rows)
         for e in fb_excluded]
-    out = out + computed + sec_out + fb_out + india.publish_both(sec_out)
+    out = (out + computed + sec_out + fb_out + cd_out
+           + india.publish_both(sec_out))
 
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=OUT_HEADER, lineterminator="\n")
@@ -1175,7 +1186,7 @@ def demo() -> int:
     print(f"--- {len(ask)} asked, {len(compute)} computed, "
           f"{len(secondary)} BSE secondary ---", file=sys.stderr)
     every = (list(excluded) + list(computed_excluded) + list(sec_excluded)
-             + list(fb_excluded))
+             + list(fb_excluded) + list(cd_excluded))
     for line in _venue_summary(cfg, out, every):
         print(line, file=sys.stderr)
     for line in _exclusion_lines(every):
@@ -1645,14 +1656,15 @@ def self_test() -> int:
     check("and its venue is the computed one", cout[0]["Venue"], "JKT-MAIN")
     mixed = idn + [row("600001.SS", "600001 CG", "600001.CN", "SHA-MAIN")]
     asked, computed = cfg.by_source(mixed)
-    check("the shipped config computes China too, not just Indonesia",
-          sorted({r.venue_id for r in computed}), ["JKT-MAIN", "SHA-MAIN"])
-    check("and asks Bloomberg for none of them",
-          [r.venue_id for r in asked], [])
-    japan = [row("7203.T", "7203 JT", "7203.JP", "TYO-MAIN")]
-    asked2, computed2 = cfg.by_source(japan)
-    check("Japan is the one that still goes to Bloomberg",
-          ([r.venue_id for r in asked2], computed2), (["TYO-MAIN"], []))
+    check("AS SHIPPED EVERY VENUE ASKS BLOOMBERG FIRST, so by_source puts "
+          "all of them on that side and nothing computes up front",
+          (sorted({r.venue_id for r in asked}), computed),
+          (["JKT-MAIN", "SHA-MAIN"], []))
+    check("and the band is reached through NoDataFallback instead, which "
+          "is what makes a Bloomberg outage publishable rather than fatal",
+          sorted({v.venue_id for v in cfg.venues.values()
+                  if v.no_data_fallback}) [:2],
+          ["JKT-MAIN", "KLS-MAIN"])
 
     print("\nprices are written plainly, never in exponent form")
     check("a big round number", _plain(D("1E+3")), "1000")
@@ -1914,14 +1926,16 @@ def self_test() -> int:
               "no band tiers in bands.csv" in got, True)
 
     shipped = marketcfg.load(real, real)
-    check("as shipped, the markets Bloomberg prices are Japan, Thailand and "
-          "India - the three whose rules are not in bands.csv",
+    check("as shipped, EVERY market asks Bloomberg - the split is no longer "
+          "which venue computes but which one can fall back to computing",
+          [v.venue_id for v in shipped.venues.values() if v.computed], [])
+    check("AND THE ONES THAT CANNOT ARE EXACTLY THE ONES WITH NO TIERS - "
+          "Japan, Thailand and India, whose rules nobody has written down",
           sorted({v.country for v in shipped.venues.values()
-                  if not v.computed}), ["India", "Japan", "Thailand"])
-    check("and not one of them has tiers, so none could be computed today "
-          "even by accident",
+                  if not v.no_data_fallback}), ["India", "Japan", "Thailand"])
+    check("every other venue can, and has the band to do it with",
           [v.venue_id for v in shipped.venues.values()
-           if not v.computed and v.venue_id in shipped.bands], [])
+           if v.no_data_fallback and v.venue_id not in shipped.bands], [])
 
     print("\nIndia, end to end through both halves of the fetch")
     ind = [_row("RELI.NS", "RIL IN", "RELIANCE.IN", "NSI-MAIN",

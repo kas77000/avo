@@ -398,7 +398,7 @@ Nine countries, nineteen venues:
 
 | | venues | cutoff | source |
 |---|---|---|---|
-| Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | **bloomberg** |
+| Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | **bloomberg**, no fallback |
 | Korea | `KSC-MAIN` (KP, KOSPI) | 07:30 | computed, ±30%, rounded on kdb's ladder |
 | Korea | `KOE-MAIN` (KQ, KOSDAQ) | 07:30 | computed, ±30%, rounded on kdb's ladder |
 | Malaysia | `KLS-MAIN` | 07:59 | computed, ±30% |
