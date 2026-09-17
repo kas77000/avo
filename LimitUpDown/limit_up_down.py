@@ -763,7 +763,11 @@ def run(envs_spec: str) -> int:
                       end="\r")
             return report
 
-        print(f"{len(compute)} computed, then {len(ask)} from Bloomberg"
+        #  Said in the order the run does it.  "0 computed, then N from
+        #  Bloomberg" was true and read as though nothing would be computed
+        #  at all, which is the opposite of what the fallback does.
+        print(f"{len(ask)} from Bloomberg"
+              + (f", {len(compute)} computed up front" if compute else "")
               + (f" (+{len(secondary)} BSE secondary)" if secondary else ""))
 
         #  EACH SOURCE IS OPENED ONLY IF IT HAS WORK.  Switch every venue to
@@ -779,7 +783,20 @@ def run(envs_spec: str) -> int:
         closes, sym_hits, unresolved = {}, {}, []
         ladders, no_ladder, fallback = {}, [], []
         date_asked = date_used = date_how = None
-        if compute:
+
+        #  WORKED OUT BEFORE THE GATE, and that is the whole point of it.
+        #  This block used to open on `if compute:`, which was right while
+        #  a computed venue was the only reason to want a close.  It is not
+        #  any more: with every venue on Source=bloomberg, `compute` is
+        #  EMPTY and the closes are wanted for the fallback names instead.
+        #  Gating on `compute` skipped kdb entirely, and every name
+        #  Bloomberg would not price was then dropped for want of a close
+        #  that was never fetched.
+        retryable = [r for r in ask
+                     if cfg.venues[r.venue_id].no_data_fallback]
+        need_close = compute + retryable
+
+        if need_close:
             host, port = kdbclose.parse_server(EQUITY_MASTER_SERVER)
             conn = kdbclose.connect(host, port)
             print(f"connected to kdb {host}:{port} for equity_master")
@@ -800,9 +817,6 @@ def run(envs_spec: str) -> int:
             #  blank on every venue today - and the alternative is a second
             #  kdb round trip after Bloomberg, once this connection has
             #  served its purpose.
-            retryable = [r for r in ask
-                         if cfg.venues[r.venue_id].no_data_fallback]
-            need_close = compute + retryable
             if retryable:
                 print(f"  +{len(retryable)} names on a venue that would "
                       f"compute a band if Bloomberg will not price them")
@@ -1624,6 +1638,24 @@ def self_test() -> int:
     check("while a venue without the column keeps the old behaviour and "
           "retries nothing",
           split_for_retry(cfg, failed, asked)[0], [])
+
+    #  THE GATE THAT OPENS THE KDB BLOCK.  It used to be `if compute:`,
+    #  which was right while a computed venue was the only reason to want a
+    #  close.  With the shipped config asking Bloomberg for everything,
+    #  `compute` is empty and that skipped kdb entirely - so every name
+    #  Bloomberg would not price was dropped for want of a close nobody had
+    #  fetched.  Pinned here as the arithmetic the gate has to do.
+    shipped_ask, shipped_compute = cfg.by_source(
+        [row("005930.KS", "005930 KP", "005930.KR", "KSC-MAIN")])
+    retryable = [r for r in shipped_ask
+                 if cfg.venues[r.venue_id].no_data_fallback]
+    check("AS SHIPPED `compute` IS EMPTY, so a gate on it would open kdb "
+          "for nothing and the fallback would have no close to use",
+          (shipped_compute, [r.ric for r in retryable]),
+          ([], ["005930.KS"]))
+    check("the gate is on compute PLUS the retryable names, which is what "
+          "makes a Korean name reach the band at all",
+          bool(shipped_compute + retryable), True)
 
     print("\na computed name with no close falls back to Bloomberg")
     #  A zero PX_LAST is no close and always has been - kdbclose._to_decimal
