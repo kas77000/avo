@@ -441,7 +441,12 @@ def fetch(conn, date, syms, log=None) -> dict:
 #  that matches is REFUSED a computed band rather than given one, which is
 #  the same call this codebase makes for a missing tick: a wrong limit is
 #  worse than no limit, because the wrong one is believed.
-LEVERAGE_MARKERS = ("leverage", "leveraged", "inverse", "2x", "3x")
+#  "inver" catches a name the feed TRUNCATED - 230480 KP arrives as just
+#  "Inver" - so it is detected and refused rather than quietly handed the
+#  ordinary band.  A truncated name cannot say which multiple it is, and
+#  guessing 1x published that name at half its real width.
+LEVERAGE_MARKERS = ("leverage", "leveraged", "leverege", "inver", "inverse",
+                    "2x", "3x")
 
 
 def is_leveraged(name: str) -> bool:

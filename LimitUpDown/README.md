@@ -637,8 +637,23 @@ Futures ETN` matches no marker at all, so without that guard it would fall
 through to the blank row and publish at a quarter of its width. It reports as
 `leveraged` instead, carrying the name.
 
-Markers match on word boundaries, so `MATRIX 2XL` is not a 2x product and
+**The exchange does not always leave spaces, or spell it the same way.** Real
+`LONG_COMP_NAME` values that a word-boundary match found nothing in:
+
+```
+Inverse2X      3XLeverage      Leverege      Inver
+```
+
+A marker that is itself a multiple is matched *as a multiple*, not as a word, so
+`2x` finds the 2 in `Inverse2X` where no boundary rule will — while `MATRIX 2XL`
+is still not a 2x product, because what follows a multiple has to be a word that
+makes it one. `Leverege` is a `bands.csv` row of its own: a band is not the place
+to be precious about an issuer's typo. Word markers still match on boundaries, so
 `Coverage Analytics` is not leveraged.
+
+`Inver` is a name the feed **truncated**, and a truncated name cannot say which
+multiple it is — that one is a 2x, so the ordinary band would have been half its
+real width. It is refused and reported rather than guessed.
 
 **These names round to the NEAREST tick, not inward.** `bands.csv` has a
 `Rounding` column per tier; blank means the venue's mode, so an ordinary Korean

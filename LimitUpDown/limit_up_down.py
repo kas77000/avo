@@ -1978,6 +1978,44 @@ def self_test() -> int:
           (got[4]["LimitUpPrice"], got[4]["LimitDownPrice"]),
           ("12835", "3215"))
 
+    print("\nexchange names as the feed actually writes them")
+    #  Every one of these was publishing at 30% - the ordinary band - not
+    #  because the arithmetic was wrong but because the NAME did not match.
+    #  Bloomberg's own limits are on the right.
+    feed = [("261260", "5430", "Inverse2X", "8680", "2180"),
+            ("570110", "15585", "3XLeverage", "29610", "1560"),
+            ("570111", "33560", "3XLeverage", "63755", "3365"),
+            ("530133", "63985", "Samsung Securities Samsung Bloomberg "
+                                "Leverege WTI Crude Oil Futures ETN B 133",
+             "102375", "25595"),
+            ("760028", "3075", "Inverse2x", "4915", "1235")]
+    for code, close, nm, wu, wd in feed:
+        ric = f"{code}.KS"
+        out, _ = price_computed(
+            cfg, [row(ric, f"{code} KP", ric, "KSC-MAIN")],
+            {ric: Decimal(close)}, {ric: etf_ladder}, {ric: nm})
+        check(f"{nm[:34]} -> {wu}/{wd}",
+              (out[0]["LimitUpPrice"], out[0]["LimitDownPrice"]) if out
+              else "refused", (wu, wd))
+    check("NO SPACE IS NOT NO MULTIPLE - Inverse2X and 3XLeverage are both "
+          "real, and a word-boundary match found neither",
+          (bands.multiple_in("Inverse2X"), bands.multiple_in("3XLeverage")),
+          ("2x", "3x"))
+    check("but MATRIX 2XL is still not a 2x product, because what follows "
+          "the multiple has to be a word that makes it one",
+          bands.multiple_in("MATRIX 2XL Holdings"), None)
+
+    #  A TRUNCATED NAME CANNOT SAY WHICH MULTIPLE IT IS.  230480 KP arrives
+    #  as "Inver" and is a 2x; guessing 1x published it at half its width.
+    trunc_out, trunc_exc = price_computed(
+        cfg, [row("230480.KS", "230480 KP", "230480.KS", "KSC-MAIN")],
+        {"230480.KS": Decimal("4725")}, {"230480.KS": etf_ladder},
+        {"230480.KS": "Inver"})
+    check("a name the feed TRUNCATED is refused, not handed the ordinary "
+          "band - it is a 2x and 30% would be half its real width",
+          (trunc_out, [e.reason for e in trunc_exc]),
+          ([], ["leveraged or inverse product with no band of its own"]))
+
     inv_names = dict(lev_names)
     inv_names["0080Y0.KS"] = "SOMEBODY KODEX 4X Futures ETN"
     _, inv_exc = price_computed(

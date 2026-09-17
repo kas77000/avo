@@ -88,14 +88,23 @@ class BandError(Exception):
 
 #  A multiple, as an exchange writes one: 2X, -2X, 0.5x, 3X.  Anchored so
 #  that MATRIX 2XL is not a 2x product and a bare "x" is not a multiple.
-MULTIPLE = re.compile(r"(?<![a-z0-9.])-?(\d+(?:\.\d+)?)x(?![a-z0-9])")
+MULTIPLE_WORDS = ("leverage", "leveraged", "leverege", "inverse")
+MULTIPLE = re.compile(
+    r"(?<![0-9.])-?(\d+(?:\.\d+)?)x(?=$|[^a-z0-9]|" +
+    "|".join(MULTIPLE_WORDS) + r")")
 
 
 def multiple_in(name: str):
     """The multiple this name carries, as it is written, or None.
 
     "SAMSUNG KODEX Inverse 3X ETN" -> "3x".  The SIGN is dropped: a -2x and
-    a 2x move the same distance, and the band is a width."""
+    a 2x move the same distance, and the band is a width.
+
+    AN EXCHANGE NAME DOES NOT ALWAYS LEAVE SPACES.  "Inverse2X" and
+    "3XLeverage" are both real, so the multiple is allowed to sit against a
+    letter on either side - but only where what follows is a word that
+    makes it a multiple.  That is what keeps "MATRIX 2XL Holdings" from
+    being a 2x product: an L is not leverage."""
     m = MULTIPLE.search((name or "").lower())
     return f"{m.group(1)}x" if m else None
 
@@ -112,6 +121,12 @@ def marker_matches(marker: str, name: str) -> bool:
     "this is the row for it" can never disagree."""
     if not marker:
         return True
+    #  A MARKER THAT IS ITSELF A MULTIPLE IS MATCHED AS ONE, not as a word.
+    #  "2x" has to find the 2 in "Inverse2X", where a word boundary never
+    #  will, and must not find one in "MATRIX 2XL" - which is exactly the
+    #  distinction multiple_in already draws.
+    if multiple_in(marker):
+        return multiple_in(name) == multiple_in(marker)
     low = f" {(name or '').lower()} "
     seps = " -()/,."
     for a in seps:
