@@ -445,8 +445,15 @@ LEVERAGE_MARKERS = ("leverage", "leveraged", "inverse", "2x", "3x")
 
 def is_leveraged(name: str) -> bool:
     """Does this exchange name mark a product whose band is not its
-    venue's?  Matched on word-ish boundaries so a company that merely
-    contains the letters is not caught."""
+    venue's?
+
+    CASE FOLDED FIRST, because the exchange name is whatever the feed
+    happened to store - "leverage", "Leverage" and "LEVERAGE" are one
+    product, and which of them a band is refused for must not depend on
+    that.
+
+    Then matched on word-ish boundaries, so a company that merely contains
+    the letters - Coverage Analytics - is not caught."""
     low = f" {(name or '').lower()} "
     for m in LEVERAGE_MARKERS:
         for sep in (" ", "-", "(", ")", ",", "."):

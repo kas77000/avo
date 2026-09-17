@@ -1722,6 +1722,15 @@ def self_test() -> int:
     check("A COMPANY THAT MERELY CONTAINS THE LETTERS IS NOT CAUGHT",
           (kdbclose.is_leveraged("Coverage Analytics Inc"),
            kdbclose.is_leveraged("Leverage Shares PLC")), (False, True))
+    check("HOWEVER THE EXCHANGE CAPITALISED IT - one feed writing Leverage "
+          "and another LEVERAGE must not be the difference between a band "
+          "refused and a band published",
+          [kdbclose.is_leveraged(n) for n in
+           ("KODEX leverage", "KODEX Leverage", "KODEX LEVERAGE",
+            "KODEX LeVeRaGe", "TIGER 200 LEVERAGED",
+            "KODEX 200 Futures Inverse 2X",
+            "KODEX 200 FUTURES INVERSE 2x")],
+          [True] * 7)
 
     print("\nmeasuring the band Bloomberg published against the close")
     #  Korea's own numbers: 5150 close, 3610/6690 published.  The ratio is
