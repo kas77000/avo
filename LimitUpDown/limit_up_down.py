@@ -1814,12 +1814,12 @@ def self_test() -> int:
     lev_out, lev_exc = price_computed(
         cfg, lev, {"0080Y0.KS": Decimal("8025"), "005930.KS": Decimal("8025")},
         {"005930.KS": ladder, "0080Y0.KS": etf_ladder}, lev_names)
-    check("THE LEVERAGED NAME TAKES ITS OWN BAND and publishes exactly "
-          "what Bloomberg does - 8025 x 1.6 is 12840, one 5 tick inward is "
-          "12835, where the ordinary 30% row would have said 10430",
+    check("THE LEVERAGED NAME TAKES ITS OWN BAND - 8025 x 1.6 is 12840, "
+          "already on its 5 tick and so published as it comes out, where "
+          "the ordinary 30% row would have said 10430",
           [(r["BloombergCode"], r["LimitUpPrice"], r["LimitDownPrice"])
            for r in lev_out if r["BloombergCode"] == "0080Y0 KP"],
-          [("0080Y0 KP", "12835", "3215")])
+          [("0080Y0 KP", "12840", "3210")])
     check("while the ordinary name beside it is untouched, because the "
           "marker keys on the exchange NAME and not on the venue",
           [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in lev_out
@@ -1865,7 +1865,7 @@ def self_test() -> int:
           "however much longer that is - on length alone a 3x would take "
           "the 1x row and publish at a third of its real width",
           [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in m_out],
-          [("9225", "6825"), ("12835", "3215"), ("15245", "805")])
+          [("9225", "6825"), ("12840", "3210"), ("15245", "805")])
     check("AND A MULTIPLE NOBODY HAS WRITTEN A ROW FOR IS REFUSED, not "
           "quietly handed the default - 4X would otherwise match no marker "
           "at all and publish at a quarter of its width",
@@ -1877,14 +1877,14 @@ def self_test() -> int:
     check("an Inverse 2X takes twice it, because 'inverse 2x' is the "
           "longer marker and select_tier prefers the most specific",
           [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in got[1:3]],
-          [("12835", "3215"), ("12835", "3215")])
+          [("12840", "3210"), ("12840", "3210")])
     check("AND SO DOES A -2X THAT NEVER SAYS 'INVERSE' - the multiple is "
           "the signal, and a rule keyed on the word would have missed it",
           (got[3]["LimitUpPrice"], got[3]["LimitDownPrice"]),
-          ("12835", "3215"))
+          ("12840", "3210"))
     check("leverage means 2x in Korea and lands on the same band",
           (got[4]["LimitUpPrice"], got[4]["LimitDownPrice"]),
-          ("12835", "3215"))
+          ("12840", "3210"))
 
     inv_names = dict(lev_names)
     inv_names["0080Y0.KS"] = "SOMEBODY KODEX 4X Futures ETN"

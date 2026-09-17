@@ -181,28 +181,30 @@ def round_band(up: Decimal, down: Decimal, tick, rounding: str):
     docstring.  'none' ignores the tick, which may be None."""
     if rounding == "none":
         return up, down
-    if rounding not in ("inward", "inward-strict", "outward", "nearest"):
+    if rounding not in ("inward", "outward", "nearest"):
         raise BandError(f"unknown rounding mode {rounding!r}")
     ut = _tick_at(tick, up, rounding)
     dt = _tick_at(tick, down, rounding)
-    if rounding in ("inward", "inward-strict"):
-        hi = (up / ut).to_integral_value(ROUND_FLOOR) * ut
-        lo = (down / dt).to_integral_value(ROUND_CEILING) * dt
-        if rounding == "inward-strict":
-            #  THE LIMIT MUST BE STRICTLY INSIDE THE BAND.  Where the raw
-            #  band already lands on a valid tick, rounding has nothing to
-            #  do and the exchange still moves one tick in.
-            #
-            #  It is why a leverage name looked inconsistent: 0080Y0 KP at
-            #  8,025 has a raw band of 12,840/3,210, both exactly on its 5
-            #  tick, and Bloomberg publishes 12,835/3,215.  An ordinary
-            #  name rarely lands on its tick - 3,605 is not on a 10 - so
-            #  the two modes agree there and differ only here.
-            if hi == up:
-                hi -= ut
-            if lo == down:
-                lo += dt
-        return hi, lo
+    if rounding == "inward":
+        #  A BAND ALREADY ON THE TICK IS LEFT EXACTLY WHERE IT IS.  8750 x
+        #  1.3 is 11375, on the 5 tick table 10392 gives 0000D0 KP, and
+        #  Bloomberg publishes 11375.
+        #
+        #  There was briefly an `inward-strict` here that moved such a band
+        #  one tick further in.  It was inferred from ONE name, and a
+        #  compare against Bloomberg over the whole Korean universe then
+        #  showed hundreds out by exactly one tick, every one of them the
+        #  wrong way.  The one name is the open question, not the rule:
+        #
+        #    0080Y0 KP  close 8025, leverage -> 12840/3210 here, and
+        #               Bloomberg published 12835/3215.
+        #
+        #  No symmetric band around 8025 rounds to both of those on any
+        #  tick, so something else about that name differs - its reference
+        #  price, or a band that is not exactly 60%.  Worth resolving, but
+        #  not by making every other name wrong.
+        return ((up / ut).to_integral_value(ROUND_FLOOR) * ut,
+                (down / dt).to_integral_value(ROUND_CEILING) * dt)
     if rounding == "outward":
         return ((up / ut).to_integral_value(ROUND_CEILING) * ut,
                 (down / dt).to_integral_value(ROUND_FLOOR) * dt)
@@ -333,19 +335,15 @@ def self_test() -> int:
           round_band(D("1.15"), D("1.15"), D("0.05"), "inward"),
           (D("1.15"), D("1.15")))
 
-    print("\nstrictly inward, for a band that lands on its own tick")
-    check("a raw band already on the tick still moves one in, which is what "
-          "0080Y0 KP does: 12840/3210 on a 5 tick publishes 12835/3215",
-          round_band(D("12840"), D("3210"), D("5"), "inward-strict"),
-          (D("12835"), D("3215")))
-    check("and one that is NOT on the tick rounds exactly as inward does, "
-          "which is why ordinary names never showed the difference",
-          round_band(D("6695"), D("3605"), D("10"), "inward-strict"),
-          round_band(D("6695"), D("3605"), D("10"), "inward"))
-    check("plain inward leaves a band that is already on the tick alone, "
-          "and Indonesia depends on that",
-          round_band(D("12840"), D("3210"), D("5"), "inward"),
-          (D("12840"), D("3210")))
+    print("\na band that already lands on its tick is LEFT ALONE")
+    check("0000D0 KP: 8750 x 1.3 is 11375 exactly, on the 5 tick its table "
+          "gives, and Bloomberg publishes 11375 - not 11370",
+          round_band(D("11375"), D("6125"), D("5"), "inward"),
+          (D("11375"), D("6125")))
+    check("which is not a special case but what floor and ceiling already "
+          "do - a band NOT on the tick still rounds inward",
+          round_band(D("6695"), D("3605"), D("10"), "inward"),
+          (D("6690"), D("3610")))
 
     print("\neach leg on its own tick, when the caller passes a callable")
     #  Korea's table 6132 around the 200,000 boundary: 100 below, 500 at or

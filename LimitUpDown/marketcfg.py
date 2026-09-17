@@ -66,8 +66,7 @@ import bands
 import ticks
 
 VALID_SOURCE = ("bloomberg", "computed")
-VALID_ROUNDING = ("none", "inward", "inward-strict", "outward",
-                  "nearest")
+VALID_ROUNDING = ("none", "inward", "outward", "nearest")
 VALID_KIND = ("pct", "abs")
 VALID_FALLBACK = ("bloomberg",)
 VALID_TICK_FROM = ("close", "coarser")

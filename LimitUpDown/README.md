@@ -432,6 +432,13 @@ Thailand and India are the two that took more than a config row — see above.
 
 ### Rounding, and where the tick comes from
 
+**A band that already lands on a valid tick is published as it comes out.**
+`8750 × 1.3 = 11375` on a 5 tick stays 11375; rounding only moves a value that
+is not on the grid. That is what `floor`/`ceiling` already do and there is no
+mode that moves it one tick further in — one was briefly added on the strength
+of a single name and a whole-universe compare against Bloomberg then showed
+hundreds out by exactly one tick.
+
 A venue rounds only if its `Rounding` column says so. Today that is Korea's
 `KSC-MAIN` and Indonesia; the other nine computed venues publish the raw band,
 which is a config decision and a one-word edit.
