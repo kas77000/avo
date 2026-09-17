@@ -285,7 +285,26 @@ python limit_up_down.py ""                 real run, publish nowhere
 python limit_up_down.py "Test|Pilot|Prod"  real run, publish
 python limit_up_down.py --compare OLD.csv  diff the last output against another
 python limit_up_down.py --kdb-check        only the kdb path, verbosely
+python limit_up_down.py --venues KSC-MAIN  one venue, or several, pipe separated
 ```
+
+### Working on one market
+
+`--venues "KSC-MAIN|KOE-MAIN"` narrows a real run, a `--compare` and a
+`--kdb-check` to those venues, so an analysis does not cost a full fetch of
+sixteen thousand names. A venue markets.csv has never heard of is refused by
+name, with the list of real ones — a typo that silently matched nothing would
+look exactly like a market with no rows.
+
+> **A narrowed run does not publish.** The output file is a *replacement*, not a
+> merge, so copying a Korea-only file to Prod would delete every other market's
+> limits from the feed. `--venues` writes `out/limitUpDown.csv` for reading and
+> refuses to copy, whatever environments are named on the command line, and says
+> so on stderr.
+
+The exclusions are still reported for the whole crosscode — a venue nobody
+configured, a security type we do not trade — because those read the same
+whichever venues a run is about. Only the universe is narrowed.
 
 `--compare` prints its differences **and writes every one of them** to
 `compare-report.csv` (`--report` moves it). The printed lines are for reading;

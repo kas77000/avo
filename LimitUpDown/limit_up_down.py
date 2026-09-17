@@ -695,6 +695,25 @@ def parse_envs(spec: str):
     return out
 
 
+def parse_venues(spec: str, known):
+    """'KSC-MAIN|KOE-MAIN' -> the venues to work on, or [] for all of them.
+
+    REFUSED BY NAME if markets.csv has never heard of one.  A typo that
+    silently matched nothing would look exactly like a market with no rows,
+    which is the one thing this job must never be quiet about."""
+    out = [p.strip() for p in (spec or "").split("|") if p.strip()]
+    bad = [v for v in out if v not in known]
+    if bad:
+        raise ValueError(
+            f"unknown venue(s) {bad}; markets.csv has "
+            f"{', '.join(sorted(known))}")
+    return out
+
+
+def only_venues(rows, venues):
+    return [r for r in rows if r.venue_id in venues] if venues else list(rows)
+
+
 def copy_to_envs(temp, envs, targets):
     import shutil
     failures = []
@@ -818,9 +837,10 @@ def write_compare_report(path, records) -> str:
     return str(path)
 
 
-def run(envs_spec: str) -> int:
+def run(envs_spec: str, venues_spec: str = "") -> int:
     mail = (SMTP_HOST, EMAIL_FROM, EMAIL_TO)
     session = None
+    only = []
     try:
         envs = parse_envs(envs_spec)
         _check_modules()
@@ -840,6 +860,19 @@ def run(envs_spec: str) -> int:
             {v.venue_id: v.exclude_file for v in cfg.venues.values()})
         rows, excluded = crosscode.load(CROSSCODE_PATH, cfg.venues, now,
                                         strat)
+
+        #  NARROWED AFTER THE CROSSCODE, NOT BEFORE.  The exclusions above
+        #  are about the whole file - a venue nobody configured, a type we
+        #  do not trade - and they read the same whichever venues this run
+        #  is about.  Only the universe is narrowed.
+        only = parse_venues(venues_spec, cfg.venues)
+        if only:
+            before = len(rows)
+            rows = only_venues(rows, only)
+            print(f"--venues {'|'.join(only)}: {len(rows)} of {before} rows")
+            if not rows:
+                print("no rows on those venues have reached their cutoff")
+                return 0
 
         if not rows:
             print("no venue has reached its cutoff yet - nothing to publish")
@@ -1097,6 +1130,17 @@ def run(envs_spec: str) -> int:
         print(f"FATAL {e}", file=sys.stderr)
         return 1
 
+    #  A NARROWED RUN NEVER PUBLISHES, and this is not a convenience.  The
+    #  output file is a REPLACEMENT, not a merge: copying a Korea-only file
+    #  to Prod would delete every other market's limits from the feed.  So
+    #  --venues writes OUT_TEMP for reading and refuses to copy, whatever
+    #  environments were named on the command line.
+    if only and envs:
+        print(f"--venues was given, so NOT publishing to "
+              f"{', '.join(envs)} - a partial file would replace every "
+              f"other market's rows, not add to them.", file=sys.stderr)
+        envs = []
+
     targets = {"Test": OUT_TEST, "Pilot": OUT_PILOT, "Prod": OUT_PROD}
     failures = copy_to_envs(OUT_TEMP, envs, targets)
     if failures:
@@ -1340,7 +1384,7 @@ def demo() -> int:
     return 0
 
 
-def kdb_check(sample: int = 5) -> int:
+def kdb_check(sample: int = 5, venues_spec: str = "") -> int:
     """Exercise ONLY the kdb path, verbosely, on a handful of names.
 
     A real run spends its first minutes fetching sixteen thousand names from
@@ -1379,7 +1423,16 @@ def kdb_check(sample: int = 5) -> int:
     #  question and a made-up ticker would not exercise them.
     now = dt.time(23, 59, 59)
     rows, _ = crosscode.load(CROSSCODE_PATH, cfg.venues, now)
-    _, to_compute = cfg.by_source(rows)
+    only = parse_venues(venues_spec, cfg.venues)
+    if only:
+        rows = only_venues(rows, only)
+        print(f"--venues {'|'.join(only)}: {len(rows)} rows")
+    #  by_source puts everything on the ask side now that every venue is
+    #  Source=bloomberg, so the kdb path is checked against the rows that
+    #  would FALL BACK to it rather than against an empty list.
+    asked, to_compute = cfg.by_source(rows)
+    to_compute = to_compute + [
+        r for r in asked if cfg.venues[r.venue_id].no_data_fallback]
     if not to_compute:
         print("\nno computed rows in the crosscode")
         return 1
@@ -1505,6 +1558,13 @@ def main(argv=None) -> int:
     p.add_argument("--report", default=COMPARE_REPORT, metavar="CSV",
                    help=f"where --compare writes every difference "
                         f"(default {COMPARE_REPORT})")
+    p.add_argument("--venues", default="", metavar="VENUE|VENUE",
+                   help="work on these venues only, pipe separated, e.g. "
+                        '"KSC-MAIN|KOE-MAIN". Narrows a real run, a '
+                        "--compare and a --kdb-check. A narrowed run does "
+                        "NOT publish: the output file replaces rather than "
+                        "merges, so a partial one would delete every other "
+                        "market's rows.")
     p.add_argument("--kdb-check", action="store_true",
                    help="exercise ONLY the kdb path, verbosely, on a few "
                         "names. No Bloomberg, no files written.")
@@ -1521,7 +1581,7 @@ def main(argv=None) -> int:
     _apply_local_settings()
 
     if a.kdb_check:
-        return kdb_check(a.sample)
+        return kdb_check(a.sample, a.venues)
 
     if a.compare:
         def read(path):
@@ -1532,14 +1592,25 @@ def main(argv=None) -> int:
                 f"nothing to compare against: {OUT_TEMP} does not exist.\n"
                 "--compare diffs the LAST run's output, it does not run the "
                 "job.  Run it first.")
-        records = differences(read(a.compare), read(OUT_TEMP))
+        def keep(rows):
+            #  The output carries the venue in a column, so the same
+            #  narrowing works on a file nobody is going to re-run.
+            return ([r for r in rows if r.get("Venue") in set(a.venues.split("|"))]
+                    if a.venues else rows)
+
+        old_rows, new_rows = read(a.compare), read(OUT_TEMP)
+        if a.venues:
+            print(f"--venues {a.venues}: comparing "
+                  f"{len(keep(old_rows))} old and {len(keep(new_rows))} new "
+                  f"rows of {len(old_rows)} and {len(new_rows)}")
+        records = differences(keep(old_rows), keep(new_rows))
         for d in records:
             print(_line(d))
         print(f"\n{len(records)} difference(s)")
         print(f"written to {write_compare_report(a.report, records)}")
         return 0
 
-    return run(a.envs)
+    return run(a.envs, a.venues)
 
 
 # =============================================================================
@@ -1839,6 +1910,35 @@ def self_test() -> int:
             "KODEX 200 Futures Inverse 2X",
             "KODEX 200 FUTURES INVERSE 2x")],
           [True] * 7)
+
+    print("\nnarrowing a run to one venue or several")
+    check("pipe separated, like the environments beside it",
+          parse_venues("KSC-MAIN|KOE-MAIN", cfg.venues),
+          ["KSC-MAIN", "KOE-MAIN"])
+    check("blank means every venue, which is what a normal run passes",
+          parse_venues("", cfg.venues), [])
+    check("whitespace and empty segments are forgiven",
+          parse_venues(" KSC-MAIN | ", cfg.venues), ["KSC-MAIN"])
+    try:
+        parse_venues("KSC-MAIM", cfg.venues)
+        typo = "no error"
+    except ValueError as e:
+        typo = str(e)
+    check("A TYPO IS REFUSED BY NAME - silently matching nothing would look "
+          "exactly like a market with no rows, which is the one thing this "
+          "job must not be quiet about",
+          typo.startswith("unknown venue(s) ['KSC-MAIM']"), True)
+    check("and the error lists what markets.csv does have, so the right "
+          "spelling is in front of you",
+          "KSC-MAIN" in typo, True)
+    narrow = [row("A.KS", "A KP", "A.KR", "KSC-MAIN"),
+              row("B.KQ", "B KQ", "B.KR", "KOE-MAIN"),
+              row("C.T", "C JT", "C.JP", "TYO-MAIN")]
+    check("only the named venues survive",
+          [r.ric for r in only_venues(narrow, ["KSC-MAIN", "KOE-MAIN"])],
+          ["A.KS", "B.KQ"])
+    check("and no filter keeps everything, rather than nothing",
+          len(only_venues(narrow, [])), 3)
 
     print("\nmeasuring the band Bloomberg published against the close")
     #  Korea's own numbers: 5150 close, 3610/6690 published.  The ratio is
