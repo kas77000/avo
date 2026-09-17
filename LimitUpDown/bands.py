@@ -76,6 +76,27 @@ class BandError(Exception):
         self.detail = detail
 
 
+def marker_matches(marker: str, name: str) -> bool:
+    """Is this marker a WORD of this name?
+
+    Substring matching would make "2x" match anything containing it and
+    "leverage" match Coverage Analytics, so the marker has to sit between
+    separators.  Case folded, because the exchange name is whatever the
+    feed stored - Leverage, leverage and LEVERAGE are one product.
+
+    Shared with kdbclose.is_leveraged so that "this name is special" and
+    "this is the row for it" can never disagree."""
+    if not marker:
+        return True
+    low = f" {(name or '').lower()} "
+    seps = " -()/,."
+    for a in seps:
+        for b in seps:
+            if f"{a}{marker}{b}" in low:
+                return True
+    return False
+
+
 def select_tier(tiers, ticker: str, ref: Decimal,
                 name: str = "") -> Optional[Tier]:
     """Name marker, then prefix, then floor.
@@ -89,9 +110,8 @@ def select_tier(tiers, ticker: str, ref: Decimal,
 
     An empty marker or prefix is the venue default and matches anything, so
     a venue with no special rows behaves exactly as it always did."""
-    low = (name or "").lower()
     matching = [t for t in tiers
-                if not t.name_marker or t.name_marker in low]
+                if marker_matches(t.name_marker, name)]
     if not matching:
         return None
     strongest = max(len(t.name_marker) for t in matching)

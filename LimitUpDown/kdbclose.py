@@ -49,6 +49,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
+import bands
 import ticks
 
 #  What we need, and nothing else.  equity_master carries a lot more; asking
@@ -454,12 +455,7 @@ def is_leveraged(name: str) -> bool:
 
     Then matched on word-ish boundaries, so a company that merely contains
     the letters - Coverage Analytics - is not caught."""
-    low = f" {(name or '').lower()} "
-    for m in LEVERAGE_MARKERS:
-        for sep in (" ", "-", "(", ")", ",", "."):
-            if f"{sep}{m} " in low or f" {m}{sep}" in low:
-                return True
-    return False
+    return any(bands.marker_matches(m, name) for m in LEVERAGE_MARKERS)
 
 
 def _id_text(value) -> str:

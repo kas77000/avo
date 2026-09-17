@@ -1740,24 +1740,54 @@ def self_test() -> int:
     check("nothing is excluded now that the band is written down",
           lev_exc, [])
 
-    #  A marker the venue has NO row for is still refused.  60% is Korea's
-    #  answer for "leverage"; it is not established for an inverse, which
-    #  may track -1x and get the ordinary band.
+    #  THE MULTIPLE IS THE SIGNAL, NOT THE WORD "INVERSE".  Real names, as
+    #  a run's excluded.csv listed them: a -1x product moves like any other
+    #  and takes the ordinary band, a +/-2x takes twice it.  The last of
+    #  these carries no "inverse" at all, which is why a rule keyed on that
+    #  word would have missed it.
+    real = ["SAMSUNG KODEX Inverse ETF",
+            "Samsung KODEX 200 Futures Inverse 2X ETF",
+            "Hanwha PLUS F-Samsung Electronics Single Stock Inverse 2X",
+            "Shinhan Securities Shinhan Bloomberg -2X WTI Futures ETN B 94",
+            "Shinhan SOL Shipbuilding TOP3 Plus leverage ETF"]
+    real_rows = [row(f"X{i}.KS", f"X{i} KP", f"X{i}.KR", "KSC-MAIN")
+                 for i in range(len(real))]
+    got, _ = price_computed(
+        cfg, real_rows, {f"X{i}.KS": Decimal("8025") for i in range(5)},
+        {f"X{i}.KS": etf_ladder for i in range(5)},
+        {f"X{i}.KS": n for i, n in enumerate(real)})
+    check("a plain inverse takes the ORDINARY band - it tracks -1x and "
+          "moves no further than anything else",
+          (got[0]["LimitUpPrice"], got[0]["LimitDownPrice"]),
+          ("10430", "5620"))
+    check("an Inverse 2X takes twice it, because 'inverse 2x' is the "
+          "longer marker and select_tier prefers the most specific",
+          [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in got[1:3]],
+          [("12835", "3215"), ("12835", "3215")])
+    check("AND SO DOES A -2X THAT NEVER SAYS 'INVERSE' - the multiple is "
+          "the signal, and a rule keyed on the word would have missed it",
+          (got[3]["LimitUpPrice"], got[3]["LimitDownPrice"]),
+          ("12835", "3215"))
+    check("leverage means 2x in Korea and lands on the same band",
+          (got[4]["LimitUpPrice"], got[4]["LimitDownPrice"]),
+          ("12835", "3215"))
+
+    #  A multiple nobody has written a row for is STILL refused.
     inv_names = dict(lev_names)
-    inv_names["0080Y0.KS"] = "KODEX 200 Futures Inverse"
+    inv_names["0080Y0.KS"] = "SOMEBODY KODEX 3X Futures ETN"
     _, inv_exc = price_computed(
         cfg, lev, {"0080Y0.KS": Decimal("8025"),
                    "005930.KS": Decimal("8025")},
         {"005930.KS": ladder, "0080Y0.KS": etf_ladder}, inv_names)
-    check("AN INVERSE IS STILL REFUSED, because bands.csv has a row for "
-          "leverage and none for that - what is written down is used and "
-          "what is not is reported, never guessed",
+    check("A 3X IS STILL REFUSED, because bands.csv has rows for 2x and "
+          "none for that - what is written down is used and what is not is "
+          "reported, never guessed",
           [(e.reason, [d.bbg for d in e.rows]) for e in inv_exc],
           [("leveraged or inverse product with no band of its own",
             ["0080Y0 KP"])])
     check("the refusal carries the name that caused it, so it can be "
           "checked rather than taken on trust",
-          inv_exc[0].rows[0].detail, "KODEX 200 Futures Inverse")
+          inv_exc[0].rows[0].detail, "SOMEBODY KODEX 3X Futures ETN")
     check("and it has its own word in the excluded report",
           missing_token("leveraged or inverse product with no band of its "
                         "own"), "leveraged")
