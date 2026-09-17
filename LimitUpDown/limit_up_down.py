@@ -105,7 +105,18 @@ OUT_TEMP = str(Path(__file__).resolve().parent / "out" / "limitUpDown.csv")
 #  Where --compare writes its full list of differences.  The printed lines
 #  are a summary; this is the record.
 COMPARE_REPORT = "compare-report.csv"
-COMPARE_COLUMNS = ["status", "venue", "code", "column", "old", "new"]
+COMPARE_COLUMNS = ["status", "venue", "code", "close", "column", "old", "new"]
+
+#  The close each computed limit was worked out from, written beside the
+#  output so that --compare can say it.  The output file itself cannot: its
+#  seven columns are the ATS contract and a close is not one of them.
+#
+#  BLANK MEANS BLOOMBERG PRICED IT.  A name with no close here took its
+#  limits from B-PIPE rather than from a band, so the column also says
+#  WHICH path produced the row - which is the first thing you want when two
+#  files disagree about a price.
+CLOSES_CSV = "closes.csv"
+CLOSES_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Close"]
 OUT_TEST = ""
 OUT_PILOT = ""
 OUT_PROD = ""
@@ -326,6 +337,42 @@ def write_excluded_csv(path, excluded):
         writer.writeheader()
         writer.writerows(rows)
     return path, len(rows)
+
+
+def write_closes_csv(path, rows, closes):
+    """The close behind every limit this run COMPUTED.
+
+    Only the computed ones: a name Bloomberg priced has no close behind its
+    limits, and writing one would suggest the band was used when it was
+    not."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CLOSES_HEADER,
+                                lineterminator="\n")
+        writer.writeheader()
+        for r in rows:
+            ref = closes.get(r.ric)
+            if ref is None:
+                continue
+            writer.writerow({"ReutersCode": r.ric, "BloombergCode": r.bbg,
+                             "Venue": r.venue_id, "Close": _plain(ref)})
+            n += 1
+    return path, n
+
+
+def read_closes_csv(path):
+    """RIC -> close, or {} when the file is not there.
+
+    ABSENT IS NOT AN ERROR: a --compare against two files somebody sent you
+    has no run behind it, and a blank column is the honest answer."""
+    path = Path(path)
+    if not path.is_file():
+        return {}
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        return {r["ReutersCode"]: r.get("Close", "")
+                for r in csv.DictReader(fh) if r.get("ReutersCode")}
 
 
 def write_entitlement_csv(path, excluded):
@@ -746,7 +793,7 @@ def _same_price(a, b) -> bool:
         return False
 
 
-def differences(old_rows, new_rows):
+def differences(old_rows, new_rows, closes=None):
     """Differences between two output files, worst first: venue row counts,
     names present in one only, then prices that moved.  The cutover
     instrument - run it against yesterday's file, or against v1's.
@@ -754,6 +801,7 @@ def differences(old_rows, new_rows):
     One record per difference, so the CSV report is the complete list.  The
     printed lines are rendered from these by compare(), which keeps the two
     from ever disagreeing about what was found."""
+    closes = closes or {}
     out = []
     old = {r["#ReutersCode"]: r for r in old_rows}
     new = {r["#ReutersCode"]: r for r in new_rows}
@@ -765,15 +813,17 @@ def differences(old_rows, new_rows):
         n = sum(1 for r in new_rows if r["Venue"] == v)
         if o != n:
             out.append({"status": "rowcount", "venue": v, "code": "",
-                        "column": "", "old": o, "new": n})
+                        "close": "", "column": "", "old": o, "new": n})
 
     for ric in sorted(set(old) - set(new)):
         out.append({"status": "only_in_old", "venue": old[ric].get("Venue", ""),
-                    "code": _code(old[ric], ric), "ric": ric, "column": "",
+                    "code": _code(old[ric], ric), "ric": ric,
+                    "close": closes.get(ric, ""), "column": "",
                     "old": "", "new": ""})
     for ric in sorted(set(new) - set(old)):
         out.append({"status": "only_in_new", "venue": new[ric].get("Venue", ""),
-                    "code": _code(new[ric], ric), "ric": ric, "column": "",
+                    "code": _code(new[ric], ric), "ric": ric,
+                    "close": closes.get(ric, ""), "column": "",
                     "old": "", "new": ""})
 
     for ric in sorted(set(old) & set(new)):
@@ -783,6 +833,7 @@ def differences(old_rows, new_rows):
                 out.append({"status": "price",
                             "venue": new[ric].get("Venue", ""),
                             "code": _code(new[ric], ric), "ric": ric,
+                            "close": closes.get(ric, ""),
                             "column": col, "old": a, "new": b})
     return out
 
@@ -1169,6 +1220,15 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
     #  leave the operator unable to tell whether the run worked at all.
     #  That is exactly what happened on 2026-09-05.
     try:
+        computed_rows = compute + retry
+        cl_path, cl_count = write_closes_csv(
+            Path(OUT_TEMP).parent / CLOSES_CSV, computed_rows, closes)
+        report.append(f"  closes      {cl_count:6d}  used for a computed "
+                      f"limit, written to {cl_path}")
+    except Exception as e:                                  # noqa: BLE001
+        report.append(f"  closes csv FAILED: {type(e).__name__}: {e}")
+
+    try:
         exc_path, exc_count = write_excluded_csv(
             Path(OUT_TEMP).parent / EXCLUDED_CSV, excluded)
         report.append(f"  excluded    {exc_count:6d}  names with their "
@@ -1325,11 +1385,13 @@ def demo() -> int:
         [(Decimal(p), Decimal(t)) for p, t in
          (("2000", "1"), ("5000", "5"), ("20000", "10"), ("50000", "50"),
           ("200000", "100"), ("500000", "500"), ("1000001000", "1000"))])
-    #  The ETF is on Korea's flat 5 tick, not the equity ladder - kdb
-    #  gives it its own ticksizeids row, and it is what makes 12,840 round
-    #  to Bloomberg's 12,835 rather than to 12,830.
+    #  The ETF is on table 10392 - 1 below 2,001 and a flat 5 above - not
+    #  the equity ladder.  kdb gives it its own ticksizeids row; nothing
+    #  here decides which table a name is on.
+    KR_10392 = ticks.from_kdb([(Decimal("2001"), Decimal(1)),
+                               (Decimal("1000000005"), Decimal(5))])
     ladders = {"005930.KS": KR_6132, "000250.KQ": KR_6132,
-               "0080Y0.KS": [(Decimal(0), Decimal(5))]}
+               "0080Y0.KS": KR_10392}
 
     #  What equity_master's LONG_COMP_NAME says.  0080Y0 KP is real: it
     #  closed at 8,025 and Bloomberg published 12,835/3,215, which is
@@ -1603,7 +1665,11 @@ def main(argv=None) -> int:
             print(f"--venues {a.venues}: comparing "
                   f"{len(keep(old_rows))} old and {len(keep(new_rows))} new "
                   f"rows of {len(old_rows)} and {len(new_rows)}")
-        records = differences(keep(old_rows), keep(new_rows))
+        used = read_closes_csv(Path(OUT_TEMP).parent / CLOSES_CSV)
+        if not used:
+            print(f"no {CLOSES_CSV} beside {OUT_TEMP}, so the close column "
+                  f"will be blank - it is written by a real run")
+        records = differences(keep(old_rows), keep(new_rows), used)
         for d in records:
             print(_line(d))
         print(f"\n{len(records)} difference(s)")
@@ -1806,11 +1872,12 @@ def self_test() -> int:
     lev_names = {"0080Y0.KS": "Shinhan SOL Shipbuilding TOP3 Plus leverage "
                               "ETF",
                  "005930.KS": "Samsung Electronics Co Ltd"}
-    #  Korea prices ETFs on a FLAT 5 tick, not the equity ladder, and a
-    #  leveraged ETF has its own ticksizeids row saying so.  It matters
-    #  here: on the equity ladder 12840 is on a 10 tick and strict rounding
-    #  would publish 12830, where Bloomberg says 12835.
-    etf_ladder = [(Decimal(0), Decimal(5))]
+    #  Korea's ETF/ETN ladder, table 10392, as ticksizetbl carries it: two
+    #  tiers where an equity has seven, and a flat 5 above 2,000.  It is
+    #  why every discrepancy on these names was exactly 5 - they all trade
+    #  above 2,000, so they are all on the same tick.
+    etf_ladder = ticks.from_kdb([(Decimal("2001"), Decimal(1)),
+                                 (Decimal("1000000005"), Decimal(5))])
     lev_out, lev_exc = price_computed(
         cfg, lev, {"0080Y0.KS": Decimal("8025"), "005930.KS": Decimal("8025")},
         {"005930.KS": ladder, "0080Y0.KS": etf_ladder}, lev_names)
@@ -2162,13 +2229,13 @@ def self_test() -> int:
           "people who work in those, and A JT says more than A.T",
           recs[0],
           {"status": "price", "venue": "TYO-MAIN", "code": "A JT",
-           "ric": "A.T", "column": "LimitUpPrice",
+           "ric": "A.T", "close": "", "column": "LimitUpPrice",
            "old": "3833", "new": "3900"})
     check("a missing name carries its venue too, so the report reads by "
           "market without joining anything",
           differences(bbg, bbg[:1])[1],
           {"status": "only_in_old", "venue": "TYO-MAIN", "code": "B JT",
-           "ric": "B.T", "column": "", "old": "", "new": ""})
+           "ric": "B.T", "close": "", "column": "", "old": "", "new": ""})
     check("a file with no BloombergCode column falls back to the RIC, "
           "because an unidentified row in a cutover report is worse than "
           "one identified the old way",
@@ -2188,9 +2255,33 @@ def self_test() -> int:
         check("the report is the columns, then a row per difference",
               p.read_text(encoding="utf-8").splitlines(),
               [",".join(COMPARE_COLUMNS),
-               "price,TYO-MAIN,A JT,LimitUpPrice,3833,3900"])
+               "price,TYO-MAIN,A JT,,LimitUpPrice,3833,3900"])
         check("and the RIC the record also carries is not one of them",
               "A.T" in p.read_text(encoding="utf-8"), False)
+
+    print("\nthe close behind a computed limit")
+    with_close = differences(
+        bbg, [dict(bbg[0], LimitUpPrice="3900"), bbg[1]], {"A.T": "3833"})
+    check("A COMPUTED LIMIT CARRIES THE CLOSE IT CAME FROM, so a price "
+          "that moved can be checked against the number behind it without "
+          "a second lookup",
+          with_close[0]["close"], "3833")
+    check("and a name the run had no close for stays blank, which is how "
+          "the column also says Bloomberg priced this one",
+          differences(bbg, [dict(bbg[0], LimitUpPrice="3900"), bbg[1]],
+                      {})[0]["close"], "")
+    with tempfile.TemporaryDirectory() as d:
+        path, n = write_closes_csv(
+            Path(d) / CLOSES_CSV,
+            [_row("A.T", "A JT", "A.JP", "TYO-MAIN"),
+             _row("Z.T", "Z JT", "Z.JP", "TYO-MAIN")],
+            {"A.T": Decimal("3833")})
+        check("only the names a close was actually held for are written - "
+              "a Bloomberg-priced row has no close behind its limits",
+              (n, read_closes_csv(path)), (1, {"A.T": "3833"}))
+        check("and a missing file is not an error: a compare between two "
+              "files somebody sent you has no run behind it",
+              read_closes_csv(Path(d) / "nope.csv"), {})
         write_compare_report(p, [])
         check("nothing to report still writes the header",
               p.read_text(encoding="utf-8").splitlines(),

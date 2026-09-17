@@ -312,11 +312,22 @@ the CSV is the record, and it sorts and filters when a cutover turns up more
 than fits on a screen:
 
 ```
-status,venue,code,column,old,new
-rowcount,SSE-MAIN,,,0,1
-only_in_old,TSE-MAIN,6758 JT,,,
-price,TSE-MAIN,7203 JT,LimitUpPrice,3900,3833.0
+status,venue,code,close,column,old,new
+rowcount,SSE-MAIN,,,,0,1
+only_in_old,TSE-MAIN,6758 JT,,,,
+price,KSC-MAIN,0000D0 KP,8750,LimitUpPrice,11375,11370
+price,TSE-MAIN,7203 JT,,LimitUpPrice,3900,3833.0
 ```
+
+**`close` is the price a computed limit came from**, so a disagreement can be
+checked against the number behind it without a second lookup. It is joined from
+`out/closes.csv`, which a real run writes beside the output — the output file
+itself cannot carry it, since its seven columns are the ATS contract.
+
+**Blank means Bloomberg priced that row**, so the column also says *which path*
+produced it, which is usually the first thing you want when two files disagree.
+A `--compare` between two files with no run behind them leaves it blank
+throughout and says so.
 
 **`code` is the BloombergCode**, because that is what the report is read in.
 The comparison still *keys* on `#ReutersCode` — that is what the two files
