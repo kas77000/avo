@@ -1939,9 +1939,11 @@ def self_test() -> int:
         {f"M{i}.KS": n for i, n in enumerate(mults)})
     check("THE MULTIPLE SETS THE BAND, and it outranks the word `inverse` "
           "however much longer that is - on length alone a 3x would take "
-          "the 1x row and publish at a third of its real width",
+          "the 1x row and publish at a third of its real width.  0.5x "
+          "takes the ORDINARY 30%: KRX widens only ABOVE 1x, so a half is "
+          "not a half band",
           [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in m_out],
-          [("9230", "6820"), ("12840", "3210"), ("15250", "805")])
+          [("10435", "5620"), ("12840", "3210"), ("15250", "805")])
     check("AND A MULTIPLE NOBODY HAS WRITTEN A ROW FOR IS REFUSED, not "
           "quietly handed the default - 4X would otherwise match no marker "
           "at all and publish at a quarter of its width",

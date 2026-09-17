@@ -4,13 +4,13 @@ JKT-MAIN,pct,,200,0.25,0.25,,
 JKT-MAIN,pct,,5000,0.20,0.20,,
 KOE-MAIN,pct,,0,0.30,0.30,,
 KOE-MAIN,pct,,0,0.60,0.60,leverage,nearest
-KOE-MAIN,pct,,0,0.15,0.15,0.5x,nearest
+KOE-MAIN,pct,,0,0.30,0.30,0.5x,nearest
 KOE-MAIN,pct,,0,0.60,0.60,2x,nearest
 KOE-MAIN,pct,,0,0.90,0.90,3x,nearest
 KOE-MAIN,pct,,0,0.30,0.30,inverse,nearest
 KSC-MAIN,pct,,0,0.30,0.30,,
 KSC-MAIN,pct,,0,0.60,0.60,leverage,nearest
-KSC-MAIN,pct,,0,0.15,0.15,0.5x,nearest
+KSC-MAIN,pct,,0,0.30,0.30,0.5x,nearest
 KSC-MAIN,pct,,0,0.60,0.60,2x,nearest
 KSC-MAIN,pct,,0,0.90,0.90,3x,nearest
 KSC-MAIN,pct,,0,0.30,0.30,inverse,nearest
