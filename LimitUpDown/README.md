@@ -432,7 +432,7 @@ Nine countries, nineteen venues:
 | Korea | `KSC-MAIN` (KP, KOSPI) | 07:30 | computed, ±30%, rounded on kdb's ladder |
 | Korea | `KOE-MAIN` (KQ, KOSDAQ) | 07:30 | computed, ±30%, rounded on kdb's ladder |
 | Malaysia | `KLS-MAIN` | 07:59 | computed, ±30% |
-| Taiwan | `TAI-MAIN` | 07:59 | computed, ±10% |
+| Taiwan | `TAI-MAIN` | 07:59 | computed, ±10%, rounded on kdb's ladder |
 | Indonesia | `JKT-MAIN` | 07:59 | computed, tiered + tick |
 | China | `SHA`, `SHH`, `SSC`, `SZA`, `SHZ`, `SZC` | 09:03 | computed, ±10% / ±20% |
 | Philippines | `PHS-MAIN` | 09:03 | computed, ±30% |

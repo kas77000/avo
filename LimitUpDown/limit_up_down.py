@@ -1848,18 +1848,25 @@ def self_test() -> int:
           (cfg.venues["JKT-MAIN"].tick_from,
            cfg.venues["KSC-MAIN"].tick_from), ("close", "coarser"))
     check("ONLY A VENUE THAT ROUNDS CARRIES IT, because only a venue that "
-          "rounds resolves a tick at all - and coarser is Bloomberg's "
-          "answer for KOREA, not a rule anyone has checked for Malaysia, "
-          "Taiwan, China or the Philippines",
+          "rounds resolves a tick at all - and each of these was turned on "
+          "against a name whose official limits we had, not by analogy "
+          "with its neighbour",
           sorted(v.venue_id for v in cfg.venues.values()
                  if v.tick_from != "close"),
-          ["KOE-MAIN", "KSC-MAIN"])
-    check("BOTH KOREAN VENUES ROUND AND EACH HAS ITS OWN VERIFIED NAME - "
-          "KSC-MAIN is KOSPI and 000020 KP, KOE-MAIN is KOSDAQ and "
-          "000250 KQ - and Indonesia is the third, on the R script's rule",
+          ["KOE-MAIN", "KSC-MAIN", "TAI-MAIN"])
+    check("EVERY ROUNDING VENUE HAS ITS OWN VERIFIED NAME - KSC-MAIN is "
+          "KOSPI and 000020 KP, KOE-MAIN is KOSDAQ and 000250 KQ, TAI-MAIN "
+          "is 3593 TT, and Indonesia is the R script's",
           sorted(v.venue_id for v in cfg.venues.values()
                  if v.rounding != "none"),
-          ["JKT-MAIN", "KOE-MAIN", "KSC-MAIN"])
+          ["JKT-MAIN", "KOE-MAIN", "KSC-MAIN", "TAI-MAIN"])
+    check("MALAYSIA, THE PHILIPPINES AND CHINA STILL PUBLISH THE RAW BAND, "
+          "and would show the same symptom Taiwan just did if their "
+          "exchanges round - nobody has checked one of their names",
+          sorted(v.venue_id for v in cfg.venues.values()
+                 if v.rounding == "none" and v.venue_id in cfg.bands),
+          ["KLS-MAIN", "PHS-MAIN", "SHA-MAIN", "SHH-MAIN", "SHZ-MAIN",
+           "SSC-MAIN", "SZA-MAIN", "SZC-MAIN"])
     check("A NAME KDB HAS NO LADDER FOR IS REPORTED, NOT PUBLISHED "
           "UNROUNDED - an unrounded limit is one the exchange will reject",
           [d.ric for d in
@@ -1979,6 +1986,31 @@ def self_test() -> int:
             "KODEX 200 Futures Inverse 2X",
             "KODEX 200 FUTURES INVERSE 2x")],
           [True] * 7)
+
+    print("\nTaiwan, where the two legs sit either side of a tier")
+    #  3593 TT, table 6207, close 9.9.  The up leg crosses 10 into the 0.05
+    #  tick while the down leg stays under it on 0.01 - the case that shows
+    #  a venue publishing its raw band, because Taiwan was rounding='none'
+    #  and 10.89 looks exactly like a price on a 0.01 tick.
+    tw = ticks.from_kdb([(Decimal(p), Decimal(t)) for p, t in
+                         (("10.01", "0.01"), ("50.05", "0.05"),
+                          ("100.1", "0.1"), ("500.5", "0.5"),
+                          ("1001", "1"), ("100000005", "5"))])
+    tw_out, _ = price_computed(
+        cfg, [row("3593.TW", "3593 TT", "3593.TW", "TAI-MAIN")],
+        {"3593.TW": Decimal("9.9")}, {"3593.TW": tw},
+        {"3593.TW": "Some Taiwan Co"})
+    check("THE UP LEG TAKES THE 0.05 IT LANDS ON, not the 0.01 the close "
+          "sits on: 10.89 floors to the official 10.85",
+          tw_out[0]["LimitUpPrice"], "10.85")
+    check("and the down leg keeps the 0.01, because 8.91 never leaves that "
+          "tier - one band, two ticks",
+          tw_out[0]["LimitDownPrice"], "8.91")
+    check("Taiwan rounds now, which it did not before - a venue on "
+          "rounding=none publishes the raw band and 10.89 looks exactly "
+          "like a price on a 0.01 tick",
+          (cfg.venues["TAI-MAIN"].rounding,
+           cfg.venues["TAI-MAIN"].tick_from), ("inward", "coarser"))
 
     print("\nnarrowing a run to one venue or several")
     check("pipe separated, like the environments beside it",
