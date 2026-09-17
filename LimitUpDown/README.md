@@ -603,6 +603,20 @@ through to the blank row and publish at a quarter of its width. It reports as
 Markers match on word boundaries, so `MATRIX 2XL` is not a 2x product and
 `Coverage Analytics` is not leveraged.
 
+**These names round to the NEAREST tick, not inward.** `bands.csv` has a
+`Rounding` column per tier; blank means the venue's mode, so an ordinary Korean
+name still rounds inward and only the ETF/ETN family differs. Four values off a
+live run pin it:
+
+```
+66367.6 -> 66370      35736.4 -> 35735
+ 1527.6 ->  1530       1522.4 ->  1520
+```
+
+Inward sends every one of them the other way, and `35736.4` is what rules out a
+10 tick as well — nearest would make it 35740 there, and the exchange publishes
+35735. The 5 comes from table 10392, flat above 2,000.
+
 Korea prices a leveraged product at twice the ordinary band. `0080Y0 KP` closed
 at 8,025 and the exchange published 12,835/3,215 — ±60% where the plain row says
 30. Nothing in the *ticker* says so: its crosscode `Type` is `ETF`, identical to

@@ -1911,9 +1911,11 @@ def self_test() -> int:
         {f"X{i}.KS": etf_ladder for i in range(5)},
         {f"X{i}.KS": n for i, n in enumerate(real)})
     check("a plain inverse takes the ORDINARY band - it tracks -1x and "
-          "moves no further than anything else",
+          "moves no further than anything else - but rounds to the NEAREST "
+          "tick like the rest of its family: 10432.50 goes to 10435, not "
+          "down to 10430",
           (got[0]["LimitUpPrice"], got[0]["LimitDownPrice"]),
-          ("10430", "5620"))
+          ("10435", "5620"))
 
     #  EVERY MULTIPLE KOREA WRITES, on one 8025 close, so the ladder of
     #  bands reads as a ladder.  0.5x and 3x were both being priced at 30%
@@ -1932,7 +1934,7 @@ def self_test() -> int:
           "however much longer that is - on length alone a 3x would take "
           "the 1x row and publish at a third of its real width",
           [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in m_out],
-          [("9225", "6825"), ("12840", "3210"), ("15245", "805")])
+          [("9230", "6820"), ("12840", "3210"), ("15250", "805")])
     check("AND A MULTIPLE NOBODY HAS WRITTEN A ROW FOR IS REFUSED, not "
           "quietly handed the default - 4X would otherwise match no marker "
           "at all and publish at a quarter of its width",

@@ -275,6 +275,11 @@ def load(config_dir, tsr_dir=None) -> Config:
             if vid not in venues:
                 raise ConfigError(
                     f"bands.csv: venue {vid} is not defined in markets.csv")
+            tier_rounding = (r.get("Rounding") or "").strip()
+            if tier_rounding and tier_rounding not in VALID_ROUNDING:
+                raise ConfigError(
+                    f"bands.csv {vid}: Rounding {tier_rounding!r} is not "
+                    f"one of {VALID_ROUNDING} (blank means the venue's)")
             kind = (r.get("Kind") or "").strip()
             if kind not in VALID_KIND:
                 raise ConfigError(
@@ -289,7 +294,8 @@ def load(config_dir, tsr_dir=None) -> Config:
                 down=_decimal(r["Down"], f"bands.csv {vid} Down"),
                 #  Lower-cased here so the file may write it however reads
                 #  best - select_tier folds the exchange name to match.
-                name_marker=(r.get("NameMarker") or "").strip().lower()))
+                name_marker=(r.get("NameMarker") or "").strip().lower(),
+                rounding=tier_rounding))
 
     #  A VENUE-WIDE LADDER IS THE EXCEPTION, NOT THE RULE.  Only Indonesia
     #  has one, because only Indonesia's ladder is the ATS's own file and

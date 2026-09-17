@@ -62,6 +62,11 @@ class Tier(NamedTuple):
     #  does.  Korea prices a leveraged product at twice the ordinary band
     #  and nothing in the TICKER says so, which is why this exists.
     name_marker: str = ""
+    #  How THIS tier rounds, when that differs from the venue's.  '' means
+    #  the venue's mode.  Korea rounds an ordinary name inward and a
+    #  leveraged one to the NEAREST tick, and the two cannot both be a
+    #  property of the venue.
+    rounding: str = ""
 
 
 class BandError(Exception):
@@ -223,7 +228,10 @@ def compute(tiers, ticker: str, ref: Decimal, tick,
     up, down = raw_band(tier, ref)
     if min_price is not None:
         down = max(down, min_price)      # floor first, THEN round
-    up, down = round_band(up, down, tick, rounding)
+    #  THE TIER MAY OVERRIDE THE VENUE.  Same precedence as everything else
+    #  here: the more specific rule wins, and a blank means "as the venue
+    #  does".
+    up, down = round_band(up, down, tick, tier.rounding or rounding)
     if not (up > down > 0):
         raise BandError(f"band is not sane: up={up} down={down}")
     return up, down
@@ -334,6 +342,27 @@ def self_test() -> int:
     check("the float trap: 1.15 over a 0.05 tick is 23 ticks, not 22",
           round_band(D("1.15"), D("1.15"), D("0.05"), "inward"),
           (D("1.15"), D("1.15")))
+
+    print("\na leveraged product rounds to the NEAREST tick, not inward")
+    #  Four values off a live run, on the 5 tick table 10392 gives these
+    #  names above 2,000.  Inward would send every one of them the other
+    #  way, and 35736.4 is what rules out a 10 tick: nearest would make it
+    #  35740 there, and the exchange publishes 35735.
+    for raw, want in (("66367.6", "66370"), ("35736.4", "35735"),
+                      ("1527.6", "1530"), ("1522.4", "1520")):
+        check(f"{raw} -> {want}",
+              round_band(D(raw), D(raw), D("5"), "nearest")[0], D(want))
+    check("inward would send it the other way, which is why this cannot be "
+          "the venue's mode - an ordinary Korean name still rounds inward",
+          round_band(D("66367.6"), D("66367.6"), D("5"), "inward")[0],
+          D("66365"))
+    check("A TIER OVERRIDES ITS VENUE, blank meaning the venue's own - the "
+          "same precedence as every other rule here",
+          (compute([Tier("pct", "", D(0), D("0.3"), D("0.3"), "", "nearest")],
+                   "X", D("8025"), D("5"), None, "inward"),
+           compute([Tier("pct", "", D(0), D("0.3"), D("0.3"))],
+                   "X", D("8025"), D("5"), None, "inward")),
+          ((D("10435"), D("5620")), (D("10430"), D("5620"))))
 
     print("\na band that already lands on its tick is LEFT ALONE")
     check("0000D0 KP: 8750 x 1.3 is 11375 exactly, on the 5 tick its table "
