@@ -443,6 +443,43 @@ Thailand and India are the two that took more than a config row — see above.
 
 ### Rounding, and where the tick comes from
 
+### The exchange's own calculation, for Korea and Taiwan
+
+`Rounding=krx` is not a rounding mode but the **three-step calculation KRX
+publishes**, and no amount of rounding a finished band reproduces it:
+
+```
+1.  range = base price x the limit percentage
+2.  TRUNCATE that range to the tick of the BASE PRICE      <- the step we lacked
+3.  multiply by the leverage multiple, then base +/- range,
+    each truncated to the tick of THAT price
+```
+
+> 가격제한폭은 기준가격에 100분의 30을 곱하여 산출한 금액이며, 호가가격단위 미만
+> 금액은 절사한다 — KRX
+
+Step 2 is why both legs are symmetric about the close: they move by the **same
+whole number of the base's ticks**. And step 3's order matters — `0080Y0 KP` at
+8025 gives `0.30 x 8025 = 2407.50`, truncated on its 5 tick to `2405`, doubled to
+`4810`, so `12835/3215`. Doubling *first* gives 4815 and 12840, which the
+exchange does not print.
+
+Verified against 19 names from a live compare against Bloomberg: 18 match on both
+legs, and the one that does not is off by a base price of 51052 against the
+51055 that reproduces its limit — a close difference, not a rounding one.
+
+`bands.csv` therefore carries the **ordinary 30% and the multiple separately**,
+as the regulation phrases it, rather than a pre-multiplied 60%:
+
+```
+KSC-MAIN,pct,,0,0.30,0.30,leverage,,2
+KSC-MAIN,pct,,0,0.30,0.30,3x,,3
+KSC-MAIN,pct,,0,0.30,0.30,inverse,,
+```
+
+Indonesia stays on `inward` — `LimitUpDown.r` rounds the finished band and has no
+step 2, and that is the authority for that market.
+
 **A band that already lands on a valid tick is published as it comes out.**
 `8750 × 1.3 = 11375` on a 5 tick stays 11375; rounding only moves a value that
 is not on the grid. That is what `floor`/`ceiling` already do and there is no

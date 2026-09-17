@@ -63,10 +63,14 @@ class Tier(NamedTuple):
     #  and nothing in the TICKER says so, which is why this exists.
     name_marker: str = ""
     #  How THIS tier rounds, when that differs from the venue's.  '' means
-    #  the venue's mode.  Korea rounds an ordinary name inward and a
-    #  leveraged one to the NEAREST tick, and the two cannot both be a
-    #  property of the venue.
+    #  the venue's mode.
     rounding: str = ""
+    #  The leverage/inverse multiple, ABSOLUTE.  KRX states its rule as
+    #  "the limit is 30%, and for products EXCEEDING +/-1x that 30% is
+    #  multiplied by the multiple" - so the tier carries the ordinary 30%
+    #  in up/down and the multiple separately, exactly as the regulation
+    #  phrases it.  1 for everything at or below 1x.
+    multiple: Decimal = Decimal(1)
 
 
 class BandError(Exception):
@@ -165,6 +169,10 @@ def raw_band(tier: Tier, ref: Decimal):
     raise BandError(f"unknown tier kind {tier.kind!r}")
 
 
+def _trunc(value: Decimal, tick: Decimal) -> Decimal:
+    return (value / tick).to_integral_value(ROUND_FLOOR) * tick
+
+
 def _tick_at(tick, price: Decimal, rounding: str):
     """The tick for one leg.
 
@@ -217,6 +225,38 @@ def round_band(up: Decimal, down: Decimal, tick, rounding: str):
             (down / dt).to_integral_value(ROUND_HALF_UP) * dt)
 
 
+def _krx_band(tier: Tier, ref: Decimal, tick, min_price):
+    """The exchange's own three-step calculation, not ours.
+
+        1. range = base price x the limit percentage
+        2. TRUNCATE THAT RANGE to the tick of the BASE PRICE
+        3. multiply by the leverage multiple, then base +/- range, each
+           truncated to the tick of THAT price
+
+    Step 2 is the one a naive implementation leaves out, and it is why
+    rounding the finished band - inward, nearest or otherwise - could never
+    reproduce the exchange's numbers.  The range is truncated BEFORE it is
+    applied, so both legs move by the same whole number of the base's
+    ticks.
+
+    Step 3's order matters too: the multiple is applied to the ALREADY
+    truncated range.  0080Y0 KP at 8025 is the name that shows it -
+    8025 x 0.30 = 2407.5, truncated on a 5 tick to 2405, doubled to 4810,
+    giving 12835, where doubling first gives 4815 and 12840.
+
+        KRX: 가격제한폭은 기준가격에 100분의 30을 곱하여 산출한 금액이며,
+             호가가격단위 미만 금액은 절사한다
+    """
+    at_ref = _tick_at(tick, ref, "krx")
+    up_range = _trunc(ref * tier.up, at_ref) * tier.multiple
+    down_range = _trunc(ref * tier.down, at_ref) * tier.multiple
+    up, down = ref + up_range, ref - down_range
+    if min_price is not None:
+        down = max(down, min_price)      # floor first, THEN truncate
+    return (_trunc(up, _tick_at(tick, up, "krx")),
+            _trunc(down, _tick_at(tick, down, "krx")))
+
+
 def compute(tiers, ticker: str, ref: Decimal, tick,
             min_price: Optional[Decimal], rounding: str, name: str = ""):
     if ref is None or ref <= 0:
@@ -225,13 +265,17 @@ def compute(tiers, ticker: str, ref: Decimal, tick,
     if tier is None:
         raise BandError("no band tier for the previous close",
                         detail=f"price {ref}")
-    up, down = raw_band(tier, ref)
-    if min_price is not None:
-        down = max(down, min_price)      # floor first, THEN round
     #  THE TIER MAY OVERRIDE THE VENUE.  Same precedence as everything else
     #  here: the more specific rule wins, and a blank means "as the venue
     #  does".
-    up, down = round_band(up, down, tick, tier.rounding or rounding)
+    mode = tier.rounding or rounding
+    if mode == "krx":
+        up, down = _krx_band(tier, ref, tick, min_price)
+    else:
+        up, down = raw_band(tier, ref)
+        if min_price is not None:
+            down = max(down, min_price)  # floor first, THEN round
+        up, down = round_band(up, down, tick, mode)
     if not (up > down > 0):
         raise BandError(f"band is not sane: up={up} down={down}")
     return up, down
@@ -343,27 +387,48 @@ def self_test() -> int:
           round_band(D("1.15"), D("1.15"), D("0.05"), "inward"),
           (D("1.15"), D("1.15")))
 
-    print("\na leveraged product rounds to the NEAREST tick, not inward")
-    #  Four values off a live run, on the 5 tick table 10392 gives these
-    #  names above 2,000.  Inward would send every one of them the other
-    #  way, and 35736.4 is what rules out a 10 tick: nearest would make it
-    #  35740 there, and the exchange publishes 35735.
-    for raw, want in (("66367.6", "66370"), ("35736.4", "35735"),
-                      ("1527.6", "1530"), ("1522.4", "1520")):
-        check(f"{raw} -> {want}",
-              round_band(D(raw), D(raw), D("5"), "nearest")[0], D(want))
-    check("inward would send it the other way, which is why this cannot be "
-          "the venue's mode - an ordinary Korean name still rounds inward",
-          round_band(D("66367.6"), D("66367.6"), D("5"), "inward")[0],
-          D("66365"))
-    check("A TIER OVERRIDES ITS VENUE, blank meaning the venue's own - the "
-          "same precedence as every other rule here",
-          (compute([Tier("pct", "", D(0), D("0.3"), D("0.3"), "", "nearest")],
-                   "X", D("8025"), D("5"), None, "inward"),
-           compute([Tier("pct", "", D(0), D("0.3"), D("0.3"))],
-                   "X", D("8025"), D("5"), None, "inward")),
-          ((D("10435"), D("5620")), (D("10430"), D("5620"))))
+    print("\nthe exchange's own three-step calculation")
+    #  Real names off a live compare, with Bloomberg's published limits.
+    #  The ETF/ETN ladder is table 10392 - 1 below 2,001 and a flat 5 above.
+    ETF = [(D(0), D(1)), (D("2001"), D(5))]
 
+    def tick_of(price):
+        return ETF[1][1] if price >= D("2001") else ETF[0][1]
+
+    def band(close, mult):
+        tiers = [Tier("pct", "", D(0), D("0.30"), D("0.30"), "", "",
+                      D(mult))]
+        return compute(tiers, "X", D(close), tick_of, None, "krx")
+
+    for close, mult, want in (("8025", 2, ("12835", "3215")),
+                              ("5665", 2, ("9055", "2275")),
+                              ("9255", 2, ("14805", "3705")),
+                              ("103580", 2, ("165720", "41440")),
+                              ("1029", 1, ("1337", "721")),
+                              ("8495", 1, ("11040", "5950")),
+                              ("8750", 1, ("11375", "6125"))):
+        check(f"close {close} at {mult}x -> {want[0]}/{want[1]}",
+              band(close, mult), (D(want[0]), D(want[1])))
+
+    check("STEP 2 IS WHAT NO AMOUNT OF ROUNDING THE FINISHED BAND CAN "
+          "REPRODUCE: 8025 x 0.30 is 2407.50, truncated on a 5 tick to "
+          "2405 and only THEN doubled to 4810.  Doubling first gives 4815 "
+          "and a limit of 12840, which the exchange does not print",
+          band("8025", 2)[0], D("12835"))
+    check("and both legs move by the SAME whole number of the base's "
+          "ticks, which is why they are symmetric about the close",
+          (D("8025") - band("8025", 2)[1], band("8025", 2)[0] - D("8025")),
+          (D("4810"), D("4810")))
+    #  A 0.5x carries a MULTIPLE OF 1 in bands.csv, not 0.5: KRX widens the
+    #  limit only ABOVE 1x, so a half is not a half band.  That is a config
+    #  fact and limit_up_down's self-test pins it against the shipped file;
+    #  what belongs here is that the multiple scales the range and nothing
+    #  else.
+    one, two = band("8025", 1), band("8025", 2)
+    check("the multiple scales the truncated RANGE, so doubling it doubles "
+          "the distance from the close and leaves the close where it is",
+          (two[0] - D("8025"), D("8025") - two[1]),
+          ((one[0] - D("8025")) * 2, (D("8025") - one[1]) * 2))
     print("\na band that already lands on its tick is LEFT ALONE")
     check("0000D0 KP: 8750 x 1.3 is 11375 exactly, on the 5 tick its table "
           "gives, and Bloomberg publishes 11375 - not 11370",

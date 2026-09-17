@@ -576,6 +576,13 @@ def split_for_retry(cfg, excluded, rows):
     return retry, keep
 
 
+def _per_price(ladder):
+    """The tick where a price actually lands, and nothing cleverer."""
+    def tick(price):
+        return ticks.tick_for(ladder, price)
+    return tick
+
+
 def _coarser(ladder, at_ref):
     """A per-leg tick: the coarser of the close's and the leg's own.
 
@@ -664,7 +671,14 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
             #  both legs floor/ceil on it.  Taking the coarser there would
             #  change it - a 4,500 close publishes 5,620 under the R job
             #  and 5,625 under the coarser rule.
-            if venue.tick_from == "close":
+            if venue.rounding == "krx":
+                #  THE EXCHANGE'S OWN RULE RESOLVES ITS OWN TICKS.  Step 2
+                #  truncates the range on the BASE price's tick and step 3
+                #  each leg on its own, so all bands.compute needs is a
+                #  plain per-price lookup - the coarser rule below was an
+                #  approximation of step 2 and would now apply it twice.
+                tick = _per_price(ladder)
+            elif venue.tick_from == "close":
                 tick = at_ref
             else:
                 tick = _coarser(ladder, at_ref)
@@ -1844,15 +1858,16 @@ def self_test() -> int:
           "the 25 tick but Indonesia rounds on the CLOSE's 10, and changing "
           "that would silently move every Indonesian name near a tier",
           jkt[0]["LimitUpPrice"], "5620")
-    check("which is markets.csv's choice, not this file's",
-          (cfg.venues["JKT-MAIN"].tick_from,
-           cfg.venues["KSC-MAIN"].tick_from), ("close", "coarser"))
-    check("ONLY A VENUE THAT ROUNDS CARRIES IT, because only a venue that "
-          "rounds resolves a tick at all - and each of these was turned on "
-          "against a name whose official limits we had, not by analogy "
-          "with its neighbour",
+    check("which is markets.csv's choice, not this file's - Indonesia "
+          "keeps the R job's rounding and Korea takes the exchange's own "
+          "three-step calculation",
+          (cfg.venues["JKT-MAIN"].rounding,
+           cfg.venues["KSC-MAIN"].rounding), ("inward", "krx"))
+    check("THE EXCHANGE'S OWN CALCULATION IS USED WHERE WE HAVE CHECKED "
+          "IT AGAINST OFFICIAL LIMITS - Korea on both boards and Taiwan, "
+          "each against a named stock rather than by analogy",
           sorted(v.venue_id for v in cfg.venues.values()
-                 if v.tick_from != "close"),
+                 if v.rounding == "krx"),
           ["KOE-MAIN", "KSC-MAIN", "TAI-MAIN"])
     check("EVERY ROUNDING VENUE HAS ITS OWN VERIFIED NAME - KSC-MAIN is "
           "KOSPI and 000020 KP, KOE-MAIN is KOSDAQ and 000250 KQ, TAI-MAIN "
@@ -1888,16 +1903,17 @@ def self_test() -> int:
     lev_out, lev_exc = price_computed(
         cfg, lev, {"0080Y0.KS": Decimal("8025"), "005930.KS": Decimal("8025")},
         {"005930.KS": ladder, "0080Y0.KS": etf_ladder}, lev_names)
-    check("THE LEVERAGED NAME TAKES ITS OWN BAND - 8025 x 1.6 is 12840, "
-          "already on its 5 tick and so published as it comes out, where "
-          "the ordinary 30% row would have said 10430",
+    check("THE LEVERAGED NAME TAKES ITS OWN BAND and publishes exactly "
+          "what Bloomberg does: 8025 x 0.30 is 2407.50, truncated on its 5 "
+          "tick to 2405, DOUBLED to 4810 - doubling first would give 4815 "
+          "and 12840, which is not what the exchange prints",
           [(r["BloombergCode"], r["LimitUpPrice"], r["LimitDownPrice"])
            for r in lev_out if r["BloombergCode"] == "0080Y0 KP"],
-          [("0080Y0 KP", "12840", "3210")])
+          [("0080Y0 KP", "12835", "3215")])
     check("while the ordinary name beside it is untouched, because the "
           "marker keys on the exchange NAME and not on the venue",
           [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in lev_out
-           if r["BloombergCode"] == "005930 KP"], [("10430", "5620")])
+           if r["BloombergCode"] == "005930 KP"], [("10420", "5620")])
     check("nothing is excluded now that the band is written down",
           lev_exc, [])
 
@@ -1918,11 +1934,9 @@ def self_test() -> int:
         {f"X{i}.KS": etf_ladder for i in range(5)},
         {f"X{i}.KS": n for i, n in enumerate(real)})
     check("a plain inverse takes the ORDINARY band - it tracks -1x and "
-          "moves no further than anything else - but rounds to the NEAREST "
-          "tick like the rest of its family: 10432.50 goes to 10435, not "
-          "down to 10430",
+          "moves no further than anything else",
           (got[0]["LimitUpPrice"], got[0]["LimitDownPrice"]),
-          ("10435", "5620"))
+          ("10430", "5620"))
 
     #  EVERY MULTIPLE KOREA WRITES, on one 8025 close, so the ladder of
     #  bands reads as a ladder.  0.5x and 3x were both being priced at 30%
@@ -1943,7 +1957,7 @@ def self_test() -> int:
           "takes the ORDINARY 30%: KRX widens only ABOVE 1x, so a half is "
           "not a half band",
           [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in m_out],
-          [("10435", "5620"), ("12840", "3210"), ("15250", "805")])
+          [("10430", "5620"), ("12835", "3215"), ("15240", "810")])
     check("AND A MULTIPLE NOBODY HAS WRITTEN A ROW FOR IS REFUSED, not "
           "quietly handed the default - 4X would otherwise match no marker "
           "at all and publish at a quarter of its width",
@@ -1955,14 +1969,14 @@ def self_test() -> int:
     check("an Inverse 2X takes twice it, because 'inverse 2x' is the "
           "longer marker and select_tier prefers the most specific",
           [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in got[1:3]],
-          [("12840", "3210"), ("12840", "3210")])
+          [("12835", "3215"), ("12835", "3215")])
     check("AND SO DOES A -2X THAT NEVER SAYS 'INVERSE' - the multiple is "
           "the signal, and a rule keyed on the word would have missed it",
           (got[3]["LimitUpPrice"], got[3]["LimitDownPrice"]),
-          ("12840", "3210"))
+          ("12835", "3215"))
     check("leverage means 2x in Korea and lands on the same band",
           (got[4]["LimitUpPrice"], got[4]["LimitDownPrice"]),
-          ("12840", "3210"))
+          ("12835", "3215"))
 
     inv_names = dict(lev_names)
     inv_names["0080Y0.KS"] = "SOMEBODY KODEX 4X Futures ETN"
@@ -2011,8 +2025,7 @@ def self_test() -> int:
     check("Taiwan rounds now, which it did not before - a venue on "
           "rounding=none publishes the raw band and 10.89 looks exactly "
           "like a price on a 0.01 tick",
-          (cfg.venues["TAI-MAIN"].rounding,
-           cfg.venues["TAI-MAIN"].tick_from), ("inward", "coarser"))
+          cfg.venues["TAI-MAIN"].rounding, "krx")
 
     print("\nnarrowing a run to one venue or several")
     check("pipe separated, like the environments beside it",

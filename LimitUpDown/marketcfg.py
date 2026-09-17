@@ -66,7 +66,7 @@ import bands
 import ticks
 
 VALID_SOURCE = ("bloomberg", "computed")
-VALID_ROUNDING = ("none", "inward", "outward", "nearest")
+VALID_ROUNDING = ("none", "inward", "outward", "nearest", "krx")
 VALID_KIND = ("pct", "abs")
 VALID_FALLBACK = ("bloomberg",)
 VALID_TICK_FROM = ("close", "coarser")
@@ -275,6 +275,7 @@ def load(config_dir, tsr_dir=None) -> Config:
             if vid not in venues:
                 raise ConfigError(
                     f"bands.csv: venue {vid} is not defined in markets.csv")
+            raw_mult = (r.get("Multiple") or "").strip()
             tier_rounding = (r.get("Rounding") or "").strip()
             if tier_rounding and tier_rounding not in VALID_ROUNDING:
                 raise ConfigError(
@@ -295,7 +296,9 @@ def load(config_dir, tsr_dir=None) -> Config:
                 #  Lower-cased here so the file may write it however reads
                 #  best - select_tier folds the exchange name to match.
                 name_marker=(r.get("NameMarker") or "").strip().lower(),
-                rounding=tier_rounding))
+                rounding=tier_rounding,
+                multiple=(_decimal(raw_mult, f"bands.csv {vid} Multiple")
+                          if raw_mult else Decimal(1))))
 
     #  A VENUE-WIDE LADDER IS THE EXCEPTION, NOT THE RULE.  Only Indonesia
     #  has one, because only Indonesia's ladder is the ATS's own file and
