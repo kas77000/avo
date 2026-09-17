@@ -56,6 +56,11 @@ class Tier(NamedTuple):
     floor_from: Decimal
     up: Decimal
     down: Decimal
+    #  A word from the exchange's own name for the security, matched case
+    #  insensitively.  '' means the venue default, exactly as sym_prefix
+    #  does.  Korea prices a leveraged product at twice the ordinary band
+    #  and nothing in the TICKER says so, which is why this exists.
+    name_marker: str = ""
 
 
 class BandError(Exception):
@@ -71,11 +76,28 @@ class BandError(Exception):
         self.detail = detail
 
 
-def select_tier(tiers, ticker: str, ref: Decimal) -> Optional[Tier]:
-    """Prefix first, then floor.  Filtering by the longest matching prefix
-    BEFORE looking at the floor matters: a STAR name must walk STAR's own
-    ladder, not fall back onto the main board's."""
+def select_tier(tiers, ticker: str, ref: Decimal,
+                name: str = "") -> Optional[Tier]:
+    """Name marker, then prefix, then floor.
+
+    Each step keeps only the MOST SPECIFIC matches before the next one
+    looks, and that order matters twice over.  A STAR name must walk STAR's
+    own ladder rather than fall back onto the main board's - and a
+    leveraged ETF must take its own band before either, because the thing
+    that makes it leveraged is in the exchange's name for it and in nothing
+    else we hold.
+
+    An empty marker or prefix is the venue default and matches anything, so
+    a venue with no special rows behaves exactly as it always did."""
+    low = (name or "").lower()
     matching = [t for t in tiers
+                if not t.name_marker or t.name_marker in low]
+    if not matching:
+        return None
+    strongest = max(len(t.name_marker) for t in matching)
+    matching = [t for t in matching if len(t.name_marker) == strongest]
+
+    matching = [t for t in matching
                 if t.sym_prefix == "" or ticker.startswith(t.sym_prefix)]
     if not matching:
         return None
@@ -131,10 +153,10 @@ def round_band(up: Decimal, down: Decimal, tick, rounding: str):
 
 
 def compute(tiers, ticker: str, ref: Decimal, tick,
-            min_price: Optional[Decimal], rounding: str):
+            min_price: Optional[Decimal], rounding: str, name: str = ""):
     if ref is None or ref <= 0:
         raise BandError("reference price is not positive")
-    tier = select_tier(tiers, ticker, ref)
+    tier = select_tier(tiers, ticker, ref, name)
     if tier is None:
         raise BandError("no band tier for the previous close",
                         detail=f"price {ref}")

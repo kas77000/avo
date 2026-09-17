@@ -286,7 +286,10 @@ def load(config_dir, tsr_dir=None) -> Config:
                 floor_from=_decimal(r["FloorFrom"],
                                     f"bands.csv {vid} FloorFrom"),
                 up=_decimal(r["Up"], f"bands.csv {vid} Up"),
-                down=_decimal(r["Down"], f"bands.csv {vid} Down")))
+                down=_decimal(r["Down"], f"bands.csv {vid} Down"),
+                #  Lower-cased here so the file may write it however reads
+                #  best - select_tier folds the exchange name to match.
+                name_marker=(r.get("NameMarker") or "").strip().lower()))
 
     #  A VENUE-WIDE LADDER IS THE EXCEPTION, NOT THE RULE.  Only Indonesia
     #  has one, because only Indonesia's ladder is the ATS's own file and

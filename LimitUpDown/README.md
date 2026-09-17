@@ -525,6 +525,32 @@ As shipped, every computed venue asks **except Indonesia**. Japan, Thailand and
 India are `Source=bloomberg` and never reach the fallback at all, so their
 column is blank too.
 
+### A leveraged product does not get the venue's band
+
+`bands.csv` has a `NameMarker` column. A row carrying one applies only to
+securities whose **exchange name** contains that word, matched case
+insensitively; a blank marker is the venue default, exactly as `SymPrefix` is.
+
+```
+KSC-MAIN,pct,,0,0.30,0.30,
+KSC-MAIN,pct,,0,0.60,0.60,leverage
+```
+
+Korea prices a leveraged product at twice the ordinary band. `0080Y0 KP` closed
+at 8,025 and the exchange published 12,835/3,215 — ±60% where the plain row says
+30. Nothing in the *ticker* says so: its crosscode `Type` is `ETF`, identical to
+an ordinary unleveraged one, and there is no prefix to match the way China has
+688 and 300. The name does say so, and `equity_master.LONG_COMP_NAME` carries
+it: *"Shinhan SOL Shipbuilding TOP3 Plus leverage ETF"*. It rides on the query
+that already fetches the close, so both arrive together and describe the same
+listing.
+
+**A marker with no row is still refused.** 60% is Korea's answer for `leverage`;
+it is not established for an inverse, which may track −1x and get the ordinary
+band. Those report as `leveraged` in `excluded.csv`, carrying the name that
+caught them. What is written down is used; what is not is reported, never
+guessed.
+
 ### And the other way: Bloomberg would not price it, so compute
 
 `NoDataFallback=computed` in `markets.csv` does the reverse. A name B-PIPE

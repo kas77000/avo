@@ -418,6 +418,16 @@ def price_from_bloomberg(rows, values, refused=None):
     return out, _excluded(by_reason)
 
 
+def _marked_tier(cfg, r, name: str) -> bool:
+    """Does this venue have a band written for what this name IS?
+
+    Asked of the tiers rather than of a list of markers here, so the answer
+    is whatever bands.csv says and the two cannot drift apart."""
+    low = (name or "").lower()
+    return any(t.name_marker and t.name_marker in low
+               for t in cfg.bands.get(r.venue_id, ()))
+
+
 def _whole_pct(fraction: Decimal) -> int:
     """0.29903 -> 30.  int() alone would truncate to 29 and split one band
     across two buckets."""
@@ -541,15 +551,19 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
     for r in rows:
         venue = cfg.venues[r.venue_id]
         #  BEFORE THE CLOSE, because this is not about the price.  A
-        #  leveraged or inverse product does not get its venue's band -
-        #  0080Y0 KP closed at 8,025 and the exchange published +/-60%
-        #  where bands.csv says 30 - and we do not know the multiple, so
-        #  the band is refused rather than guessed.  Bloomberg prices these
-        #  correctly; this only bites when it could not.
+        #  leveraged or inverse product does not get its venue's ordinary
+        #  band - 0080Y0 KP closed at 8,025 and the exchange published
+        #  12,835/3,215, which is +/-60% where the plain row says 30.
+        #
+        #  bands.csv answers it where someone has written the answer down:
+        #  a row carrying NameMarker=leverage gives Korea its 60.  What
+        #  is NOT written down is still refused rather than guessed - an
+        #  inverse tracking -1x need not be 60 at all, and a wrong limit is
+        #  worse than no limit because the wrong one is believed.
         name = names.get(r.ric, "")
-        if kdbclose.is_leveraged(name):
-            drop("leveraged or inverse product - its band is not the "
-                 "venue's", r, name)
+        if kdbclose.is_leveraged(name) and not _marked_tier(cfg, r, name):
+            drop("leveraged or inverse product with no band of its own",
+                 r, name)
             continue
 
         ref = closes.get(r.ric)
@@ -612,7 +626,8 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
             #  of the two is the only rule that gives both.
         try:
             high, low = bands.compute(cfg.bands[r.venue_id], r.ticker, ref,
-                                      tick, venue.min_price, venue.rounding)
+                                      tick, venue.min_price, venue.rounding,
+                                      name)
         except bands.BandError as e:
             drop(e.reason, r, e.detail)
             continue
@@ -1250,7 +1265,8 @@ def demo() -> int:
         [(Decimal(p), Decimal(t)) for p, t in
          (("2000", "1"), ("5000", "5"), ("20000", "10"), ("50000", "50"),
           ("200000", "100"), ("500000", "500"), ("1000001000", "1000"))])
-    ladders = {"005930.KS": KR_6132, "000250.KQ": KR_6132}
+    ladders = {"005930.KS": KR_6132, "000250.KQ": KR_6132,
+               "0080Y0.KS": KR_6132}
 
     #  What equity_master's LONG_COMP_NAME says.  0080Y0 KP is real: it
     #  closed at 8,025 and Bloomberg published 12,835/3,215, which is
@@ -1703,22 +1719,40 @@ def self_test() -> int:
     lev_out, lev_exc = price_computed(
         cfg, lev, {"0080Y0.KS": Decimal("8025"), "005930.KS": Decimal("8025")},
         {"005930.KS": ladder, "0080Y0.KS": ladder}, lev_names)
-    check("THE ORDINARY NAME STILL GETS ITS BAND - the rule keys on the "
-          "exchange name, not on the venue",
-          [r["BloombergCode"] for r in lev_out], ["005930 KP"])
-    check("and the leveraged one is REFUSED rather than given 30%, because "
-          "0080Y0 KP is +/-60% and one name does not establish what every "
-          "leveraged product gets",
-          [(e.reason, [d.bbg for d in e.rows]) for e in lev_exc],
-          [("leveraged or inverse product - its band is not the venue's",
+    check("THE LEVERAGED NAME TAKES ITS OWN BAND - bands.csv carries a "
+          "NameMarker=leverage row at 60%, and 8025 x 1.6 is 12840 where "
+          "the ordinary 30% row would have said 10430",
+          [(r["BloombergCode"], r["LimitUpPrice"], r["LimitDownPrice"])
+           for r in lev_out if r["BloombergCode"] == "0080Y0 KP"],
+          [("0080Y0 KP", "12840", "3210")])
+    check("while the ordinary name beside it is untouched, because the "
+          "marker keys on the exchange NAME and not on the venue",
+          [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in lev_out
+           if r["BloombergCode"] == "005930 KP"], [("10430", "5620")])
+    check("nothing is excluded now that the band is written down",
+          lev_exc, [])
+
+    #  A marker the venue has NO row for is still refused.  60% is Korea's
+    #  answer for "leverage"; it is not established for an inverse, which
+    #  may track -1x and get the ordinary band.
+    inv_names = dict(lev_names)
+    inv_names["0080Y0.KS"] = "KODEX 200 Futures Inverse"
+    _, inv_exc = price_computed(
+        cfg, lev, {"0080Y0.KS": Decimal("8025"),
+                   "005930.KS": Decimal("8025")},
+        {"005930.KS": ladder, "0080Y0.KS": ladder}, inv_names)
+    check("AN INVERSE IS STILL REFUSED, because bands.csv has a row for "
+          "leverage and none for that - what is written down is used and "
+          "what is not is reported, never guessed",
+          [(e.reason, [d.bbg for d in e.rows]) for e in inv_exc],
+          [("leveraged or inverse product with no band of its own",
             ["0080Y0 KP"])])
     check("the refusal carries the name that caused it, so it can be "
           "checked rather than taken on trust",
-          lev_exc[0].rows[0].detail,
-          "Shinhan SOL Shipbuilding TOP3 Plus leverage ETF")
+          inv_exc[0].rows[0].detail, "KODEX 200 Futures Inverse")
     check("and it has its own word in the excluded report",
-          missing_token("leveraged or inverse product - its band is not "
-                        "the venue's"), "leveraged")
+          missing_token("leveraged or inverse product with no band of its "
+                        "own"), "leveraged")
     check("A COMPANY THAT MERELY CONTAINS THE LETTERS IS NOT CAUGHT",
           (kdbclose.is_leveraged("Coverage Analytics Inc"),
            kdbclose.is_leveraged("Leverage Shares PLC")), (False, True))
@@ -1749,19 +1783,20 @@ def self_test() -> int:
                          "LAST_PRICE": 5150.0},
          "B KP Equity": {"MIN_LIMIT": 3610.0, "MAX_LIMIT": 6690.0,
                          "LAST_PRICE": 5150.0},
-         #  a name the exchange does NOT give 30%
-         "C KP Equity": {"MIN_LIMIT": 2060.0, "MAX_LIMIT": 8240.0,
+         #  a name on a band bands.csv has no row for at all - 30 and 60
+         #  are both written down now, so the example has to be neither
+         "C KP Equity": {"MIN_LIMIT": 4377.0, "MAX_LIMIT": 5922.0,
                          "LAST_PRICE": 5150.0}},
         {"A.KS": Decimal("5150"), "B.KS": Decimal("5150"),
          "C.KS": Decimal("5150")})
     check("names group by the band the exchange actually gave them",
           {k: sorted(v) for k, v in got["KSC-MAIN"].items()},
-          {(30, 30): ["A KP", "B KP"], (60, 60): ["C KP"]})
+          {(30, 30): ["A KP", "B KP"], (15, 15): ["C KP"]})
     lines = implied_band_lines(cfg, got)
     check("A BAND bands.csv DOES NOT HAVE IS CALLED OUT, which is how a "
           "market where 30% is not for everybody becomes visible",
           [ln.strip() for ln in lines if "NOT IN bands.csv" in ln],
-          ["60/60 %       1  C KP   <- NOT IN bands.csv"])
+          ["15/15 %       1  C KP   <- NOT IN bands.csv"])
     check("and the one it does have is not",
           any("NOT IN" in ln and "30/30" in ln for ln in lines), False)
 
