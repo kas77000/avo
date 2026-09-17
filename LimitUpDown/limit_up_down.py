@@ -70,7 +70,7 @@ import argparse
 import csv
 import datetime as dt
 import sys
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 import bands
@@ -415,6 +415,62 @@ def price_from_bloomberg(rows, values, refused=None):
         out.append(_out_row(r, band[0], band[1]))
 
     return out, _excluded(by_reason)
+
+
+def _whole_pct(fraction: Decimal) -> int:
+    """0.29903 -> 30.  int() alone would truncate to 29 and split one band
+    across two buckets."""
+    return int((fraction * 100).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def implied_bands(cfg, rows, limits, closes):
+    """venue -> {(up%, down%): [names]}, from what Bloomberg actually
+    published against the close we hold.
+
+    WHAT THE EXCHANGE DOES, MEASURED, rather than what bands.csv assumes.
+    Every venue now asks Bloomberg first, so a run holds the real limits
+    for most of the universe and a close for anything that could fall back
+    - which is enough to say whether a venue's configured band is the whole
+    story.
+
+    Korea is the case in point: bands.csv gives every name +/-30%, and a
+    venue where that is not true for everybody would show a second cluster
+    here.  The names in it are the ones whose fallback band would be wrong.
+
+    Rounded to whole percent because the exchange's own tick rounding puts
+    the raw ratio just off the round number - 6690/5150 is 29.9%, not 30%.
+    """
+    out = {}
+    for r in rows:
+        fields = limits.get(r.security)
+        ref = closes.get(r.ric)
+        if not fields or ref is None or ref <= 0:
+            continue
+        band, _ = bpipe.band_from(fields)
+        if band is None:
+            continue
+        low, high = band
+        up = _whole_pct(Decimal(str(high)) / ref - 1)
+        down = _whole_pct(1 - Decimal(str(low)) / ref)
+        out.setdefault(r.venue_id, {}).setdefault((up, down), []).append(r.bbg)
+    return out
+
+
+def implied_band_lines(cfg, implied):
+    """The measured bands per venue, widest group first, against what
+    bands.csv says."""
+    lines = []
+    for vid in sorted(implied):
+        tiers = cfg.bands.get(vid) or []
+        want = sorted({(int(t.up * 100), int(t.down * 100)) for t in tiers})
+        groups = sorted(implied[vid].items(), key=lambda kv: -len(kv[1]))
+        lines.append(f"  {vid:<14} bands.csv says "
+                     + (", ".join(f"{u}/{d}%" for u, d in want) or "nothing"))
+        for (up, down), names in groups:
+            flag = "" if (up, down) in want else "   <- NOT IN bands.csv"
+            lines.append(f"    {up:>3}/{down:<3}%  {len(names):6d}  "
+                         f"{', '.join(names[:SHOW_NAMES])}{flag}")
+    return lines
 
 
 def split_for_retry(cfg, excluded, rows):
@@ -1006,6 +1062,16 @@ def run(envs_spec: str) -> int:
     report.extend(_venue_summary(cfg, out, excluded))
     report.extend(_exclusion_lines(excluded))
 
+    #  WHAT THE EXCHANGE ACTUALLY PUBLISHED, against what bands.csv assumes.
+    #  A venue whose names are not all on one band shows a second group,
+    #  and those names are the ones whose FALLBACK band would be wrong -
+    #  Bloomberg's own limits are right for them either way.
+    implied = implied_bands(cfg, ask + secondary, limits, closes)
+    if implied:
+        report.append("\n  bands Bloomberg published, measured against the "
+                      "close:")
+        report.extend(implied_band_lines(cfg, implied))
+
     #  A DIAGNOSTIC MUST NOT TAKE DOWN THE REPORT.  By this point the file
     #  is already written and published; losing the report as well would
     #  leave the operator unable to tell whether the run worked at all.
@@ -1596,6 +1662,39 @@ def self_test() -> int:
           [d.ric for d in
            {e.reason: e.rows for e in kexcl}["no tick ladder for this name"]],
           ["ZZZZ.KS"])
+
+    print("\nmeasuring the band Bloomberg published against the close")
+    #  Korea's own numbers: 5150 close, 3610/6690 published.  The ratio is
+    #  29.9% either way because the exchange rounded to the tick, so a
+    #  truncating conversion would file it under 29 and split one band
+    #  across two buckets.
+    check("a 29.9% ratio is the 30% band, not a 29% one",
+          (_whole_pct(Decimal("6690") / Decimal("5150") - 1),
+           _whole_pct(1 - Decimal("3610") / Decimal("5150"))), (30, 30))
+    kr = [row("A.KS", "A KP", "A.KR", "KSC-MAIN"),
+          row("B.KS", "B KP", "B.KR", "KSC-MAIN"),
+          row("C.KS", "C KP", "C.KR", "KSC-MAIN")]
+    got = implied_bands(
+        cfg, kr,
+        {"A KP Equity": {"MIN_LIMIT": 3610.0, "MAX_LIMIT": 6690.0,
+                         "LAST_PRICE": 5150.0},
+         "B KP Equity": {"MIN_LIMIT": 3610.0, "MAX_LIMIT": 6690.0,
+                         "LAST_PRICE": 5150.0},
+         #  a name the exchange does NOT give 30%
+         "C KP Equity": {"MIN_LIMIT": 2060.0, "MAX_LIMIT": 8240.0,
+                         "LAST_PRICE": 5150.0}},
+        {"A.KS": Decimal("5150"), "B.KS": Decimal("5150"),
+         "C.KS": Decimal("5150")})
+    check("names group by the band the exchange actually gave them",
+          {k: sorted(v) for k, v in got["KSC-MAIN"].items()},
+          {(30, 30): ["A KP", "B KP"], (60, 60): ["C KP"]})
+    lines = implied_band_lines(cfg, got)
+    check("A BAND bands.csv DOES NOT HAVE IS CALLED OUT, which is how a "
+          "market where 30% is not for everybody becomes visible",
+          [ln.strip() for ln in lines if "NOT IN bands.csv" in ln],
+          ["60/60 %       1  C KP   <- NOT IN bands.csv"])
+    check("and the one it does have is not",
+          any("NOT IN" in ln and "30/30" in ln for ln in lines), False)
 
     print("\nand the other way: Bloomberg would not price it, so compute")
     #  A venue Bloomberg prices, carrying NoDataFallback=computed.  Built
