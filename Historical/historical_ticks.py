@@ -44,6 +44,7 @@ Bloomberg version had.
     python historical_ticks.py --backfill 90   a deeper first run
     python historical_ticks.py --today         also today, from the RDB
     python historical_ticks.py --date 2026-09-02   as if that were today
+    python historical_ticks.py --from 2026-08-22 --to 2026-09-21   a range
     python historical_ticks.py --only "7203 JT"    one name, for a check
     python historical_ticks.py --venues "NSI-MAIN|BSE-MAIN"   those markets only
     python historical_ticks.py --retry-misses  ask again about the empties
@@ -417,22 +418,41 @@ def stage_master(conn, rows, markets, master_chunk, log):
     return master, hits, master_date, cands
 
 
-def stage_partitions(conn, date_text, log):
-    """What days qatt actually holds, capped at --date when given."""
+def parse_day(text, flag):
+    """'2026-09-02' -> a date, or None when not given.  ValueError names the
+    flag, so a typo is refused before any server is asked anything."""
+    if not text:
+        return None
+    try:
+        return dt.date.fromisoformat(text)
+    except ValueError:
+        raise ValueError(f"{flag} {text!r} is not a date; write it as "
+                         f"YYYY-MM-DD") from None
+
+
+def stage_partitions(conn, date_text, log, from_text=""):
+    """What days qatt actually holds, capped at --to (--date) when given and
+    starting at --from when given."""
     parts = qattsource.partitions(conn)
     if not parts:
         log.fail("qatt holds no partitions at all")
         return None
-    if date_text:
-        try:
-            cutoff = dt.date.fromisoformat(date_text)
-        except ValueError:
-            log.fail(f"--date {date_text!r} is not a date; write it as "
-                     f"YYYY-MM-DD")
-            return None
+    try:
+        cutoff = parse_day(date_text, "--to")
+        start = parse_day(from_text, "--from")
+    except ValueError as e:
+        log.fail(str(e))
+        return None
+    if cutoff:
         parts = [d for d in parts if d <= cutoff]
         if not parts:
             log.fail(f"qatt has no partition on or before {cutoff}")
+            return None
+    if start:
+        parts = [d for d in parts if d >= start]
+        if not parts:
+            log.fail(f"qatt has no partition from {start}"
+                     + (f" to {cutoff}" if cutoff else ""))
             return None
     log.kv("qatt partitions", logs.thousands(len(parts)),
            f"{parts[0]} .. {parts[-1]}")
@@ -613,9 +633,13 @@ def main(argv=None) -> int:
     p.add_argument("--backfill", type=int, default=None,
                    help=f"days for a name with no files (default "
                         f"{settings.DEFAULTS['BACKFILL_DAYS']})")
-    p.add_argument("--date", default="",
-                   help="treat this as the newest day, YYYY-MM-DD; for "
-                        "reruns")
+    p.add_argument("--date", "--to", dest="date", default="",
+                   help="the last day, YYYY-MM-DD, as if it were the newest; "
+                        "--to and --date are the same flag")
+    p.add_argument("--from", dest="date_from", default="",
+                   help="the first day, YYYY-MM-DD.  Every qatt day from "
+                        "here to --to (or the newest) is wanted; replaces "
+                        "--backfill")
     p.add_argument("--only", default="",
                    help="one code - the crosscode's (600000 C1) or the "
                         "file's (600000 CG)")
@@ -656,6 +680,27 @@ def main(argv=None) -> int:
     if a.demo:
         return demo()
 
+    markets = marketcfg.load(HERE / "config" / "markets.csv")
+    try:
+        a.venue_list = parse_venues(a.venues, markets)
+    except ValueError as e:
+        print(f"FAIL  --venues: {e}", file=sys.stderr)
+        return 2
+    try:
+        start, end = parse_day(a.date_from, "--from"), parse_day(a.date, "--to")
+    except ValueError as e:
+        print(f"FAIL  {e}", file=sys.stderr)
+        return 2
+    if start and end and start > end:
+        print(f"FAIL  --from {start} is after --to {end}", file=sys.stderr)
+        return 2
+    #  TWO WAYS TO SAY HOW FAR BACK, SO ONLY ONE AT A TIME.  Which one won
+    #  would otherwise be a rule nobody remembers.
+    if start and a.backfill is not None:
+        print("FAIL  --from and --backfill both say how far back to go; "
+              "give one", file=sys.stderr)
+        return 2
+
     try:
         cfg = settings.load()
         settings.require(cfg, "CROSSCODE_PATH", "OUTPUT_DIR")
@@ -667,13 +712,6 @@ def main(argv=None) -> int:
         rdb = settings.server(cfg, "QATT_RDB_SERVER") if a.today else None
     except SettingError as e:
         print(f"FAIL  {e}", file=sys.stderr)
-        return 2
-
-    markets = marketcfg.load(HERE / "config" / "markets.csv")
-    try:
-        a.venue_list = parse_venues(a.venues, markets)
-    except ValueError as e:
-        print(f"FAIL  --venues: {e}", file=sys.stderr)
         return 2
 
     if a.trace:
@@ -704,9 +742,14 @@ def main(argv=None) -> int:
 
     log.step(4, "qatt")
     conn = qattsource.connect(q_host, q_port)
-    parts = stage_partitions(conn, a.date, log)
+    parts = stage_partitions(conn, a.date, log, a.date_from)
     if parts is None:
         return 1
+    if a.date_from:
+        #  The window IS the range: every partition left after the cut.
+        backfill = len(parts)
+        log.kv("--from", f"{parts[0]} .. {parts[-1]}",
+               f"{logs.thousands(backfill)} qatt day(s)")
 
     log.step(5, "what is already tried")
     stage_migrate(names, out_dir, a.dry_run, log)
@@ -897,7 +940,7 @@ def demo() -> int:
 
         class Args:
             trace, date, log, dry_run = "600000 C1", "2026-09-03", "", False
-            venue_list = []
+            venue_list, date_from = [], ""
 
         real_connect = qattsource.connect
         qattsource.connect = lambda host, port: conn
@@ -975,6 +1018,44 @@ def self_test() -> int:
         check("a venue with no rows in the crosscode stops the run", got, None)
         got, _ = stage_crosscode(cc, "7203 JT", _Quiet(), ["NSI-MAIN"])
         check("--only outside --venues finds nothing", got, None)
+
+    print("\n--from and --to")
+    check("a day is a date", parse_day("2026-09-02", "--from"),
+          dt.date(2026, 9, 2))
+    check("not given is None", parse_day("", "--from"), None)
+    try:
+        parse_day("02/09/2026", "--from")
+        check("a malformed day raised", False, True)
+    except ValueError as e:
+        check("a malformed day is refused, naming the flag",
+              "--from" in str(e), True)
+
+    #  Five qatt days with a weekend in the middle, as partitions really are.
+    held = [dt.date(2026, 9, d) for d in (3, 4, 7, 8, 9)]
+    real_partitions = qattsource.partitions
+    qattsource.partitions = lambda _conn: list(held)
+    try:
+        check("--from and --to keep the days between, both ends included",
+              stage_partitions(None, "2026-09-08", _Quiet(), "2026-09-04"),
+              [dt.date(2026, 9, 4), dt.date(2026, 9, 7), dt.date(2026, 9, 8)])
+        check("--from a weekend starts at the next day qatt holds",
+              stage_partitions(None, "", _Quiet(), "2026-09-05"),
+              [dt.date(2026, 9, 7), dt.date(2026, 9, 8), dt.date(2026, 9, 9)])
+        check("--from alone runs to the newest day",
+              stage_partitions(None, "", _Quiet(), "2026-09-09"),
+              [dt.date(2026, 9, 9)])
+        check("a range qatt holds nothing in stops the run",
+              stage_partitions(None, "2026-09-06", _Quiet(), "2026-09-05"),
+              None)
+        check("and with neither, every day qatt holds",
+              stage_partitions(None, "", _Quiet()), held)
+    finally:
+        qattsource.partitions = real_partitions
+
+    check("--from with --backfill is refused before any server is asked",
+          main(["--from", "2026-09-01", "--backfill", "5"]), 2)
+    check("and so is a --from after its --to",
+          main(["--from", "2026-09-10", "--to", "2026-09-01"]), 2)
     c = candidates([Row("7203 JT"), Row("7203 JE", market="JNX-MAIN"),
                     Row("BHP AU", "BHP", "ASX-MAIN"),
                     Row("600000 C1", "600000", "SHA-MAIN")], MK)
