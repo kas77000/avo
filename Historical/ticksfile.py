@@ -33,6 +33,7 @@ whatever reads these files downstream was written against it.
 from __future__ import annotations
 
 import csv
+import os
 import datetime as dt
 import re
 from pathlib import Path
@@ -208,10 +209,17 @@ def write_rows(path, rows, tz_label: str = "") -> int:
     and one quoting rule whichever path made the rows."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as fh:
+    #  A FILE UNDER ITS REAL NAME IS A FINISHED FILE.  The name is what
+    #  marks a day as done - existing_dates never looks inside - so a run
+    #  killed mid-write must not leave a half file under it, or that day is
+    #  skipped forever.  Written as .part, which NAME_RE does not match, and
+    #  renamed into place in one step once it is complete.
+    part = path.with_name(path.name + ".part")
+    with part.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(COLUMNS + ([tz_label] if tz_label else []))
         w.writerows(rows)
+    os.replace(part, path)
     return len(rows)
 
 
@@ -423,6 +431,30 @@ def self_test() -> int:
         check("a day that is already in the folder is not overwritten by "
               "the loose copy", (again["moved"], again["already there"]),
               (0, 1))
+
+    print("\na file under its real name is a finished file")
+    with tempfile.TemporaryDirectory() as d:
+        day = D(2026, 9, 3)
+        p = path(d, "7203 JT", "7203 JT", day)
+        good = ("09:00:00", "1", "100", "", "T", "XTKS")
+        try:
+            #  the second row is not a row: the write dies half way, as a
+            #  killed run's would
+            write_rows(p, [good, 5])
+        except Exception:                                   # noqa: BLE001
+            pass
+        check("a write that dies half way leaves nothing under the real "
+              "name", p.exists(), False)
+        check("so the day still reads as missing, and the next run fetches "
+              "it", existing_dates(d, "7203 JT", "7203 JT"), set())
+        write_rows(p, [good])
+        check("the next write puts the whole file in place",
+              p.read_text(encoding="utf-8").splitlines()[1],
+              "09:00:00,1,100,,T,XTKS")
+        check("and the day counts as done",
+              existing_dates(d, "7203 JT", "7203 JT"), {day})
+        check("with no .part left behind", sorted(
+            f.name for f in p.parent.iterdir()), [p.name])
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1
