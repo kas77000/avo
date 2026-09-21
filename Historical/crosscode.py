@@ -40,8 +40,16 @@ REQUIRED = ("BloombergCode", "FidessaMarket")
 
 #  Read when present, blank when not.  All diagnostics: they make the trace
 #  and the exclusion reports legible and nothing else.
-OPTIONAL = ("RicCode", "Type", "BloombergSecurityType", "Currency",
-            "BloombergStatus")
+OPTIONAL = ("Type", "BloombergSecurityType", "Currency", "BloombergStatus")
+
+#  THE RIC IS SPELT TWO WAYS TOO.  The older files call it "RicCode"; the
+#  desk's NewCrosscode.csv calls it "#ReutersCode" and makes it the first
+#  column.  Same values either way, so both are read.
+RIC_CODE = ("RicCode", "#ReutersCode")
+
+#  Type is blank, "ETF" or "Basket".  A basket is not a security we ask
+#  ticks for, so it is dropped here and reported, not carried to kdb.
+BASKET = "basket"
 
 #  THE FIRST COLUMN IS SPELT TWO WAYS IN THIS REPO.  TradingData reads
 #  "#FidessaCode"; LimitUpDown v1 and v2 read "FidessaCode".  Only one of
@@ -122,6 +130,9 @@ def load(path):
         fidessa = next((c for c in FIDESSA_CODE if c in fields), "")
         if not fidessa:
             absent.append("FidessaCode")
+        ric_col = next((c for c in RIC_CODE if c in fields), "")
+        if not ric_col:
+            absent.append("RicCode")
 
         for r in reader:
             code = (r.get(fidessa) or "").strip() if fidessa else ""
@@ -129,14 +140,18 @@ def load(path):
             if not bbg:
                 drop("no BloombergCode", code)
                 continue
+            sec_type = (r.get("Type") or "").strip()
+            if sec_type.casefold() == BASKET:
+                drop("Type is Basket", bbg)
+                continue
             ticker, ext = split_bbg(bbg)
             kept.append(Row(
                 fidessa_code=code,
-                ric=(r.get("RicCode") or "").strip(),
+                ric=(r.get(ric_col) or "").strip() if ric_col else "",
                 bbg=bbg,
                 ticker=ticker,
                 bbg_ext=ext,
-                sec_type=(r.get("Type") or "").strip(),
+                sec_type=sec_type,
                 bbg_sec_type=(r.get("BloombergSecurityType") or "").strip(),
                 market=(r.get("FidessaMarket") or "").strip(),
                 currency=(r.get("Currency") or "").strip()))
@@ -233,6 +248,29 @@ def self_test() -> int:
               [e.reason for e in excl],
               ["columns not in this file, read as blank: "
                "BloombergSecurityType, Currency"])
+
+    print("\nthe desk's NewCrosscode.csv")
+    NEW = ("#ReutersCode,Mnemo,Index,FidessaCode,FidessaMarket,"
+           "BloombergCode,Currency,Type,Sedol\n"
+           "GDST.NS,SMGOLDS,NIFTY,GOLDSTAR.IN,NSI-MAIN,GOLDSTAR IS,INR,,B6C835\n"
+           "SB668DD.NS,MFSFMP6,NIFTY,SB668DD.IN,NSI-MAIN,SB668DD IS,INR,ETF,\n"
+           "BSKT.NS,,,BSKT.IN,NSI-MAIN,BSKT IS,INR,Basket,\n")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "NewCrosscode.csv"
+        p.write_text(NEW, encoding="utf-8")
+        rows, excl = load(p)
+        check("#ReutersCode is read as the RIC",
+              [r.ric for r in rows], ["GDST.NS", "SB668DD.NS"])
+        check("FidessaCode, without the '#', is read too",
+              rows[0].fidessa_code, "GOLDSTAR.IN")
+        check("an ETF is kept, and says so", rows[1].sec_type, "ETF")
+        check("a Basket is dropped, and named",
+              [(e.reason, e.rows) for e in excl if "Basket" in e.reason],
+              [("Type is Basket", ["BSKT IS"])])
+        check("the RIC is not reported missing when it is under its new name",
+              [e.reason for e in excl if "not in this file" in e.reason],
+              ["columns not in this file, read as blank: "
+               "BloombergSecurityType, BloombergStatus"])
 
     print("\nthe smallest file that works")
     with tempfile.TemporaryDirectory() as d:
