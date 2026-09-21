@@ -197,14 +197,21 @@ def write(path, rows, mic: str, tz_label: str = "") -> int:
 
     newline="" is required, not cosmetic: without it csv writes \\r\\r\\n on
     Windows and every other line of the file reads as blank."""
+    return write_rows(path, [(r["time"], _num(r["price"]), _num(r["size"]),
+                              r["cond"], r["ex"], mic) for r in rows],
+                      tz_label)
+
+
+def write_rows(path, rows, tz_label: str = "") -> int:
+    """The same file from rows already formatted - six strings each, in
+    COLUMNS order.  write() goes through here too, so there is one header
+    and one quoting rule whichever path made the rows."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(COLUMNS + ([tz_label] if tz_label else []))
-        for r in rows:
-            w.writerow([r["time"], _num(r["price"]), _num(r["size"]),
-                        r["cond"], r["ex"], mic])
+        w.writerows(rows)
     return len(rows)
 
 

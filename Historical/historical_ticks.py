@@ -243,113 +243,190 @@ def connect_again(host, port, log, tries=6, wait=10.0):
 
 def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
         log=None, live_conn=None, live_date=None, cols=None,
-        reconnect=None, live_cols=None) -> dict:
-    """Fetch and write, one date at a time.
+        reconnect=None, live_cols=None, depth=3) -> dict:
+    """Extract, transform, load - three stages at once, one chunk apiece.
+
+        extract    this thread's own kdb connection; asks for one chunk,
+                   hands the raw answer on untouched, asks for the next
+        transform  raw answer -> formatted rows per sym (qattsource.shape)
+        load       the calling thread: writes the files, records the misses,
+                   owns the stats, the miss cache and the log
+
+    ONE CONNECTION, BUT NEVER IDLE.  qatt answers one query at a time, so
+    extract is one thread.  What the pipeline buys is that it is never
+    waiting on us: while kdb works on chunk n, chunk n-1 is being formatted
+    and n-2 written.  The slowest stage sets the pace, not the sum of all
+    three.
+
+    MEMORY IS BOUNDED BY `depth`, the size of each hand-off queue.  At most
+    2 x depth + 3 chunks exist at once, however large the run.
 
     A name with prints gets a file.  A name with none gets a line in the
-    miss cache INSTEAD - not an empty file - so the output directory holds
-    only real data and the record of absence lives in one place.
-
-    WHICH SERVER IS DECIDED PER DATE.  live_date is today when --today is
-    on, and that one date is asked of the RDB with no date in the query;
-    every other date is a finished partition and goes to the HDB.  The rows
-    come back in the same shape either way, so everything below this is the
-    same code.
+    miss cache INSTEAD - not an empty file.  Today (--today, live_date) is
+    asked of the RDB and never cached as a miss: a session still running is
+    not an answer.
 
     A READ THAT IS TOO BIG IS HALVED, NOT FATAL.  reconnect(live) opens a
     fresh connection - a reset socket is dead - and the same syms are asked
-    again in half the chunk.  The smaller size is kept for the rest of the
-    run, so the server is not knocked over once per day.  Only a single sym
-    that still fails stops the run, and nothing about it is cached: a
-    failure is not an answer."""
+    again in half the chunk, which size is then kept for the rest of the
+    run.  Only a single sym that still fails stops the run, and nothing
+    about it is cached.  Any error in any stage stops all three and is
+    raised here, in the caller's thread."""
+    import queue
+    import threading
+
     cache = cache if cache is not None else {}
     log = log or logs.Log(stamps=False, quiet=True)
     stats = {"files": 0, "rows": 0, "empty": 0, "reads": 0, "halved": 0}
-    size = max(1, int(chunk))
-    #  THE READS STILL TO COME, re-counted at every chunk: a halving changes
-    #  how many are left, so a total fixed at the start would be wrong.
-    per_date = [len({n.sym for n in names})
-                for names in plan_["by_date"].values()]
+    per_date = [(date, names, sorted({n.sym for n in names}))
+                for date, names in plan_["by_date"].items()]
 
-    def reads_left(after_day, syms_left_today):
-        return (-(-syms_left_today // size)
-                + sum(-(-n // size) for n in per_date[after_day + 1:]))
+    if dry_run:
+        size = max(1, int(chunk))
+        for date, names, syms in per_date:
+            reads = -(-len(syms) // size)
+            stats["reads"] += reads
+            log.info(f"{date}  {len(names)} names, {len(syms)} syms, "
+                     f"{reads} read(s)")
+        return stats
 
-    for day, (date, names) in enumerate(plan_["by_date"].items()):
-        by_sym = {}
-        for n in names:
-            by_sym.setdefault(n.sym, []).append(n)
-        syms = sorted(by_sym)
-        log.info(f"{date}  {len(names)} names, {len(syms)} syms, "
-                 f"{-(-len(syms) // size)} read(s)")
+    stop = threading.Event()
+    raw_q, shaped_q = queue.Queue(depth), queue.Queue(depth)
 
-        live = live_conn is not None and date == live_date
-        if live:
-            log.info(f"{date}  from the RDB - today, and today is not a "
-                     f"partition")
-
-        #  ONE CHUNK IN MEMORY AT A TIME.  Each chunk is written out before
-        #  the next is asked for, so a day of 5,000 names never sits in
-        #  memory at once - it is at most `chunk` names of prints.
-        pos, i = 0, 0
-        while pos < len(syms):
-            group = syms[pos:pos + size]
-            if dry_run:
-                stats["reads"] += 1
-                pos += len(group)
-                continue
-            t0 = time.monotonic()
+    def put(q, item):
+        #  A put that gives up when the pipeline is stopping, so a stage
+        #  blocked on a full queue cannot outlive a failure downstream.
+        while not stop.is_set():
             try:
-                fetched = (
-                    qattsource.fetch_live_ticks(live_conn, group,
-                                                cols=live_cols or cols)
-                    if live else
-                    qattsource.fetch_ticks(conn, date, group, cols=cols))
-            except Exception as e:                          # noqa: BLE001
-                if not too_big(e) or reconnect is None:
-                    raise
-                if len(group) == 1:
-                    raise RuntimeError(
-                        f"qatt failed on ONE sym, {group[0]} on {date}: "
-                        f"{e}.  Nothing smaller can be asked; nothing was "
-                        f"cached for it.") from e
-                size = max(1, len(group) // 2)
-                stats["halved"] += 1
-                log.warn(f"{date}  {len(group)} syms was too much for qatt "
-                         f"({type(e).__name__}: {str(e)[:80]}); "
-                         f"reconnecting and asking {size} at a time from "
-                         f"here on")
-                if live:
-                    live_conn = reconnect(True)
-                else:
-                    conn = reconnect(False)
+                q.put(item, timeout=0.5)
+                return True
+            except queue.Full:
                 continue
-            t1 = time.monotonic()
-            stats["reads"] += 1
-            i += 1
-            before = dict(stats)
-            write_chunk(date, [n for s in group for n in by_sym[s]], fetched,
-                        live, markets, out_dir, cache, stats)
-            del fetched
-            pos += len(group)
-            #  Read and write timed apart: which one dominates decides
-            #  whether running reads in parallel would help at all.
-            log.info(f"{date}  chunk {i}/{i + -(-(len(syms) - pos) // size)}"
-                     f"  (run {stats['reads']}/"
-                     f"{stats['reads'] + reads_left(day, len(syms) - pos)})"
-                     f"  {len(group)} syms: "
-                     f"{stats['files'] - before['files']} files, "
-                     f"{stats['empty'] - before['empty']} empty, "
-                     f"{logs.thousands(stats['rows'] - before['rows'])} rows  "
-                     f"read {t1 - t0:.1f}s, write "
-                     f"{time.monotonic() - t1:.1f}s")
+        return False
+
+    def extract():
+        nonlocal conn, live_conn
+        try:
+            size, reads = max(1, int(chunk)), 0
+
+            def reads_left(day, left_today):
+                return (-(-left_today // size)
+                        + sum(-(-len(s) // size) for _d, _n, s in
+                              per_date[day + 1:]))
+
+            for day, (date, names, syms) in enumerate(per_date):
+                live = live_conn is not None and date == live_date
+                by_sym = {}
+                for n in names:
+                    by_sym.setdefault(n.sym, []).append(n)
+                if not put(raw_q, ("info", f"{date}  {len(names)} names, "
+                                   f"{len(syms)} syms, "
+                                   f"{-(-len(syms) // size)} read(s)"
+                                   + ("  - from the RDB, today is not a "
+                                      "partition" if live else ""))):
+                    return
+                pos, i = 0, 0
+                while pos < len(syms):
+                    group = syms[pos:pos + size]
+                    t0 = time.monotonic()
+                    try:
+                        raw = (qattsource.fetch_live_raw(
+                                   live_conn, group, live_cols or cols)
+                               if live else
+                               qattsource.fetch_raw(conn, date, group, cols))
+                    except Exception as e:                  # noqa: BLE001
+                        if not too_big(e) or reconnect is None:
+                            raise
+                        if len(group) == 1:
+                            raise RuntimeError(
+                                f"qatt failed on ONE sym, {group[0]} on "
+                                f"{date}: {e}.  Nothing smaller can be "
+                                f"asked; nothing was cached for it.") from e
+                        size = max(1, len(group) // 2)
+                        put(raw_q, ("halved", f"{date}  {len(group)} syms "
+                                    f"was too much for qatt "
+                                    f"({type(e).__name__}: {str(e)[:80]}); "
+                                    f"reconnecting and asking {size} at a "
+                                    f"time from here on"))
+                        if live:
+                            live_conn = reconnect(True)
+                        else:
+                            conn = reconnect(False)
+                        continue
+                    pos += len(group)
+                    i += 1
+                    reads += 1
+                    label = (f"chunk {i}/{i + -(-(len(syms) - pos) // size)}"
+                             f"  (run {reads}/"
+                             f"{reads + reads_left(day, len(syms) - pos)})")
+                    if not put(raw_q, ("chunk", date, live,
+                                       [n for s in group for n in by_sym[s]],
+                                       raw, label, time.monotonic() - t0)):
+                        return
+            put(raw_q, ("done",))
+        except BaseException as e:                          # noqa: BLE001
+            put(raw_q, ("error", e))
+
+    def transform():
+        try:
+            while True:
+                item = raw_q.get()
+                if item[0] == "chunk":
+                    kind, date, live, names, raw, label, t_read = item
+                    t0 = time.monotonic()
+                    by_sym = qattsource.shape(raw)
+                    del raw
+                    #  The MIC is the last cell of every row, and it is the
+                    #  name's, so two names on one sym get their own rows.
+                    files = [(n, [r + (n.mic,) for r in by_sym.get(n.sym, ())])
+                             for n in names]
+                    del by_sym
+                    item = (kind, date, live, files, label, t_read,
+                            time.monotonic() - t0)
+                if not put(shaped_q, item) or item[0] in ("done", "error"):
+                    return
+        except BaseException as e:                          # noqa: BLE001
+            put(shaped_q, ("error", e))
+
+    workers = [threading.Thread(target=f, name=f"historical-{f.__name__}",
+                                daemon=True) for f in (extract, transform)]
+    for w in workers:
+        w.start()
+    try:
+        while True:
+            item = shaped_q.get()
+            kind = item[0]
+            if kind == "done":
+                break
+            if kind == "error":
+                raise item[1]
+            if kind == "info":
+                log.info(item[1])
+            elif kind == "halved":
+                stats["halved"] += 1
+                log.warn(item[1])
+            else:
+                _, date, live, files, label, t_read, t_shape = item
+                t0 = time.monotonic()
+                before = dict(stats)
+                load_chunk(date, files, live, markets, out_dir, cache, stats)
+                stats["reads"] += 1
+                del files
+                log.info(f"{date}  {label}  "
+                         f"{stats['files'] - before['files']} files, "
+                         f"{stats['empty'] - before['empty']} empty, "
+                         f"{logs.thousands(stats['rows'] - before['rows'])} "
+                         f"rows  read {t_read:.1f}s, transform "
+                         f"{t_shape:.1f}s, write "
+                         f"{time.monotonic() - t0:.1f}s")
+    finally:
+        stop.set()
     return stats
 
 
-def write_chunk(date, names, fetched, live, markets, out_dir, cache, stats):
-    """Write one chunk's files, or record its misses."""
-    for name in names:
-        rows = fetched.get(name.sym, [])
+def load_chunk(date, files, live, markets, out_dir, cache, stats):
+    """LOAD: write each name's file, or record its miss."""
+    for name, rows in files:
         if not rows:
             #  kdb answered, and the answer was empty.  That is a fact
             #  about the data and it is worth remembering.  A query that
@@ -364,10 +441,9 @@ def write_chunk(date, names, fetched, live, markets, out_dir, cache, stats):
             if not live:
                 misscache.record(cache, name.bbg, name.sym, date)
             continue
-        path = ticksfile.path(out_dir, name.crosscode_bbg, name.bbg,
-                              date)
-        stats["rows"] += ticksfile.write(
-            path, rows, name.mic, tz_label(name, markets))
+        path = ticksfile.path(out_dir, name.crosscode_bbg, name.bbg, date)
+        stats["rows"] += ticksfile.write_rows(path, rows,
+                                              tz_label(name, markets))
         stats["files"] += 1
 
 
@@ -1318,10 +1394,22 @@ def self_test() -> int:
               [l.split("  ")[1:3] for l in said.lines if "chunk" in l],
               [["chunk 1/2", "(run 1/2)"], ["chunk 2/2", "(run 2/2)"]])
         check("a chunk of one makes one read per name", stats["reads"], 2)
-        check("and the first name's file is on disk BEFORE the second is "
-              "asked for - the day is never held whole",
-              conn.on_disk, [[], ["7203 JT"]])
         check("both files are written", stats["files"], 2)
+
+    with tempfile.TemporaryDirectory() as d:
+        #  EXTRACT RUNS AHEAD OF LOAD, but only so far.  Twenty chunks, and
+        #  a queue depth of one: no more than 2 x 1 + 3 may be asked for and
+        #  not yet on disk, however fast kdb answers.
+        twenty = [N(f"{k} JT", f"{k}.JP") for k in range(2000, 2020)]
+        conn = Ordered(d)
+        run(conn, plan(twenty, [D(2026, 9, 3)], d, 1, {}), {}, d, 1,
+            False, {}, depth=1)
+        ahead = [k - len(seen) for k, seen in enumerate(conn.on_disk)]
+        check("extract never runs more than 2 x depth + 3 chunks ahead of "
+              "what is written - memory is bounded, not the whole day",
+              max(ahead) <= 5, True)
+        check("and all twenty are written", len(list(Path(d).rglob("*.csv"))),
+              20)
 
     print("\na read too big for qatt is halved, not fatal")
 

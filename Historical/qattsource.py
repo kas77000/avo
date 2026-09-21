@@ -378,6 +378,11 @@ def to_time(value):
     value = _py(value)
     if value is None or isinstance(value, bool):
         return None
+    #  NaT - kdb's null time or timestamp, through pandas - is a datetime
+    #  subclass whose .time() RAISES, so one null print took down a whole
+    #  run.  It is the only value not equal to itself that gets here.
+    if value != value:
+        return None
     if isinstance(value, dt.time):
         return value
     if isinstance(value, dt.datetime):
@@ -595,6 +600,120 @@ def fetch_ticks(conn, date, syms, time_field: str = None, cols=None) -> dict:
             "size": to_decimal(row.get("size")),
             "cond": text(row.get("cond")),
             "ex": text(row.get("ex"))})
+    return out
+
+
+def fetch_raw(conn, date, syms, cols=None):
+    """EXTRACT: the answer exactly as kdb gave it, untouched.
+
+    Nothing is converted here, so the connection is free for the next read
+    while shape() works on this one - see historical_ticks.run."""
+    return conn(ticks_q(None, cols), date, list(syms)) if syms else []
+
+
+def fetch_live_raw(conn, syms, cols=None):
+    """EXTRACT, today, from the RDB."""
+    return conn(live_ticks_q(None, cols), list(syms)) if syms else []
+
+
+def _frame(result):
+    """A pykx table -> ONE pandas conversion, or the rows as dicts when the
+    answer is not a table.  Converted once: .pd() on a pykx table is a full
+    copy, and doing it per column would cost more than it saves."""
+    if result is None:
+        return []
+    try:
+        return result.pd()
+    except AttributeError:
+        return _rows(result)
+
+
+def _columns_of(src, names) -> dict:
+    """{column: list of python values} for each name, None where absent.
+
+    A frame's `tolist` boxes values the same way `to_dict("records")` does
+    in _rows - so the same functions see the same python objects, whichever
+    path read them."""
+    if isinstance(src, list):
+        return {c: [r.get(c) for r in src] for c in names}
+    n = len(src)
+    return {c: src[c].tolist() if c in src.columns else [None] * n
+            for c in names}
+
+
+def _memo(fn):
+    """fn, remembered per distinct value.  A day of one name has thousands
+    of prints but a few hundred prices, so each is formatted once.
+
+    Keyed on the TYPE as well: 1 and 1.0 are equal in python and would
+    share a slot, and they do not format alike (1 and 1.0)."""
+    seen = {}
+
+    def f(v):
+        try:
+            k = (type(v), v)
+            return seen[k] if k in seen else seen.setdefault(k, fn(v))
+        except TypeError:                                   # unhashable
+            return fn(v)
+    return f
+
+
+def _clock_column(src, field) -> list:
+    """The time column as the file writes it, "HH:MM:SS" or "".
+
+    THE ONE COLUMN THE MEMO CANNOT HELP.  Nearly every print has its own
+    millisecond, so there is nothing to share - and boxing each one into a
+    pandas Timedelta just to call clock() on it was most of the transform.
+    A kdb time or timespan (timedelta64) or timestamp (datetime64) is cut to
+    whole seconds in numpy instead, and there are at most 86,400 of those.
+
+    The rules are clock()'s, reproduced: a duration is truncated to the
+    millisecond and must fall inside one day; a timestamp is its time of
+    day; a null is blank.  Anything else - a tz-aware timestamp, an object
+    column, a list - goes through clock() itself."""
+    col = (src[field] if not isinstance(src, list) and field in src.columns
+           else None)
+    kind = col.dtype.kind if col is not None else ""
+    if kind not in ("m", "M") or getattr(col.dt, "tz", None) is not None:
+        return list(map(_memo(clock), _columns_of(src, (field,))[field]))
+    import numpy as np
+    ns = col.to_numpy().view("i8")
+    null = col.isna().to_numpy()
+    if kind == "m":
+        #  int(total_seconds() * 1000) truncates toward zero.
+        ms = np.where(ns >= 0, ns // 1_000_000, -((-ns) // 1_000_000))
+        bad = null | (ms < 0) | (ms >= 86_400_000)
+        secs = ms // 1000
+    else:
+        secs = (ns % 86_400_000_000_000) // 1_000_000_000
+        bad = null
+    secs = np.where(bad, -1, secs)
+    hms = _memo(lambda s: "" if s < 0 else
+                f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}")
+    return list(map(hms, secs.tolist()))
+
+
+def shape(result, time_field: str = None) -> dict:
+    """TRANSFORM: {sym: [(time, price, size, cond, ex), ...]}, as text.
+
+    Byte for byte what fetch_ticks + ticksfile.write produce - the same
+    clock, to_decimal and text, and the same number formatting - but a
+    column at a time and each distinct value once, instead of a dict and a
+    Decimal for every print.  The self-test holds the two paths together."""
+    from ticksfile import _num
+    field = time_field or TIME_FIELD
+    src = _frame(result)
+    c = _columns_of(src, ("sym",) + TICK_FIELDS)
+    clocks = _clock_column(src, field)
+    del src
+    num = _memo(lambda v: _num(to_decimal(v)))
+    txt = _memo(text)
+    out = {}
+    for sym, row in zip(map(txt, c["sym"]),
+                        zip(clocks,
+                            map(num, c["price"]), map(num, c["size"]),
+                            map(txt, c["cond"]), map(txt, c["ex"]))):
+        out.setdefault(sym, []).append(row)
     return out
 
 
@@ -994,6 +1113,83 @@ def self_test() -> int:
     check("both ways refused says so, and names the likely cause, rather "
           "than reporting an empty store", got, "explained")
 
+    print("\nthe fast transform writes the same bytes as the slow one")
+    import tempfile
+    from pathlib import Path
+    import ticksfile
+    F = TIME_FIELD
+    awkward = [
+        {"sym": "A.JP", F: dt.timedelta(hours=9, seconds=1, milliseconds=5),
+         "price": 0.105, "size": 1000, "cond": "T", "ex": b"T"},
+        {"sym": "A.JP", F: dt.timedelta(hours=9, seconds=1, milliseconds=5),
+         "price": 0.105, "size": 1000.0, "cond": "a,b", "ex": "T"},
+        {"sym": "B.JP", F: dt.time(15, 0, 0), "price": 1e-05,
+         "size": 2.5, "cond": None, "ex": ""},
+        {"sym": "A.JP", F: None, "price": 1e10, "size": None,
+         "cond": 'q"x', "ex": None},
+        {"sym": "B.JP", F: 34_200_000, "price": float("nan"),
+         "size": float("inf"), "cond": "", "ex": "X"},
+        {"sym": "A.JP", F: dt.datetime(2026, 9, 3, 10, 0, 0),
+         "price": 3833.0, "size": 7, "cond": "T", "ex": "T"},
+        {"sym": b"C.JP", F: -1, "price": True, "size": "12", "cond": 5,
+         "ex": "T"}]
+
+    class Table:
+        """A pykx table as far as either path looks: .pd() only."""
+
+        def __init__(self, rows):
+            self.rows = rows
+
+        def pd(self):
+            import pandas
+            return pandas.DataFrame(self.rows)
+
+    def both(raw, label):
+        with tempfile.TemporaryDirectory() as d:
+            old = fetch_ticks(lambda q, *a: raw, None, ["x"])
+            new = shape(raw)
+            check(f"{label}: the same syms", sorted(new), sorted(old))
+            same = True
+            for sym in old:
+                a, b = Path(d) / "old.csv", Path(d) / "new.csv"
+                ticksfile.write(a, old[sym], "XTKS", "Tokyo Standard Time")
+                ticksfile.write_rows(b, [r + ("XTKS",) for r in new[sym]],
+                                     "Tokyo Standard Time")
+                same = same and a.read_bytes() == b.read_bytes()
+            check(f"{label}: and every file byte for byte", same, True)
+
+    both(awkward, "rows as a list")
+    try:
+        import pandas  # noqa: F401
+        both(Table(awkward), "rows through pandas")
+        both(Table([{k: v for k, v in r.items() if k != "cond"}
+                    for r in awkward]),
+             "a column the table lacks")
+        numeric = [dict(r, price=float(r["price"]) if r["price"] is not True
+                        else 1.0) for r in awkward]
+        both(Table([dict(r, **{F: dt.timedelta(milliseconds=i * 997)})
+                    for i, r in enumerate(numeric)]),
+             "a pure float64 and timedelta64 table, as kdb sends one")
+        odd = [None, dt.timedelta(milliseconds=-1),
+               dt.timedelta(microseconds=-500), dt.timedelta(hours=24),
+               dt.timedelta(hours=23, minutes=59, seconds=59,
+                            milliseconds=999),
+               dt.timedelta(0), dt.timedelta(hours=9, microseconds=1)]
+        both(Table([dict(r, **{F: t}) for r, t in zip(numeric, odd)]),
+             "timedelta64 with NaT, negatives and a whole day")
+        both(Table([dict(r, **{F: t}) for r, t in zip(numeric, [
+            dt.datetime(2026, 9, 3, 9, 0, 1), None,
+            dt.datetime(1969, 12, 31, 23, 59, 59),
+            dt.datetime(2026, 9, 3, 23, 59, 59, 999000),
+            dt.datetime(2026, 9, 4), dt.datetime(2026, 9, 3, 12),
+            dt.datetime(2026, 9, 3, 12, 0, 0, 1)])]),
+             "a datetime64 column - a kdb timestamp - with a NaT")
+    except ImportError:
+        print("  (pandas not installed - the pykx path was not checked)")
+    check("an empty answer is no syms", shape([]), {})
+    m = _memo(repr)
+    check("the memo tells 1 from 1.0", (m(1), m(1.0), m(1)),
+          ("1", "1.0", "1"))
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

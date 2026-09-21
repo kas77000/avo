@@ -137,18 +137,45 @@ the log prints the partition range so that is visible.
 
 ---
 
-## 5. Fetch
+## 5. Fetch — extract, transform, load
 
-One query per date per `SYM_CHUNK` syms:
+One query per date per `SYM_CHUNK` syms (`--chunk`), naming only the columns
+the file uses — chosen once per run from `cols qatt`:
 
 ```q
-{[d;s] select sym,tradeTime,price,size,cond,ex from qatt
-       where date=d, sym in `$s, price>0, size>0}
+{[d;s] select sym,tradeTime,price,size,cond,ex from qatt where date=d, sym in s}
 ```
 
-`price>0, size>0` is the whole test for "this row is a print" — every qatt row
-is a transaction carrying the quote that stood at the time, so there are no
-quote-only rows to exclude.
+Every column would bring the standing quote with every print; on 2026-09-22
+200 syms of one day that way made the server drop the connection.
+
+Three stages run at once, handing chunks on through small queues:
+
+| stage | where | does |
+|---|---|---|
+| extract | its own thread, the one qatt connection | asks for chunk *n* and hands the raw answer on untouched |
+| transform | its own thread | `qattsource.shape`: raw answer → formatted rows per sym |
+| load | the main thread | writes the files, records the misses, owns the log |
+
+qatt answers one query at a time, so there is one connection; the pipeline's
+point is that kdb is never waiting on us. While it works on chunk *n*, chunk
+*n-1* is being formatted and *n-2* written. Memory is bounded by the queues —
+a few chunks, never a whole day.
+
+Each chunk logs its place and where the time went:
+
+```
+2026-09-04  chunk 3/25  (run 53/750)  10 files, 0 empty, 312,448 rows  read 4.2s, transform 0.4s, write 0.3s
+```
+
+**A read that is too big is halved, not fatal.** A reset connection,
+`'wsfull` or `'limit` → reconnect, halve the chunk, ask again, and keep the
+smaller size for the rest of the run. Only one sym that still fails stops the
+run, and nothing is cached for it.
+
+`shape` is byte-for-byte what the old row-at-a-time path wrote — the self-test
+holds the two together — at about 8× the speed: each distinct price is
+formatted once, and the time column is cut to whole seconds in numpy.
 
 > **`tradeTime` is a placeholder.** qatt has five time columns and `qatt.time`
 > is the *plant's* clock (HKT), not the exchange's. Run `qatt_time_probe.py`
