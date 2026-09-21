@@ -213,8 +213,37 @@ def tz_label(name, markets) -> str:
     return getattr(m, "time_zone", "") if m else ""
 
 
+#  WHAT "TOO BIG" LOOKS LIKE FROM HERE.  On 2026-09-22 the first read of a
+#  30-day backfill - 200 syms of one Asian day, every column - came back as
+#  ConnectionResetError: the server dropped the socket rather than answer.
+#  A q process out of memory says 'wsfull; one over its limits says 'limit.
+#  Every one of those means "ask for less", which is what run() does.
+TOO_BIG = ("wsfull", "limit", "abort")
+
+
+def too_big(e) -> bool:
+    return (isinstance(e, (ConnectionError, TimeoutError))
+            or any(k in str(e) for k in TOO_BIG))
+
+
+def connect_again(host, port, log, tries=6, wait=10.0):
+    """A fresh connection after a reset, waiting for a server that may be
+    coming back up.  A process that dropped us may have been restarted, and
+    asking at once would fail for the same reason."""
+    for n in range(1, tries + 1):
+        time.sleep(wait)
+        try:
+            return qattsource.connect(host, port)
+        except Exception as e:                              # noqa: BLE001
+            log.warn(f"reconnect {n}/{tries} to {host}:{port} failed: "
+                     f"{str(e)[:80]}")
+    raise ConnectionError(f"{host}:{port} did not come back after "
+                          f"{tries} tries, {tries * wait:.0f}s")
+
+
 def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
-        log=None, live_conn=None, live_date=None) -> dict:
+        log=None, live_conn=None, live_date=None, cols=None,
+        reconnect=None, live_cols=None) -> dict:
     """Fetch and write, one date at a time.
 
     A name with prints gets a file.  A name with none gets a line in the
@@ -225,22 +254,34 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
     on, and that one date is asked of the RDB with no date in the query;
     every other date is a finished partition and goes to the HDB.  The rows
     come back in the same shape either way, so everything below this is the
-    same code."""
+    same code.
+
+    A READ THAT IS TOO BIG IS HALVED, NOT FATAL.  reconnect(live) opens a
+    fresh connection - a reset socket is dead - and the same syms are asked
+    again in half the chunk.  The smaller size is kept for the rest of the
+    run, so the server is not knocked over once per day.  Only a single sym
+    that still fails stops the run, and nothing about it is cached: a
+    failure is not an answer."""
     cache = cache if cache is not None else {}
     log = log or logs.Log(stamps=False, quiet=True)
-    stats = {"files": 0, "rows": 0, "empty": 0, "reads": 0}
+    stats = {"files": 0, "rows": 0, "empty": 0, "reads": 0, "halved": 0}
     size = max(1, int(chunk))
-    #  THE WHOLE RUN'S READ COUNT, known before the first one, so every
-    #  chunk can say how far through the run it is and not just the day.
-    total = sum(-(-len({n.sym for n in names}) // size)
-                for names in plan_["by_date"].values())
-    for date, names in plan_["by_date"].items():
+    #  THE READS STILL TO COME, re-counted at every chunk: a halving changes
+    #  how many are left, so a total fixed at the start would be wrong.
+    per_date = [len({n.sym for n in names})
+                for names in plan_["by_date"].values()]
+
+    def reads_left(after_day, syms_left_today):
+        return (-(-syms_left_today // size)
+                + sum(-(-n // size) for n in per_date[after_day + 1:]))
+
+    for day, (date, names) in enumerate(plan_["by_date"].items()):
         by_sym = {}
         for n in names:
             by_sym.setdefault(n.sym, []).append(n)
-        per_day = -(-len(by_sym) // size)
-        log.info(f"{date}  {len(names)} names, {len(by_sym)} syms, "
-                 f"{per_day} read(s)")
+        syms = sorted(by_sym)
+        log.info(f"{date}  {len(names)} names, {len(syms)} syms, "
+                 f"{-(-len(syms) // size)} read(s)")
 
         live = live_conn is not None and date == live_date
         if live:
@@ -249,24 +290,54 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
 
         #  ONE CHUNK IN MEMORY AT A TIME.  Each chunk is written out before
         #  the next is asked for, so a day of 5,000 names never sits in
-        #  memory at once - it is at most `chunk` names of prints.  An
-        #  earlier version gathered the whole day first and wrote after.
-        for i, group in enumerate(chunked(sorted(by_sym), size), 1):
-            stats["reads"] += 1
+        #  memory at once - it is at most `chunk` names of prints.
+        pos, i = 0, 0
+        while pos < len(syms):
+            group = syms[pos:pos + size]
             if dry_run:
+                stats["reads"] += 1
+                pos += len(group)
                 continue
-            before = dict(stats)
             t0 = time.monotonic()
-            fetched = (qattsource.fetch_live_ticks(live_conn, group) if live
-                       else qattsource.fetch_ticks(conn, date, group))
+            try:
+                fetched = (
+                    qattsource.fetch_live_ticks(live_conn, group,
+                                                cols=live_cols or cols)
+                    if live else
+                    qattsource.fetch_ticks(conn, date, group, cols=cols))
+            except Exception as e:                          # noqa: BLE001
+                if not too_big(e) or reconnect is None:
+                    raise
+                if len(group) == 1:
+                    raise RuntimeError(
+                        f"qatt failed on ONE sym, {group[0]} on {date}: "
+                        f"{e}.  Nothing smaller can be asked; nothing was "
+                        f"cached for it.") from e
+                size = max(1, len(group) // 2)
+                stats["halved"] += 1
+                log.warn(f"{date}  {len(group)} syms was too much for qatt "
+                         f"({type(e).__name__}: {str(e)[:80]}); "
+                         f"reconnecting and asking {size} at a time from "
+                         f"here on")
+                if live:
+                    live_conn = reconnect(True)
+                else:
+                    conn = reconnect(False)
+                continue
             t1 = time.monotonic()
+            stats["reads"] += 1
+            i += 1
+            before = dict(stats)
             write_chunk(date, [n for s in group for n in by_sym[s]], fetched,
                         live, markets, out_dir, cache, stats)
             del fetched
+            pos += len(group)
             #  Read and write timed apart: which one dominates decides
             #  whether running reads in parallel would help at all.
-            log.info(f"{date}  chunk {i}/{per_day}  "
-                     f"(run {stats['reads']}/{total})  {len(group)} syms: "
+            log.info(f"{date}  chunk {i}/{i + -(-(len(syms) - pos) // size)}"
+                     f"  (run {stats['reads']}/"
+                     f"{stats['reads'] + reads_left(day, len(syms) - pos)})"
+                     f"  {len(group)} syms: "
                      f"{stats['files'] - before['files']} files, "
                      f"{stats['empty'] - before['empty']} empty, "
                      f"{logs.thousands(stats['rows'] - before['rows'])} rows  "
@@ -771,6 +842,14 @@ def main(argv=None) -> int:
     parts = stage_partitions(conn, a.date, log, a.date_from)
     if parts is None:
         return 1
+    try:
+        have = qattsource.columns(conn)
+        cols = qattsource.select_columns(have)
+    except ValueError as e:
+        log.fail(str(e))
+        return 1
+    log.kv("columns asked for", ", ".join(cols),
+           f"of the {len(have)} qatt has")
     if a.date_from:
         #  The window IS the range: every partition left after the cut.
         backfill = len(parts)
@@ -794,8 +873,20 @@ def main(argv=None) -> int:
 
     log.step(6, "fetch and write")
     live_conn = qattsource.connect(*rdb) if a.today else None
+    if live_conn is not None:
+        #  The RDB is another server and may name its columns differently;
+        #  asking it the HDB's list would be a q error at the worst moment.
+        live_cols = qattsource.select_columns(qattsource.columns(live_conn))
+        if live_cols != cols:
+            log.warn(f"the RDB's columns differ: {', '.join(live_cols)}")
+    else:
+        live_cols = cols
+
+    def reconnect(live):
+        return connect_again(*(rdb if live else (q_host, q_port)), log=log)
+
     stats = run(conn, plan_, markets, out_dir, chunk, a.dry_run, cache, log,
-                live_conn, today)
+                live_conn, today, cols, reconnect, live_cols)
     if not a.dry_run:
         n = misscache.save(miss_path, cache)
         log.kv("miss cache now", f"{logs.thousands(n)} pairs", str(miss_path))
@@ -1231,6 +1322,79 @@ def self_test() -> int:
               "asked for - the day is never held whole",
               conn.on_disk, [[], ["7203 JT"]])
         check("both files are written", stats["files"], 2)
+
+    print("\na read too big for qatt is halved, not fatal")
+
+    class Fussy:
+        """Resets the connection for any read of more than `most` syms,
+        as qatt did on 2026-09-22."""
+
+        def __init__(self, most, error=ConnectionResetError):
+            self.most, self.error, self.asked = most, error, []
+
+        def __call__(self, q, date, syms):
+            self.asked.append(len(syms))
+            if len(syms) > self.most:
+                raise self.error("An existing connection was forcibly "
+                                 "closed by the remote host")
+            return [{"sym": s, qattsource.TIME_FIELD:
+                     dt.datetime(2026, 9, 3, 1, 0, 0),
+                     "price": 1.5, "size": 100, "cond": "", "ex": ""}
+                    for s in syms]
+
+    class Warned:
+        def __init__(self):
+            self.warnings = []
+
+        def info(self, msg=""):
+            pass
+
+        def warn(self, msg=""):
+            self.warnings.append(msg)
+
+    many = [N(f"{k} JT", f"{k}.JP") for k in range(1000, 1008)]
+    with tempfile.TemporaryDirectory() as d:
+        fussy = Fussy(2)
+        reopened = []
+        pl = plan(many, [D(2026, 9, 2), D(2026, 9, 3)], d, 2, {})
+        w = Warned()
+        stats = run(fussy, pl, {}, d, 8, False, {}, w,
+                    reconnect=lambda live: reopened.append(live) or fussy)
+        check("every name still gets its file, both days",
+              stats["files"], 16)
+        check("8 was too many, so 4, then 2 - and 2 is kept for the rest "
+              "of the run rather than failing again on the next day",
+              fussy.asked, [8, 4, 2, 2, 2, 2, 2, 2, 2, 2])
+        check("a fresh connection each time, because a reset one is dead",
+              reopened, [False, False])
+        check("and each halving is a warning in the log", len(w.warnings), 2)
+
+    with tempfile.TemporaryDirectory() as d:
+        cache = {}
+        pl = plan([toyota], [D(2026, 9, 3)], d, 1, cache)
+        try:
+            run(Fussy(0), pl, {}, d, 8, False, cache, Warned(),
+                reconnect=lambda live: Fussy(0))
+            check("one sym that still fails raised", False, True)
+        except RuntimeError as e:
+            check("one sym that still fails stops the run, naming it",
+                  "7203.JP" in str(e), True)
+        check("and is NOT cached as a miss - a failure is not an answer",
+              cache, {})
+
+    with tempfile.TemporaryDirectory() as d:
+        pl = plan(many, [D(2026, 9, 3)], d, 1, {})
+        try:
+            run(Fussy(0, ValueError), pl, {}, d, 8, False, {}, Warned(),
+                reconnect=lambda live: None)
+            check("a q error that is not about size raised", False, True)
+        except ValueError:
+            check("a q error that is NOT about size is not retried - "
+                  "halving a 'type does not fix it", True, True)
+
+    check("'wsfull and 'limit read as too big too",
+          (too_big(Exception("wsfull")), too_big(Exception("limit")),
+           too_big(Exception("type"))), (True, True, False))
 
     print("\na day generated before the folders existed is not redone")
     with tempfile.TemporaryDirectory() as d:

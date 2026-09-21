@@ -128,8 +128,41 @@ MASTER_SYM_Q = (
     " from equity_master where date=d, sym in s}")
 
 
-def ticks_q(time_field: str = None) -> str:
+#  The column list, asked once per run.  On a partitioned table this reads
+#  the schema, not the data, so it costs nothing.
+COLUMNS_Q = "cols qatt"
+
+
+def columns(conn) -> list:
+    """Every column qatt has, as named on this server."""
+    return [text(c) for c in _iter(_py(conn(COLUMNS_Q)))]
+
+
+def select_columns(have, time_field: str = None) -> list:
+    """The columns the files need, in query order, from what qatt HAS.
+
+    NAMING THEM IS WHAT KEEPS THE ANSWER SMALL.  qatt carries the quote that
+    stood at every print, so `select from qatt` brings back many columns
+    for every row where the file uses six - and on 2026-09-22 200 names of
+    one Asian day in every column was enough for the server to drop the
+    connection.  Named from `cols qatt`, so a column the server lacks is
+    left out and reported, never a q error.  sym and the time are the two
+    without which there is no file, and those are refused by name."""
+    field = time_field or TIME_FIELD
+    missing = [c for c in ("sym", field) if c not in have]
+    if missing:
+        raise ValueError(
+            f"qatt has no {', '.join(missing)} column; it has "
+            f"{', '.join(have)}.  Set TIME_FIELD in qattsource.py.")
+    return ["sym", field] + [c for c in TICK_FIELDS if c in have]
+
+
+def ticks_q(time_field: str = None, cols=None) -> str:
     """The tick query: a plain select on the two predicates that matter.
+
+    `cols` names the columns - see select_columns, and pass it for every
+    real read.  Without it every column comes back, which is kept only for
+    the trace and the probe, where the point is to SEE the schema.
 
     NO COLUMN LIST AND NO price>0/size>0.  Both named columns this module
     has never confirmed - TIME_FIELD is openly a placeholder and so are
@@ -141,10 +174,14 @@ def ticks_q(time_field: str = None) -> str:
     time_field is kept in the signature because the probe passes one, but
     the query no longer varies with it: every column comes back regardless.
     The date and the sym are the whole question."""
-    return "{[d;s] select from qatt where date=d, sym in s}"
+    return "{[d;s] select " + _col_list(cols) + "from qatt where date=d, sym in s}"
 
 
-def live_ticks_q(time_field: str = None) -> str:
+def _col_list(cols) -> str:
+    return ",".join(cols) + " " if cols else ""
+
+
+def live_ticks_q(time_field: str = None, cols=None) -> str:
     """The same prints, from the RDB, for today.
 
     TODAY IS NOT IN THE HDB.  qatt is partitioned by date and a partition
@@ -157,7 +194,7 @@ def live_ticks_q(time_field: str = None) -> str:
     constrain and nothing to pass.  The RDB holds today and only today, so
     the table itself is the filter.  LimitUpDown/v1/kdbsource.py asks qatt
     the same undated way for the same reason."""
-    return "{[s] select from qatt where sym in s}"
+    return "{[s] select " + _col_list(cols) + "from qatt where sym in s}"
 
 
 def probe_q() -> str:
@@ -541,7 +578,7 @@ def _master_row(row) -> dict:
     return {f: text(row.get(f)) for f in MASTER_FIELDS}
 
 
-def fetch_ticks(conn, date, syms, time_field: str = None) -> dict:
+def fetch_ticks(conn, date, syms, time_field: str = None, cols=None) -> dict:
     """Every print for these syms on this date, grouped by sym.
 
     One round trip for the whole chunk.  The caller decides the chunk size:
@@ -551,7 +588,7 @@ def fetch_ticks(conn, date, syms, time_field: str = None) -> dict:
         return {}
     out = {}
     field = time_field or TIME_FIELD
-    for row in _rows(conn(ticks_q(field), date, list(syms))):
+    for row in _rows(conn(ticks_q(field, cols), date, list(syms))):
         out.setdefault(text(row.get("sym")), []).append({
             "time": clock(row.get(field)),
             "price": to_decimal(row.get("price")),
@@ -561,14 +598,14 @@ def fetch_ticks(conn, date, syms, time_field: str = None) -> dict:
     return out
 
 
-def fetch_live_ticks(conn, syms, time_field: str = None) -> dict:
+def fetch_live_ticks(conn, syms, time_field: str = None, cols=None) -> dict:
     """Today's prints for these syms, from the RDB.  No date, either sent or
     returned - the table is today."""
     if not syms:
         return {}
     out = {}
     field = time_field or TIME_FIELD
-    for row in _rows(conn(live_ticks_q(field), list(syms))):
+    for row in _rows(conn(live_ticks_q(field, cols), list(syms))):
         out.setdefault(text(row.get("sym")), []).append({
             "time": clock(row.get(field)),
             "price": to_decimal(row.get("price")),
@@ -618,6 +655,34 @@ def self_test() -> int:
           .replace("where sym in s", "where date=d, sym in s"), ticks_q())
     check("the dated query does name the partition, and still does",
           "date=d" in ticks_q(), True)
+
+    print("\nnaming the columns, so the answer stays small")
+    HAVE = ["date", "sym", "time", "tradeTime", "price", "size", "cond", "ex",
+            "bid", "ask", "bsize", "asize", "srcTime", "lineTime"]
+    cols = select_columns(HAVE, "tradeTime")
+    check("the six the file uses, and nothing of the standing quote",
+          cols, ["sym", "tradeTime", "price", "size", "cond", "ex"])
+    check("and the query names exactly those",
+          ticks_q("tradeTime", cols),
+          "{[d;s] select sym,tradeTime,price,size,cond,ex from qatt "
+          "where date=d, sym in s}")
+    check("so does today's",
+          live_ticks_q("tradeTime", cols),
+          "{[s] select sym,tradeTime,price,size,cond,ex from qatt "
+          "where sym in s}")
+    check("a column qatt lacks is left out rather than a q error",
+          select_columns(["sym", "tradeTime", "price", "size", "ex"],
+                         "tradeTime"),
+          ["sym", "tradeTime", "price", "size", "ex"])
+    try:
+        select_columns(["sym", "time", "price"], "tradeTime")
+        check("no time column raised", False, True)
+    except ValueError as e:
+        check("no time column is refused, naming it and listing what "
+              "there is", ("tradeTime" in str(e), "time" in str(e)),
+              (True, True))
+    check("`cols qatt` is read as plain names",
+          columns(lambda q: ["sym", "tradeTime"]), ["sym", "tradeTime"])
 
     check("the probe asks for all five time columns at once",
           all(f in probe_q() for f in TIME_FIELDS), True)
