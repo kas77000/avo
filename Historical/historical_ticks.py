@@ -82,6 +82,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import sys
+import time
 from pathlib import Path
 
 import crosscode
@@ -228,50 +229,75 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
     cache = cache if cache is not None else {}
     log = log or logs.Log(stamps=False, quiet=True)
     stats = {"files": 0, "rows": 0, "empty": 0, "reads": 0}
+    size = max(1, int(chunk))
+    #  THE WHOLE RUN'S READ COUNT, known before the first one, so every
+    #  chunk can say how far through the run it is and not just the day.
+    total = sum(-(-len({n.sym for n in names}) // size)
+                for names in plan_["by_date"].values())
     for date, names in plan_["by_date"].items():
         by_sym = {}
         for n in names:
             by_sym.setdefault(n.sym, []).append(n)
+        per_day = -(-len(by_sym) // size)
         log.info(f"{date}  {len(names)} names, {len(by_sym)} syms, "
-                 f"{-(-len(by_sym) // max(1, chunk))} read(s)")
+                 f"{per_day} read(s)")
 
         live = live_conn is not None and date == live_date
         if live:
             log.info(f"{date}  from the RDB - today, and today is not a "
                      f"partition")
 
-        fetched = {}
-        for group in chunked(sorted(by_sym), chunk):
-            if not dry_run:
-                fetched.update(
-                    qattsource.fetch_live_ticks(live_conn, group) if live
-                    else qattsource.fetch_ticks(conn, date, group))
+        #  ONE CHUNK IN MEMORY AT A TIME.  Each chunk is written out before
+        #  the next is asked for, so a day of 5,000 names never sits in
+        #  memory at once - it is at most `chunk` names of prints.  An
+        #  earlier version gathered the whole day first and wrote after.
+        for i, group in enumerate(chunked(sorted(by_sym), size), 1):
             stats["reads"] += 1
-
-        for name in names:
-            rows = fetched.get(name.sym, [])
             if dry_run:
                 continue
-            if not rows:
-                #  kdb answered, and the answer was empty.  That is a fact
-                #  about the data and it is worth remembering.  A query that
-                #  RAISED never gets here - it takes the whole run down -
-                #  which is what keeps an outage out of the cache.
-                #
-                #  EXCEPT FOR TODAY, which is not a fact yet.  A name that
-                #  has not traded by 11am may trade at 2pm, and a miss
-                #  cached now is never asked again.  Today is remembered by
-                #  nothing, which is also why --today always refetches.
-                stats["empty"] += 1
-                if not live:
-                    misscache.record(cache, name.bbg, name.sym, date)
-                continue
-            path = ticksfile.path(out_dir, name.crosscode_bbg, name.bbg,
-                                  date)
-            stats["rows"] += ticksfile.write(
-                path, rows, name.mic, tz_label(name, markets))
-            stats["files"] += 1
+            before = dict(stats)
+            t0 = time.monotonic()
+            fetched = (qattsource.fetch_live_ticks(live_conn, group) if live
+                       else qattsource.fetch_ticks(conn, date, group))
+            t1 = time.monotonic()
+            write_chunk(date, [n for s in group for n in by_sym[s]], fetched,
+                        live, markets, out_dir, cache, stats)
+            del fetched
+            #  Read and write timed apart: which one dominates decides
+            #  whether running reads in parallel would help at all.
+            log.info(f"{date}  chunk {i}/{per_day}  "
+                     f"(run {stats['reads']}/{total})  {len(group)} syms: "
+                     f"{stats['files'] - before['files']} files, "
+                     f"{stats['empty'] - before['empty']} empty, "
+                     f"{logs.thousands(stats['rows'] - before['rows'])} rows  "
+                     f"read {t1 - t0:.1f}s, write "
+                     f"{time.monotonic() - t1:.1f}s")
     return stats
+
+
+def write_chunk(date, names, fetched, live, markets, out_dir, cache, stats):
+    """Write one chunk's files, or record its misses."""
+    for name in names:
+        rows = fetched.get(name.sym, [])
+        if not rows:
+            #  kdb answered, and the answer was empty.  That is a fact
+            #  about the data and it is worth remembering.  A query that
+            #  RAISED never gets here - it takes the whole run down -
+            #  which is what keeps an outage out of the cache.
+            #
+            #  EXCEPT FOR TODAY, which is not a fact yet.  A name that
+            #  has not traded by 11am may trade at 2pm, and a miss
+            #  cached now is never asked again.  Today is remembered by
+            #  nothing, which is also why --today always refetches.
+            stats["empty"] += 1
+            if not live:
+                misscache.record(cache, name.bbg, name.sym, date)
+            continue
+        path = ticksfile.path(out_dir, name.crosscode_bbg, name.bbg,
+                              date)
+        stats["rows"] += ticksfile.write(
+            path, rows, name.mic, tz_label(name, markets))
+        stats["files"] += 1
 
 
 def log_universe(rows, names, excluded, tally, log) -> None:
@@ -1166,6 +1192,45 @@ def self_test() -> int:
         pl2 = plan([bhp], [D(2026, 9, 3)], d, 1, cache)
         stats2 = run(Silent(), pl2, {}, d, 200, False, cache)
         check("so the next run asks kdb nothing at all", stats2["reads"], 0)
+
+    print("\none chunk in memory at a time")
+
+    class Ordered:
+        """Answers every sym asked, and notes which files were already on
+        disk each time it is asked again."""
+
+        def __init__(self, out):
+            self.out, self.on_disk = out, []
+
+        def __call__(self, q, date, syms):
+            self.on_disk.append(sorted(
+                f.parent.name for f in Path(self.out).rglob("*.csv")))
+            return [{"sym": s, qattsource.TIME_FIELD:
+                     dt.datetime(2026, 9, 3, 1, 0, 0),
+                     "price": 1.5, "size": 100, "cond": "", "ex": ""}
+                    for s in syms]
+
+    with tempfile.TemporaryDirectory() as d:
+        pl = plan([toyota, bhp], [D(2026, 9, 3)], d, 1, {})
+        conn = Ordered(d)
+
+        class Lines:
+            def __init__(self):
+                self.lines = []
+
+            def info(self, msg=""):
+                self.lines.append(msg)
+
+        said = Lines()
+        stats = run(conn, pl, {}, d, 1, False, {}, said)
+        check("every chunk says where it is in the day and in the run",
+              [l.split("  ")[1:3] for l in said.lines if "chunk" in l],
+              [["chunk 1/2", "(run 1/2)"], ["chunk 2/2", "(run 2/2)"]])
+        check("a chunk of one makes one read per name", stats["reads"], 2)
+        check("and the first name's file is on disk BEFORE the second is "
+              "asked for - the day is never held whole",
+              conn.on_disk, [[], ["7203 JT"]])
+        check("both files are written", stats["files"], 2)
 
     print("\na day generated before the folders existed is not redone")
     with tempfile.TemporaryDirectory() as d:
