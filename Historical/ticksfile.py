@@ -48,9 +48,20 @@ SUFFIX = ".csv"
 NAME_RE = re.compile(r"^raw-(?P<bbg>.+)-(?P<date>\d{8})\.csv$")
 
 
+def safe(code: str) -> str:
+    """A code as it may appear in a path: 'LPN/F TB' -> 'LPN_F TB'.
+
+    THAILAND'S FOREIGN BOARD is spelt with a slash - LPN/F TB - and a slash
+    in a path is a folder.  Written as it was, LPN/F TB's day landed at
+    LPN/F TB/raw-LPN/F TB-20260903.csv: three folders deep, under a name
+    existing_dates never matched, so every run fetched it again.  The desk
+    names these LPN_F TB, folder and file alike."""
+    return (code or "").strip().replace("/", "_")
+
+
 def filename(bbg: str, date) -> str:
     """('7203 JT', 2026-09-03) -> 'raw-7203 JT-20260903.csv'."""
-    return f"{PREFIX}{bbg}-{date:%Y%m%d}{SUFFIX}"
+    return f"{PREFIX}{safe(bbg)}-{date:%Y%m%d}{SUFFIX}"
 
 
 def folder(crosscode_bbg: str) -> str:
@@ -71,7 +82,7 @@ def folder(crosscode_bbg: str) -> str:
     handful of days that name actually has.
 
     """
-    return (crosscode_bbg or "").strip()
+    return safe(crosscode_bbg)
 
 
 def path(directory, crosscode_bbg: str, bbg: str, date) -> Path:
@@ -108,7 +119,7 @@ def existing_dates(directory, crosscode_bbg: str, bbg: str) -> set:
     out = set()
     for entry in d.iterdir():
         parsed = parse_filename(entry.name)
-        if parsed and parsed[0] == bbg:
+        if parsed and parsed[0] == safe(bbg):
             out.add(parsed[1])
     return out
 
@@ -165,7 +176,8 @@ def migrate_flat(directory, folder_of=None, dry_run=False) -> dict:
     folder is the one existing_dates found, so it is the one that counts,
     and the loose copy is left behind to be looked at rather than deleted
     silently."""
-    folder_of = folder_of or {}
+    #  Keyed as the FILENAME spells the code, which is safe()'s spelling.
+    folder_of = {safe(k): v for k, v in (folder_of or {}).items()}
     d = Path(directory)
     tally = {"moved": 0, "already there": 0, "unknown code": 0}
     if not d.is_dir():
@@ -191,6 +203,46 @@ def migrate_flat(directory, folder_of=None, dry_run=False) -> dict:
             dest.parent.mkdir(parents=True, exist_ok=True)
             entry.replace(dest)
     return tally
+
+
+def migrate_slashed(directory, names, dry_run=False) -> int:
+    """Move files written before safe() existed to where they belong now.
+    `names` is [(crosscode code, file code)].  Returns how many moved.
+
+    Only codes with a slash are looked at, and only at the exact place the
+    old path put them - so nothing else in the store is touched.  The
+    folders left empty are removed; anything else in them is left alone."""
+    root, moved = Path(directory), 0
+    for cc, bbg in names:
+        if "/" not in (cc or "") + (bbg or ""):
+            continue
+        probe = root / cc.strip() / f"{PREFIX}{bbg.strip()}-00000000{SUFFIX}"
+        old_dir, head = probe.parent, probe.name[:-len("00000000" + SUFFIX)]
+        if not old_dir.is_dir():
+            continue
+        for f in sorted(old_dir.iterdir()):
+            stamp = f.name[len(head):-len(SUFFIX)]
+            if not (f.is_file() and f.name.startswith(head)
+                    and f.name.endswith(SUFFIX) and len(stamp) == 8
+                    and stamp.isdigit()):
+                continue
+            try:
+                day = dt.datetime.strptime(stamp, "%Y%m%d").date()
+            except ValueError:
+                continue
+            dest = path(root, cc, bbg, day)
+            if dest.exists():
+                continue
+            moved += 1
+            if not dry_run:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                f.replace(dest)
+        if not dry_run:
+            gone = old_dir
+            while gone != root and gone.is_dir() and not any(gone.iterdir()):
+                gone.rmdir()
+                gone = gone.parent
+    return moved
 
 
 def write(path, rows, mic: str, tz_label: str = "") -> int:
@@ -431,6 +483,59 @@ def self_test() -> int:
         check("a day that is already in the folder is not overwritten by "
               "the loose copy", (again["moved"], again["already there"]),
               (0, 1))
+
+    print("\nThailand's foreign board: LPN/F TB is LPN_F TB on disk")
+    lpn = D(2026, 9, 3)
+    check("the slash becomes an underscore in the file name",
+          filename("LPN/F TB", lpn), "raw-LPN_F TB-20260903.csv")
+    check("and in the folder", folder("LPN/F TB"), "LPN_F TB")
+    check("so the whole path is one folder and one file, not four levels",
+          path("out", "LPN/F TB", "LPN/F TB", lpn).parts[-3:],
+          ("out", "LPN_F TB", "raw-LPN_F TB-20260903.csv"))
+    check("a code with no slash is unchanged", filename("7203 JT", lpn),
+          "raw-7203 JT-20260903.csv")
+    with tempfile.TemporaryDirectory() as d:
+        write_rows(path(d, "LPN/F TB", "LPN/F TB", lpn), [])
+        check("a day on disk is found under the crosscode's own spelling - "
+              "without this, every run fetched it again",
+              existing_dates(d, "LPN/F TB", "LPN/F TB"), {lpn})
+
+    with tempfile.TemporaryDirectory() as d:
+        #  EXACTLY where the old code put them: Path / "LPN/F TB" /
+        #  "raw-LPN/F TB-<date>.csv", four levels deep.
+        old = [Path(d) / "LPN/F TB" / f"raw-LPN/F TB-2026090{k}.csv"
+               for k in (3, 4)]
+        for f in old:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x", encoding="utf-8")
+        keep = Path(d) / "LPN TB" / "raw-LPN TB-20260903.csv"
+        keep.parent.mkdir(parents=True)
+        keep.write_text("y", encoding="utf-8")
+        pairs = [("LPN/F TB", "LPN/F TB"), ("LPN TB", "LPN TB")]
+
+        check("--dry-run counts them and moves nothing",
+              (migrate_slashed(d, pairs, dry_run=True), old[0].exists()),
+              (2, True))
+        check("a real run moves both days", migrate_slashed(d, pairs), 2)
+        check("to LPN_F TB, under the new name",
+              existing_dates(d, "LPN/F TB", "LPN/F TB"),
+              {D(2026, 9, 3), D(2026, 9, 4)})
+        check("the contents come with them",
+              path(d, "LPN/F TB", "LPN/F TB", lpn).read_text(), "x")
+        check("the nested folders left empty are gone",
+              sorted(p.name for p in Path(d).iterdir()),
+              ["LPN TB", "LPN_F TB"])
+        check("the ordinary LPN TB next door is not touched",
+              keep.read_text(), "y")
+        check("and a second run finds nothing left to move",
+              migrate_slashed(d, pairs), 0)
+
+    with tempfile.TemporaryDirectory() as d:
+        loose = Path(d) / filename("LPN/F TB", lpn)
+        loose.write_text("z", encoding="utf-8")
+        migrate_flat(d, {"LPN/F TB": "LPN/F TB"})
+        check("a loose file of a slash code goes to its underscore folder",
+              existing_dates(d, "LPN/F TB", "LPN/F TB"), {lpn})
 
     print("\na file under its real name is a finished file")
     with tempfile.TemporaryDirectory() as d:

@@ -165,6 +165,12 @@ def stage_migrate(names, out_dir, dry_run, log):
 
     Silent when there is nothing loose, which is every run after the first.
     """
+    slashed = ticksfile.migrate_slashed(
+        out_dir, [(n.crosscode_bbg, n.bbg) for n in names], dry_run)
+    if slashed:
+        log.kv("slash codes renamed", logs.thousands(slashed),
+               "LPN/F TB's files, from nested folders to LPN_F TB"
+               + ("   NOT MOVED, --dry-run" if dry_run else ""))
     tally = ticksfile.migrate_flat(
         out_dir, {n.bbg: n.crosscode_bbg for n in names}, dry_run)
     if not any(tally.values()):
