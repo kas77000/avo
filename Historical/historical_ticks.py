@@ -45,6 +45,7 @@ Bloomberg version had.
     python historical_ticks.py --today         also today, from the RDB
     python historical_ticks.py --date 2026-09-02   as if that were today
     python historical_ticks.py --only "7203 JT"    one name, for a check
+    python historical_ticks.py --venues "NSI-MAIN|BSE-MAIN"   those markets only
     python historical_ticks.py --retry-misses  ask again about the empties
     python historical_ticks.py --log run.log   tee the log to a file
     python historical_ticks.py --quiet         warnings and failures only
@@ -328,8 +329,24 @@ def log_result(stats, dry_run, log) -> None:
 # pipeline.
 # =============================================================================
 
-def stage_crosscode(path, only, log):
-    """Read the security master, optionally down to one name.
+def parse_venues(spec: str, known):
+    """'NSI-MAIN|BSE-MAIN' -> the FidessaMarkets to work on, or [] for all.
+
+    REFUSED BY NAME if markets.csv has never heard of one.  A typo that
+    silently matched nothing would look exactly like a market with no rows.
+    The same rule, and the same spelling, as LimitUpDown's --venues."""
+    out = [v.strip() for v in (spec or "").split("|") if v.strip()]
+    bad = [v for v in out if v not in known]
+    if bad:
+        raise ValueError(
+            f"unknown venue(s) {bad}; config/markets.csv has "
+            f"{', '.join(sorted(known))}")
+    return out
+
+
+def stage_crosscode(path, only, log, venues=()):
+    """Read the security master, optionally down to some venues, then to
+    one name.
 
     `only` matches the crosscode's own BloombergCode (`600000 C1`) or the
     code the file ends up under (`600000 CG`).  Both are offered because a
@@ -343,6 +360,14 @@ def stage_crosscode(path, only, log):
                      f"{e.reason}")
         else:
             log.info(f"note: {e.reason}")
+    if venues:
+        before = len(rows)
+        rows = [r for r in rows if r.market in venues]
+        log.kv("--venues", f"{logs.thousands(len(rows))} of "
+                           f"{logs.thousands(before)} rows", "|".join(venues))
+        if not rows:
+            log.fail(f"no crosscode row is on {'|'.join(venues)}")
+            return None, dropped
     if not only:
         return rows, dropped
 
@@ -434,7 +459,8 @@ def trace(cfg, a, log=None) -> int:
              "rewrites the file. It is a diagnostic, not a run.")
 
     log.step(1, "crosscode  - which rows is this name")
-    rows, _dropped = stage_crosscode(cfg["CROSSCODE_PATH"], a.trace, log)
+    rows, _dropped = stage_crosscode(cfg["CROSSCODE_PATH"], a.trace, log,
+                                     a.venue_list)
     if rows is None:
         return 1
 
@@ -593,6 +619,10 @@ def main(argv=None) -> int:
     p.add_argument("--only", default="",
                    help="one code - the crosscode's (600000 C1) or the "
                         "file's (600000 CG)")
+    p.add_argument("--venues", default="", metavar="VENUE|VENUE",
+                   help="these FidessaMarkets only, pipe separated, e.g. "
+                        '"NSI-MAIN|BSE-MAIN".  Names must be in '
+                        "config/markets.csv.")
     p.add_argument("--trace", default="",
                    help="ONE name, ONE date, every stage shown and the file "
                         "written whatever is already on disk.  Use --date "
@@ -639,6 +669,13 @@ def main(argv=None) -> int:
         print(f"FAIL  {e}", file=sys.stderr)
         return 2
 
+    markets = marketcfg.load(HERE / "config" / "markets.csv")
+    try:
+        a.venue_list = parse_venues(a.venues, markets)
+    except ValueError as e:
+        print(f"FAIL  --venues: {e}", file=sys.stderr)
+        return 2
+
     if a.trace:
         return trace(cfg, a)
 
@@ -649,10 +686,9 @@ def main(argv=None) -> int:
     chunk = cfg["SYM_CHUNK"] if a.chunk is None else a.chunk
 
     log = logs.Log(path=a.log or None, quiet=a.quiet)
-    markets = marketcfg.load(HERE / "config" / "markets.csv")
 
     log.step(1, "crosscode")
-    rows, dropped = stage_crosscode(crosscode_path, a.only, log)
+    rows, dropped = stage_crosscode(crosscode_path, a.only, log, a.venue_list)
     if rows is None:
         return 1
 
@@ -861,6 +897,7 @@ def demo() -> int:
 
         class Args:
             trace, date, log, dry_run = "600000 C1", "2026-09-03", "", False
+            venue_list = []
 
         real_connect = qattsource.connect
         qattsource.connect = lambda host, port: conn
@@ -907,6 +944,37 @@ def self_test() -> int:
             self.bbg, self.ticker, self.market = bbg, ticker, market
 
     MK = marketcfg.load(HERE / "config" / "markets.csv")
+
+    print("\n--venues")
+    check("pipe separated, spaces forgiven",
+          parse_venues(" NSI-MAIN | BSE-MAIN ", MK), ["NSI-MAIN", "BSE-MAIN"])
+    check("nothing given means every venue", parse_venues("", MK), [])
+    try:
+        parse_venues("NSE-MAIN", MK)
+        check("a venue markets.csv does not know raised", False, True)
+    except ValueError as e:
+        check("a venue markets.csv does not know is refused, by name",
+              "NSE-MAIN" in str(e), True)
+
+    class _Quiet:
+        def __getattr__(self, _name):
+            return lambda *a, **k: None
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        cc = Path(d) / "CrossCode.csv"
+        cc.write_text("BloombergCode,FidessaMarket\n"
+                      "GOLDSTAR IS,NSI-MAIN\n500325 IB,BSE-MAIN\n"
+                      "7203 JT,TYO-MAIN\n", encoding="utf-8")
+        got, _ = stage_crosscode(cc, "", _Quiet(), ["NSI-MAIN", "BSE-MAIN"])
+        check("only rows on the named venues are kept",
+              [r.bbg for r in got], ["GOLDSTAR IS", "500325 IB"])
+        got, _ = stage_crosscode(cc, "", _Quiet(), [])
+        check("and with no --venues, all of them", len(got), 3)
+        got, _ = stage_crosscode(cc, "", _Quiet(), ["ASX-MAIN"])
+        check("a venue with no rows in the crosscode stops the run", got, None)
+        got, _ = stage_crosscode(cc, "7203 JT", _Quiet(), ["NSI-MAIN"])
+        check("--only outside --venues finds nothing", got, None)
     c = candidates([Row("7203 JT"), Row("7203 JE", market="JNX-MAIN"),
                     Row("BHP AU", "BHP", "ASX-MAIN"),
                     Row("600000 C1", "600000", "SHA-MAIN")], MK)

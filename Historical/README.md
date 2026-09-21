@@ -170,6 +170,7 @@ python historical_ticks.py                 the daily run
 python historical_ticks.py --backfill 90   a deeper first run
 python historical_ticks.py --date 2026-09-02   as if that were today
 python historical_ticks.py --only "7203 JT"    one name
+python historical_ticks.py --venues "NSI-MAIN|BSE-MAIN"   those FidessaMarkets only
 python historical_ticks.py --retry-misses      ask again about the empties
 python historical_ticks.py --log run.log       tee the log to a file
 python historical_ticks.py --quiet             warnings and failures only
