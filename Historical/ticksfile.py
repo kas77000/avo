@@ -55,8 +55,20 @@ def safe(code: str) -> str:
     in a path is a folder.  Written as it was, LPN/F TB's day landed at
     LPN/F TB/raw-LPN/F TB-20260903.csv: three folders deep, under a name
     existing_dates never matched, so every run fetched it again.  The desk
-    names these LPN_F TB, folder and file alike."""
-    return (code or "").strip().replace("/", "_")
+    names these LPN_F TB, folder and file alike.
+
+    THE OTHER CHARACTERS WINDOWS REFUSES ARE DROPPED.  The crosscode carries
+    `HPHT* SP`, and on 2026-09-22 mkdir refused it and stopped a run at
+    chunk 1,043 of 37,530.  `* ? " < > | : \\` can never be in a Windows
+    name, so they are removed - HPHT* SP is HPHT SP on disk."""
+    out = (code or "").strip().replace("/", "_")
+    for ch in _REFUSED:
+        out = out.replace(ch, "")
+    #  Windows also refuses a name ending in a space or a dot.
+    return " ".join(out.split()).rstrip(". ")
+
+
+_REFUSED = '*?"<>|:\\'
 
 
 def filename(bbg: str, date) -> str:
@@ -494,6 +506,22 @@ def self_test() -> int:
           ("out", "LPN_F TB", "raw-LPN_F TB-20260903.csv"))
     check("a code with no slash is unchanged", filename("7203 JT", lpn),
           "raw-7203 JT-20260903.csv")
+
+    print("\ncharacters Windows refuses in a name")
+    check("HPHT* SP is HPHT SP on disk - folder", folder("HPHT* SP"),
+          "HPHT SP")
+    check("and file", filename("HPHT* SP", lpn), "raw-HPHT SP-20260903.csv")
+    check("every refused character goes, and no double space is left",
+          safe('A*?"<>|:\\B *C SP'), "AB C SP")
+    check("nor a trailing dot or space, which Windows also refuses",
+          safe("ABC SP. "), "ABC SP")
+    with tempfile.TemporaryDirectory() as d:
+        p = path(d, "HPHT* SP", "HPHT* SP", lpn)
+        write_rows(p, [])
+        check("so the folder and file can actually be made",
+              (p.parent.name, p.name), ("HPHT SP", "raw-HPHT SP-20260903.csv"))
+        check("and the day is found again on the next run",
+              existing_dates(d, "HPHT* SP", "HPHT* SP"), {lpn})
     with tempfile.TemporaryDirectory() as d:
         write_rows(path(d, "LPN/F TB", "LPN/F TB", lpn), [])
         check("a day on disk is found under the crosscode's own spelling - "

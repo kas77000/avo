@@ -176,6 +176,24 @@ def build(rows, master: dict, markets) -> tuple:
                           crosscode_bbg=chosen.bbg))
 
     names.sort(key=lambda n: n.bbg)
+
+    #  TWO NAMES, ONE FILE.  ticksfile.safe() drops what Windows refuses, so
+    #  `HPHT* SP` is `HPHT SP` on disk - and if the crosscode also carries a
+    #  real `HPHT SP` on another sym, both would write the same file, each
+    #  overwriting the other, every run.  The first in code order keeps the
+    #  path; the rest are excluded by name, never merged in silence.
+    import ticksfile
+    taken, kept = {}, []
+    for n in names:
+        where = (ticksfile.folder(n.crosscode_bbg), ticksfile.safe(n.bbg))
+        if where in taken:
+            drop(f"same file on disk as {taken[where]} once * ? etc. are "
+                 f"removed", n.bbg)
+            continue
+        taken[where] = n.bbg
+        kept.append(n)
+    names = kept
+
     return (names,
             [Excluded(reason=k, rows=v) for k, v in sorted(excluded.items())],
             tally)
@@ -334,6 +352,23 @@ def self_test() -> int:
     check("is empty, not an error", build([], {}, M), ([], [], {
         "equity_master": 0, "markets.csv": 0, "no primary match": 0,
         "renamed by MIC": 0, "china without a MIC": 0}))
+
+    print("\na * in the crosscode code")
+    star = Row("HPHT* SP", "HPHT*", "SP", "SES-MAIN")
+    names, excl, _ = build([star], {"HPHT* SP": em("HPHT.SP", "SP", "SP",
+                                                   "XSES")}, M)
+    check("the folder is still the crosscode's own BloombergCode",
+          names[0].crosscode_bbg, "HPHT* SP")
+    plain = Row("HPHT SP", "HPHT", "SP", "SES-MAIN")
+    names, excl, _ = build(
+        [star, plain],
+        {"HPHT* SP": em("HPHTX.SP", "SP", "SP", "XSES"),
+         "HPHT SP": em("HPHT.SP", "SP", "SP", "XSES")}, M)
+    check("two syms that would land on ONE file keep one name, not two "
+          "overwriting each other", [n.bbg for n in names], ["HPHT SP"])
+    check("and the other is excluded, named",
+          [(e.reason.startswith("same file on disk"), e.rows) for e in excl],
+          [(True, ["HPHT* SP"])])
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1
