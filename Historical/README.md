@@ -226,6 +226,14 @@ from qatt. So `3833` and `3833.0` are one price, and the order of prints
 *inside a single second* is not a difference, because the two sources have no
 reason to sequence a second the same way. Everything else is.
 
+**Compressed old files are read as they are.** The old process gzips a file
+once it is old enough: the folder keeps its name, and inside it
+`raw-7203 JT-20260612.csv` becomes `raw-7203 JT-20260612.csv.gz`. So when the
+`.csv` is not there, the `.csv.gz` is read instead, decompressed in memory —
+nothing is extracted to disk — and one folder may mix both. Only a file that is
+neither is `missing`; a `.gz` that will not decompress is `unreadable`, and the
+comparison carries on. The summary says how many old files came from `.gz`.
+
 ```
 600000 C1/raw-600000 CG-20260817.csv  MISSING
   the new process generated it; the old folder has no such file
@@ -240,6 +248,7 @@ reason to sequence a second the same way. Everything else is.
   content differs            1
   identical                  1
   skipped (not ours)         1
+  old read from .gz          0
 ```
 
 Every problem file lands in `compare-report.csv`; the terminal shows the

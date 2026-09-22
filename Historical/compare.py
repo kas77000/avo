@@ -30,6 +30,13 @@ and the new ones from qatt, so the two agree on values and have no reason to
 agree on spelling or on the order of prints inside one second.  See
 compare_rows().
 
+THE OLD PROCESS COMPRESSES FILES ONCE THEY ARE OLD ENOUGH.  Folders keep
+their names; inside one, a file may be raw-7203 JT-20260612.csv.gz instead of
+.csv.  So an old file missing as .csv is read from .csv.gz, decompressed in
+memory - nothing is extracted to disk - and only a file that is neither is
+missing.  A .gz that will not decompress is UNREADABLE, reported like any
+other finding rather than stopping the run.
+
     python compare.py OLD_DIR NEW_DIR
     python compare.py OLD_DIR NEW_DIR --report somewhere/else.csv
     python compare.py --self-test
@@ -38,7 +45,9 @@ compare_rows().
 from __future__ import annotations
 
 import csv
+import gzip
 import os
+import zlib
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -48,6 +57,7 @@ import ticksfile
 #  never also a header difference, because there is no header to compare it
 #  against.
 MISSING = "missing"
+UNREADABLE = "unreadable"
 HEADER = "header"
 DIFFERS = "differs"
 OK = "ok"
@@ -225,7 +235,9 @@ def read_ticks(path):
     Wholly blank lines are dropped.  ticksfile.write() takes care not to
     produce them - newline="" is why - but a file written before that, or by
     the old job, can carry them, and a blank line is not a print."""
-    with Path(path).open(newline="", encoding="utf-8-sig") as fh:
+    path = Path(path)
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", newline="", encoding="utf-8-sig") as fh:
         rows = list(csv.reader(fh))
     if not rows:
         return [], []
@@ -253,6 +265,16 @@ def compare_file(old_path, new_path) -> dict:
     return {"status": OK if agrees(d) else DIFFERS,
             "rows_old": d["rows_old"], "rows_new": d["rows_new"],
             "detail": detail(d), "body": d}
+
+
+def counterpart(old_root, rel):
+    """The old process's copy of one file, or None.  The plain .csv first,
+    then the same name with .gz on the end."""
+    plain = Path(old_root) / rel
+    if plain.is_file():
+        return plain
+    packed = plain.with_name(plain.name + ".gz")
+    return packed if packed.is_file() else None
 
 
 def generated(new_dir):
@@ -296,7 +318,8 @@ def run(old_dir, new_dir, report_path=DEFAULT_REPORT) -> int:
     if not old_root.is_dir():
         raise SystemExit(f"not a directory: {old_root}")
 
-    tally = {MISSING: 0, HEADER: 0, DIFFERS: 0, OK: 0, "skipped": 0}
+    tally = {MISSING: 0, UNREADABLE: 0, HEADER: 0, DIFFERS: 0, OK: 0,
+             "skipped": 0, "gz": 0}
     findings = []
     shown = 0
 
@@ -312,12 +335,24 @@ def run(old_dir, new_dir, report_path=DEFAULT_REPORT) -> int:
                 tally["skipped"] += 1
                 continue
 
-            counterpart = old_root / rel
-            if not counterpart.is_file():
+            old_file = counterpart(old_root, rel)
+            if old_file is None:
                 r = {"status": MISSING, "rows_old": "", "rows_new": "",
                      "detail": "", "body": None}
             else:
-                r = compare_file(counterpart, new_root / rel)
+                packed = old_file.suffix == ".gz"
+                tally["gz"] += packed
+                try:
+                    r = compare_file(old_file, new_root / rel)
+                except (OSError, EOFError, zlib.error, UnicodeDecodeError) as e:
+                    #  A truncated or corrupt archive is a finding about
+                    #  that one file, not a reason to stop comparing.
+                    r = {"status": UNREADABLE, "rows_old": "",
+                         "rows_new": "", "body": None,
+                         "detail": f"{old_file.name}: {e}"}
+                else:
+                    if packed and r["status"] != OK:
+                        r["detail"] = f"old read from .gz; {r['detail']}"
 
             tally[r["status"]] += 1
             if r["status"] == OK:
@@ -332,15 +367,18 @@ def run(old_dir, new_dir, report_path=DEFAULT_REPORT) -> int:
     for rel, r in findings:
         describe(rel, r)
 
-    total = sum(tally[k] for k in (MISSING, HEADER, DIFFERS, OK))
+    total = sum(tally[k] for k in (MISSING, UNREADABLE, HEADER, DIFFERS, OK))
     print(f"\n  files generated     {total:8d}")
     print(f"  missing from old    {tally[MISSING]:8d}")
+    if tally[UNREADABLE]:
+        print(f"  old .gz unreadable  {tally[UNREADABLE]:8d}")
     print(f"  header differs      {tally[HEADER]:8d}")
     print(f"  content differs     {tally[DIFFERS]:8d}")
     print(f"  identical           {tally[OK]:8d}")
     print(f"  skipped (not ours)  {tally['skipped']:8d}")
+    print(f"  old read from .gz   {tally['gz']:8d}")
 
-    bad = tally[MISSING] + tally[HEADER] + tally[DIFFERS]
+    bad = tally[MISSING] + tally[UNREADABLE] + tally[HEADER] + tally[DIFFERS]
     if bad:
         print(f"\n  {bad} to look at -> {report_path}")
     else:
@@ -359,7 +397,7 @@ def describe(rel, r):
         print("  the new process generated it; the old folder has no "
               "such file")
         return
-    if r["status"] == HEADER:
+    if r["status"] in (HEADER, UNREADABLE):
         print(f"  {r['detail']}")
         return
     d = r["body"]
@@ -576,6 +614,63 @@ def self_test() -> int:
             HEAD + BODY, encoding="utf-8-sig")
         check("A BOM ON THE OLD FILE IS NOT A HEADER DIFFERENCE",
               run(old, new, report), 0)
+
+    print("\nthe old process compresses older files to .csv.gz")
+
+    def pack(root, rel, text, bom=False):
+        """The old file as the old process leaves it: .csv gone, .csv.gz
+        in its place, in the same folder."""
+        p = Path(root) / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists():
+            p.unlink()
+        with gzip.open(p.with_name(p.name + ".gz"), "wt", newline="",
+                       encoding="utf-8-sig" if bom else "utf-8") as fh:
+            fh.write(text)
+
+    with tempfile.TemporaryDirectory() as d1, \
+            tempfile.TemporaryDirectory() as d2, \
+            tempfile.TemporaryDirectory() as d3:
+        old, new = Path(d1), Path(d2)
+        report = Path(d3) / "r.csv"
+        recent = "7203 JT/raw-7203 JT-20260903.csv"
+        older = "7203 JT/raw-7203 JT-20260612.csv"
+        tree(new, {recent: HEAD + BODY, older: HEAD + BODY})
+        tree(old, {recent: HEAD + BODY})
+        pack(old, older, HEAD + BODY)
+        check("one stock folder holding a plain file and a .gz one: both "
+              "are found, and both agree", run(old, new, report), 0)
+        check("the .gz is decompressed in memory - nothing is extracted "
+              "beside it", sorted(f.name for f in (old / "7203 JT").iterdir()),
+              ["raw-7203 JT-20260612.csv.gz", "raw-7203 JT-20260903.csv"])
+
+        pack(old, older, HEAD + "09:31:33,0.105,1000,T,T,XASX\n"
+                                "09:58:58,0.110,1000,T,T,XASX\n")
+        check("a price that differs inside a .gz fails the run",
+              run(old, new, report), 1)
+        check("and the report says the old side came from the .gz",
+              report.read_text(encoding="utf-8").splitlines()[1],
+              "7203 JT,7203 JT,20260612,differs,2,2,"
+              "old read from .gz; Last differ 1")
+
+        pack(old, older, HEAD + BODY, bom=True)
+        check("a BOM inside the .gz is no difference either",
+              run(old, new, report), 0)
+
+        (old / "7203 JT" / "raw-7203 JT-20260612.csv.gz").write_bytes(
+            b"\x1f\x8b\x08\x00 not really gzip")
+        check("a corrupt .gz fails the run instead of crashing it",
+              run(old, new, report), 1)
+        check("reported as unreadable, naming the archive",
+              report.read_text(encoding="utf-8").splitlines()[1]
+              .startswith("7203 JT,7203 JT,20260612,unreadable,,,"
+                          "raw-7203 JT-20260612.csv.gz: "), True)
+
+        (old / "7203 JT" / "raw-7203 JT-20260612.csv.gz").unlink()
+        check("neither .csv nor .csv.gz is still missing",
+              report.read_text(encoding="utf-8").splitlines()[1:] if
+              run(old, new, report) else None,
+              ["7203 JT,7203 JT,20260612,missing,,,"])
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1
