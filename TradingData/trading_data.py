@@ -756,16 +756,22 @@ def self_test() -> int:
         ticker="RELIANCE", bbg_ext="IB", sec_type="Equity",
         bbg_sec_type="Equity", market="BSE-MAIN", currency="INR",
         is_reit=False)
-    em = {"RELIANCE.IN": {"ID_ISIN": "INE002A01018", "PX_LAST": 1400.0},
-          "RELIANCE.IB": {"ID_ISIN": "INE002A01018", "PX_LAST": 1400.0}}
+    em = {"RELIANCE.IN": {"ID_ISIN": "INE002A01018", "PX_LAST": 1400.0}}
 
     hits = {}
-    got = build_rows([bse], {"RELIANCE.IN": em["RELIANCE.IN"]}, M, None,
-                     hits)[0]
-    check("a Bombay row falls back to its NSE sym, the only one "
-          "equity_master carries",
+    got = build_rows([bse], em, M, None, hits)[0]
+    check("a Bombay row is looked up under .IN",
           (hits.get("RELIANCE.IB"), got["ISIN"]),
           ("RELIANCE.IN", "INE002A01018"))
+    hits = {}
+    build_rows([nse], em, M, None, hits)
+    check("an NSE row with no .IS sym falls back to .IN",
+          hits.get("RELIANCE.IN"), "RELIANCE.IN")
+    hits = {}
+    build_rows([nse], dict(em, **{"RELIANCE.IS": {"PX_LAST": 1401.0}}), M,
+               None, hits)
+    check("and takes .IS when equity_master has both",
+          hits.get("RELIANCE.IN"), "RELIANCE.IS")
 
     check("with no list, an Indian row takes the default segment",
           build_rows([nse], em, M, None, {})[0]["Segment"],

@@ -25,4 +25,7 @@ So sym resolution tries two candidates per row: the crosscode's own
 suffixes actually hit, which settles the question on the first live run instead
 of hardcoding a guess now.
 
+India is the exception and ignores `BBGComposite`: `NSI-MAIN` tries `.IS` then
+`.IN`, and `BSE-MAIN` tries `.IN` only (`INDIA_SUFFIXES` in `equitymaster.py`).
+
 Edit in Excel. Keep it comma-separated with the header intact.

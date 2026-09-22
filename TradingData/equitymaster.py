@@ -89,11 +89,21 @@ def connect(host: str, port: int, log=None):
     return conn
 
 
+#  India is looked up by fixed suffixes, in this order, and never by the
+#  crosscode's own: equity_master has no .IB syms, and an NSE name may sit
+#  under .IS before .IN.
+INDIA_SUFFIXES = {"NSI-MAIN": ("IS", "IN"), "BSE-MAIN": ("IN",)}
+
+
 def sym_candidates(row, markets) -> list:
-    """Its own suffix first, then the market's composite if that differs."""
+    """Its own suffix first, then the market's composite if that differs.
+    India uses INDIA_SUFFIXES instead."""
     ticker = (getattr(row, "ticker", "") or "").strip()
     if not ticker:
         return []
+    india = INDIA_SUFFIXES.get(getattr(row, "market", ""))
+    if india:
+        return [f"{ticker}.{s}" for s in india]
     out = []
     ext = (getattr(row, "bbg_ext", "") or "").strip()
     if ext:
@@ -342,6 +352,12 @@ def self_test() -> int:
           sym_candidates(Row("ABC", "XX", "ZZZ-MAIN"), M), ["ABC.XX"])
     check("no ticker means no candidates",
           sym_candidates(Row("", "AU", "ASX-MAIN"), M), [])
+    check("NSE tries .IS first, then .IN",
+          sym_candidates(Row("RELIANCE", "IN", "NSI-MAIN"), M),
+          ["RELIANCE.IS", "RELIANCE.IN"])
+    check("Bombay tries .IN only, never its own .IB",
+          sym_candidates(Row("RELIANCE", "IB", "BSE-MAIN"), M),
+          ["RELIANCE.IN"])
 
     print("\nnumbers out of kdb")
     check("a float becomes a Decimal", _to_decimal(83.64), Decimal("83.64"))
