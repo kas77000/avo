@@ -171,6 +171,7 @@ python historical_ticks.py --backfill 90   a deeper first run
 python historical_ticks.py --date 2026-09-02   as if that were today
 python historical_ticks.py --only "7203 JT"    one name
 python historical_ticks.py --venues "NSI-MAIN|BSE-MAIN"   those FidessaMarkets only
+python historical_ticks.py --venues "SET-MAIN" --compress_venues   files into SET-MAIN.zip
 python historical_ticks.py --from 2026-08-22 --to 2026-09-21   every qatt day in that range
 python historical_ticks.py --retry-misses      ask again about the empties
 python historical_ticks.py --log run.log       tee the log to a file
@@ -262,6 +263,32 @@ it finds.
 > Shenzhen. `folder` and `code` are separate columns in the report so that is
 > visible at a glance. The design note is
 > `../docs/superpowers/specs/2026-09-16-historical-compare-design.md`.
+
+## One zip per venue
+
+`--compress_venues` moves each venue's day files, after they are written, into
+`OUTPUT_DIR/<FidessaMarket>.zip`, and deletes them:
+
+```
+OUTPUT_DIR\SET-MAIN.zip
+  PTT TB/raw-PTT TB-20260903.csv
+  LPN_F TB/raw-LPN_F TB-20260903.csv
+```
+
+- **Only what is missing is added.** An existing `SET-MAIN.zip` keeps what it
+  holds and gains the new days and the new stocks. A file fetched again —
+  today's, with `--today` — replaces its entry instead of duplicating it.
+- **A day in a zip is a day on disk.** Every run reads the zips at the root of
+  `OUTPUT_DIR`, with or without the flag, so zipped days are never fetched
+  again. A zip that cannot be read stops the run rather than refetch all it
+  held.
+- **Nothing is deleted until the new zip is known good.** It is written as
+  `SET-MAIN.zip.part`, every added file is read back and compared, and only then
+  does it replace the old zip and the files go. Files a crashed run left
+  behind are swept into the zip by the next one.
+- A name's venue is the `FidessaMarket` of the crosscode row that names its
+  folder. `--dry-run` reports what each zip would gain.
+- `compare.py` reads folders, not zips: compare before compressing.
 
 ## First run
 

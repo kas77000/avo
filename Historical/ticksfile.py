@@ -36,6 +36,8 @@ import csv
 import os
 import datetime as dt
 import re
+import shutil
+import zipfile
 from pathlib import Path
 
 COLUMNS = ["#Time", "Last", "Volume", "Condition", "Exchange", "MicCode"]
@@ -255,6 +257,113 @@ def migrate_slashed(directory, names, dry_run=False) -> int:
                 gone.rmdir()
                 gone = gone.parent
     return moved
+
+
+#  =============================================================================
+#  VENUE ZIPS (--compress_venues).  One archive per FidessaMarket at the root
+#  of the store - SET-MAIN.zip - holding the same layout the folders do:
+#  "7203 JT/raw-7203 JT-20260903.csv".
+#  =============================================================================
+
+def venue_zip(directory, venue: str) -> Path:
+    return Path(directory) / f"{safe(venue)}.zip"
+
+
+def zipped_dates(directory) -> dict:
+    """{(folder, file code): {date, ...}} for every day inside every zip at
+    the root of the store.
+
+    A DAY IN A ZIP IS A DAY ON DISK.  Once --compress_venues has zipped a
+    file and deleted it, existing_dates no longer sees it; without this the
+    next run would fetch the whole window again.  Read from the zip's
+    directory alone, so it costs nothing however big the archive is.  A zip
+    that cannot be read stops the run: skipping it would refetch everything
+    it holds, and then fail to add to it."""
+    out = {}
+    root = Path(directory)
+    if not root.is_dir():
+        return out
+    for z in sorted(root.glob("*.zip")):
+        try:
+            with zipfile.ZipFile(z) as zf:
+                names = zf.namelist()
+        except zipfile.BadZipFile as e:
+            raise ValueError(f"{z} is not a readable zip ({e}); move it "
+                             f"aside or repair it before running") from e
+        for n in names:
+            parts = n.split("/")
+            parsed = parse_filename(parts[-1]) if len(parts) == 2 else None
+            if parsed:
+                out.setdefault((parts[0], parsed[0]), set()).add(parsed[1])
+    return out
+
+
+def compress_venue(directory, venue: str, folders, dry_run=False) -> dict:
+    """Move every day file in `folders` into the venue's zip.
+
+    ONLY WHAT IS MISSING IS ADDED.  An existing SET-MAIN.zip keeps what it
+    holds and gains this run's files - a new day, or a new stock.  A file it
+    already holds under the same name (today, refetched with --today) REPLACES
+    that entry rather than sitting beside it as a duplicate.
+
+    NOTHING IS DELETED UNTIL THE NEW ZIP IS KNOWN GOOD.  It is written as
+    SET-MAIN.zip.part - a copy of the old one with the new files appended,
+    or rebuilt without the entries being replaced - every added file is read
+    back and compared byte for byte, and only then does it replace the old
+    zip and the loose files go.  A crash anywhere before that leaves the old
+    zip and every file exactly as they were.
+
+    Every day file in those folders is swept, not only this run's: a run
+    that died before its zip step left files behind, and they belong in the
+    zip too.  Returns {"added", "replaced", "zip"}."""
+    root = Path(directory)
+    target = venue_zip(root, venue)
+    loose = []
+    for f in sorted(set(folders)):
+        d = root / f
+        if d.is_dir():
+            loose += [(e, f"{f}/{e.name}") for e in sorted(d.iterdir())
+                      if e.is_file() and parse_filename(e.name)]
+    held = set()
+    if target.exists():
+        with zipfile.ZipFile(target) as zf:
+            held = set(zf.namelist())
+    replaced = held & {a for _p, a in loose}
+    tally = {"added": len(loose) - len(replaced), "replaced": len(replaced),
+             "zip": target}
+    if not loose or dry_run:
+        return tally
+
+    part = target.with_name(target.name + ".part")
+    if held and not replaced:
+        #  The common case: a byte copy, then an append.
+        shutil.copyfile(target, part)
+        mode = "a"
+    else:
+        mode = "w"
+    with zipfile.ZipFile(part, mode, compression=zipfile.ZIP_DEFLATED) as z:
+        if mode == "w" and held:
+            with zipfile.ZipFile(target) as old:
+                for info in old.infolist():
+                    if info.filename not in replaced:
+                        z.writestr(info, old.read(info.filename))
+        for p, arc in loose:
+            z.write(p, arc)
+    with zipfile.ZipFile(part) as z:
+        for p, arc in loose:
+            if z.read(arc) != p.read_bytes():
+                part.unlink()
+                raise OSError(f"{arc} did not read back from {part.name} as "
+                              f"it was written; nothing deleted")
+    os.replace(part, target)
+    for p, _arc in loose:
+        p.unlink()
+    for f in set(folders):
+        try:
+            (root / f).rmdir()              # only if now empty
+        except OSError:
+            pass
+    return tally
 
 
 def write(path, rows, mic: str, tz_label: str = "") -> int:
@@ -564,6 +673,75 @@ def self_test() -> int:
         migrate_flat(d, {"LPN/F TB": "LPN/F TB"})
         check("a loose file of a slash code goes to its underscore folder",
               existing_dates(d, "LPN/F TB", "LPN/F TB"), {lpn})
+
+    print("\n--compress_venues: one zip per venue")
+    import zipfile as zf_
+
+    def day_file(root, cc, code, day, text):
+        p = path(root, cc, code, day)
+        write_rows(p, [(text, "1", "100", "", "T", "XBKK")])
+        return p
+
+    with tempfile.TemporaryDirectory() as d:
+        a, b = D(2026, 9, 3), D(2026, 9, 4)
+        day_file(d, "PTT TB", "PTT TB", a, "09:00:00")
+        day_file(d, "LPN/F TB", "LPN/F TB", a, "09:00:01")
+        folders = [folder("PTT TB"), folder("LPN/F TB")]
+
+        t = compress_venue(d, "SET-MAIN", folders, dry_run=True)
+        check("--dry-run counts and touches nothing",
+              (t["added"], venue_zip(d, "SET-MAIN").exists(),
+               existing_dates(d, "PTT TB", "PTT TB")), (2, False, {a}))
+
+        t = compress_venue(d, "SET-MAIN", folders)
+        z = venue_zip(d, "SET-MAIN")
+        check("SET-MAIN.zip is made, next to the folders", z.name,
+              "SET-MAIN.zip")
+        with zf_.ZipFile(z) as f:
+            check("holding the same layout as the folders",
+                  sorted(f.namelist()),
+                  ["LPN_F TB/raw-LPN_F TB-20260903.csv",
+                   "PTT TB/raw-PTT TB-20260903.csv"])
+        check("the files and their emptied folders are gone",
+              sorted(e.name for e in Path(d).iterdir()), ["SET-MAIN.zip"])
+        check("and nothing is left as .part", list(Path(d).glob("*.part")),
+              [])
+        check("a zipped day still counts as done for the next run",
+              zipped_dates(d)[("PTT TB", "PTT TB")], {a})
+
+        day_file(d, "PTT TB", "PTT TB", b, "09:00:02")
+        day_file(d, "AOT TB", "AOT TB", a, "09:00:03")
+        t = compress_venue(d, "SET-MAIN", [folder("PTT TB"),
+                                           folder("AOT TB")])
+        with zf_.ZipFile(z) as f:
+            names = sorted(f.namelist())
+            check("a second run ADDS the missing day and the new stock, and "
+                  "keeps what was there", names,
+                  ["AOT TB/raw-AOT TB-20260903.csv",
+                   "LPN_F TB/raw-LPN_F TB-20260903.csv",
+                   "PTT TB/raw-PTT TB-20260903.csv",
+                   "PTT TB/raw-PTT TB-20260904.csv"])
+        check("counted as added, none replaced", (t["added"], t["replaced"]),
+              (2, 0))
+
+        day_file(d, "PTT TB", "PTT TB", b, "15:00:00")
+        t = compress_venue(d, "SET-MAIN", [folder("PTT TB")])
+        with zf_.ZipFile(z) as f:
+            names = f.namelist()
+            body = f.read("PTT TB/raw-PTT TB-20260904.csv").decode()
+        check("a day fetched again REPLACES its entry - no duplicate",
+              (t["replaced"], names.count("PTT TB/raw-PTT TB-20260904.csv")),
+              (1, 1))
+        check("with the new content", "15:00:00" in body, True)
+        check("and the other entries survive the rebuild", len(names), 4)
+
+        z.write_bytes(b"not a zip")
+        try:
+            zipped_dates(d)
+            check("a broken zip raised", False, True)
+        except ValueError as e:
+            check("a broken zip stops the run rather than refetch all it "
+                  "held", "SET-MAIN.zip" in str(e), True)
 
     print("\na file under its real name is a finished file")
     with tempfile.TemporaryDirectory() as d:

@@ -47,6 +47,7 @@ Bloomberg version had.
     python historical_ticks.py --from 2026-08-22 --to 2026-09-21   a range
     python historical_ticks.py --only "7203 JT"    one name, for a check
     python historical_ticks.py --venues "NSI-MAIN|BSE-MAIN"   those markets only
+    python historical_ticks.py --venues "SET-MAIN" --compress_venues   into SET-MAIN.zip
     python historical_ticks.py --retry-misses  ask again about the empties
     python historical_ticks.py --log run.log   tee the log to a file
     python historical_ticks.py --quiet         warnings and failures only
@@ -135,7 +136,8 @@ def chunked(items, size):
         yield items[i:i + size]
 
 
-def plan(names, partitions, out_dir, backfill, cache=None) -> dict:
+def plan(names, partitions, out_dir, backfill, cache=None,
+         zipped=None) -> dict:
     """{date: [name, ...]} - who needs what, before anything is fetched.
 
     Inverted from per-name to per-date on purpose: qatt is partitioned by
@@ -146,17 +148,48 @@ def plan(names, partitions, out_dir, backfill, cache=None) -> dict:
     A date counts as ALREADY TRIED if there is a file for it or a line in
     the miss cache.  Without the second half, a name qatt has never carried
     is re-asked for every day of the backfill on every run, forever."""
-    cache = cache or {}
+    cache, zipped = cache or {}, zipped or {}
     by_date, per_name = {}, {}
     for name in names:
+        #  `zipped` is ticksfile.zipped_dates(): a day --compress_venues has
+        #  moved into SET-MAIN.zip is as done as one still in its folder.
         have = (ticksfile.existing_dates(out_dir, name.crosscode_bbg,
                                          name.bbg)
+                | zipped.get((ticksfile.folder(name.crosscode_bbg),
+                              ticksfile.safe(name.bbg)), set())
                 | misscache.tried(cache, name.bbg))
         want = ticksfile.days_wanted(have, partitions, backfill)
         per_name[name.bbg] = want
         for d in want:
             by_date.setdefault(d, []).append(name)
     return {"by_date": dict(sorted(by_date.items())), "per_name": per_name}
+
+
+def venue_of(name) -> str:
+    """The FidessaMarket of the crosscode row that names the folder - the
+    zip a name's files go into under --compress_venues."""
+    for r in name.rows:
+        if r.bbg == name.crosscode_bbg:
+            return r.market
+    return name.rows[0].market if name.rows else ""
+
+
+def stage_compress(names, out_dir, dry_run, log):
+    """--compress_venues: each venue's day files into <VENUE>.zip."""
+    by_venue = {}
+    for n in names:
+        by_venue.setdefault(venue_of(n), set()).add(
+            ticksfile.folder(n.crosscode_bbg))
+    if "" in by_venue:
+        log.warn(f"{len(by_venue.pop(''))} name(s) have no FidessaMarket and "
+                 f"are left unzipped")
+    for venue, folders in sorted(by_venue.items()):
+        t = ticksfile.compress_venue(out_dir, venue, folders, dry_run)
+        log.kv(t["zip"].name,
+               f"{logs.thousands(t['added'])} added, "
+               f"{logs.thousands(t['replaced'])} replaced",
+               str(t["zip"]) + ("   NOT WRITTEN, --dry-run" if dry_run
+                                else ""))
 
 
 def stage_migrate(names, out_dir, dry_run, log):
@@ -845,6 +878,13 @@ def main(argv=None) -> int:
     p.add_argument("--retry-misses", action="store_true",
                    help="ignore the miss cache for this run and rebuild it "
                         "from what today's run actually finds")
+    p.add_argument("--compress_venues", "--compress-venues",
+                   dest="compress_venues", action="store_true",
+                   help="after writing, move each venue's files into "
+                        "OUTPUT_DIR/<VENUE>.zip (SET-MAIN.zip) and delete "
+                        "them.  An existing zip keeps what it holds and gains "
+                        "only what was missing; days in it are never fetched "
+                        "again.")
     p.add_argument("--dry-run", action="store_true",
                    help="read the crosscode and kdb, decide everything, "
                         "write nothing")
@@ -944,7 +984,16 @@ def main(argv=None) -> int:
     log.kv("miss cache", f"{logs.thousands(misscache.count(cache))} pairs",
            f"{miss_path}" + ("   IGNORED, --retry-misses"
                              if a.retry_misses else ""))
-    plan_ = plan(names, parts, out_dir, backfill, cache)
+    try:
+        zipped = ticksfile.zipped_dates(out_dir)
+    except ValueError as e:
+        log.fail(str(e))
+        return 1
+    if zipped:
+        log.kv("days in venue zips",
+               logs.thousands(sum(len(v) for v in zipped.values())),
+               "count as done, like files on disk")
+    plan_ = plan(names, parts, out_dir, backfill, cache, zipped)
     today = None
     if a.today:
         today = dt.date.today()
@@ -973,7 +1022,11 @@ def main(argv=None) -> int:
         n = misscache.save(miss_path, cache)
         log.kv("miss cache now", f"{logs.thousands(n)} pairs", str(miss_path))
 
-    log.step(7, "result")
+    if a.compress_venues:
+        log.step(7, "compress venues")
+        stage_compress(names, out_dir, a.dry_run, log)
+
+    log.step(8 if a.compress_venues else 7, "result")
     log_result(stats, a.dry_run, log)
     log.info()
     log.info(f"{log.counts[logs.WARN]} warning(s) above" if
@@ -1489,6 +1542,42 @@ def self_test() -> int:
     check("'wsfull and 'limit read as too big too",
           (too_big(Exception("wsfull")), too_big(Exception("limit")),
            too_big(Exception("type"))), (True, True, False))
+
+    print("\n--compress_venues, end to end")
+
+    class R:
+        def __init__(self, bbg, market):
+            self.bbg, self.market = bbg, market
+
+    class Quiet2:
+        counts = {logs.WARN: 0}
+
+        def __getattr__(self, _name):
+            return lambda *a, **k: None
+
+    ptt, aot = N("PTT TB", "PTT.TB"), N("AOT TB", "AOT.TB")
+    ptt.rows = (R("PTT TB", "SET-MAIN"), R("PTT TB2", "OTHER-MAIN"))
+    aot.rows = (R("AOT TB", "SET-MAIN"),)
+    check("a name's venue is the market of the row that names its folder",
+          venue_of(ptt), "SET-MAIN")
+    with tempfile.TemporaryDirectory() as d:
+        days = [D(2026, 9, 3), D(2026, 9, 4)]
+        run(Ordered(d), plan([ptt, aot], days[:1], d, 5, {}), {}, d, 10,
+            False, {})
+        stage_compress([ptt, aot], d, False, Quiet2())
+        check("the run's files end up in SET-MAIN.zip and nowhere else",
+              sorted(e.name for e in Path(d).iterdir()), ["SET-MAIN.zip"])
+        zipped = ticksfile.zipped_dates(d)
+        pl = plan([ptt, aot], days, d, 5, {}, zipped)
+        check("the next run asks only for the day the zip does not have",
+              sorted(pl["by_date"]), [days[1]])
+        check("without looking in the zip it would fetch both days again - "
+              "which is what the zip lookup is for",
+              sorted(plan([ptt, aot], days, d, 5, {})["by_date"]), days)
+        run(Ordered(d), pl, {}, d, 10, False, {})
+        stage_compress([ptt, aot], d, False, Quiet2())
+        check("and that day is added to the same zip",
+              sorted(ticksfile.zipped_dates(d)[("PTT TB", "PTT TB")]), days)
 
     print("\na day generated before the folders existed is not redone")
     with tempfile.TemporaryDirectory() as d:
