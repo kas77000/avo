@@ -80,6 +80,10 @@ def self_test() -> int:
            ("SHA-MAIN", "SHH-MAIN", "SHZ-MAIN", "SSC-MAIN",
             "SZA-MAIN", "SZC-MAIN")},
           {"CH"})
+    check("India's two boards share the IN composite - equity_master has "
+          "no .IB syms, Bombay names sit under their NSE sym",
+          (M["BSE-MAIN"].bbg_composite, M["NSI-MAIN"].bbg_composite),
+          ("IN", "IN"))
 
     print("\nNoShortSell, per :314-320")
     check("China and India cannot short",

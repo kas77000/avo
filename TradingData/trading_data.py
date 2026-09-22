@@ -759,6 +759,14 @@ def self_test() -> int:
     em = {"RELIANCE.IN": {"ID_ISIN": "INE002A01018", "PX_LAST": 1400.0},
           "RELIANCE.IB": {"ID_ISIN": "INE002A01018", "PX_LAST": 1400.0}}
 
+    hits = {}
+    got = build_rows([bse], {"RELIANCE.IN": em["RELIANCE.IN"]}, M, None,
+                     hits)[0]
+    check("a Bombay row falls back to its NSE sym, the only one "
+          "equity_master carries",
+          (hits.get("RELIANCE.IB"), got["ISIN"]),
+          ("RELIANCE.IN", "INE002A01018"))
+
     check("with no list, an Indian row takes the default segment",
           build_rows([nse], em, M, None, {})[0]["Segment"],
           columns.SEGMENT_DEFAULT)
