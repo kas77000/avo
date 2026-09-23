@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Delete the tick files historical_ticks.py wrote for one or more venues.
 
-    python DeleteVenues.py SET-MAIN
-    python DeleteVenues.py SET-MAIN NSI-MAIN --dry-run
+    python delete_venues.py SET-MAIN
+    python delete_venues.py SET-MAIN NSI-MAIN --dry-run
 
 A VENUE IS A FidessaMarket.  Every NewCrosscode.csv row on that market names
 a folder in the store - its BloombergCode, spelt as ticksfile.folder() spells
@@ -18,7 +18,7 @@ so is its folder, and the run names it.  Two things are reported and NOT
 touched: the venue's <VENUE>.zip from --compress_venues, and the miss cache.
 While the zip exists historical_ticks.py counts its days as done.
 
-    python DeleteVenues.py --self-test
+    python delete_venues.py --self-test
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ def self_test() -> int:
         print(f"  {'ok  ' if good else 'FAIL'}  {name}"
               + ("" if good else f"   got {got!r}, want {want!r}"))
 
-    print("DeleteVenues --self-test\n")
+    print("delete_venues --self-test\n")
     NEW = ("#ReutersCode,FidessaCode,FidessaMarket,BloombergCode,Type\n"
            "PTT.BK,PTT.TH,SET-MAIN,PTT TB,\n"
            "LPNf.BK,LPN/F.TH,SET-MAIN,LPN/F TB,\n"
