@@ -57,6 +57,15 @@ is uncapped.
     only_in_old,005930.KP,,,
     differs,BHP.AU,Volatility10D,18.40,19.75
 
+It also writes close-deviation.csv beside that report: how far our Close
+sits from the old file's, (new - old) / old in percent, bucketed.  Names
+with no close on one side are counted on their own lines, not as a
+deviation.  The printed form adds the mean, median, p5, p95, min and max.
+
+    bucket,count,share_pct
+    0%,4210,93.10
+    0% to 0.1%,160,3.54
+
 `code` is the #FidessaCode.  LimitUpDown's report names rows by
 BloombergCode instead, because ITS output carries one and this job's does
 not: the twenty columns start at #FidessaCode and never mention a Bloomberg
@@ -101,6 +110,17 @@ KEY_COLUMNS = ("Close", "Beta", "Volatility10D", "Index", "MarketCap")
 # summary capped at five examples a column; this is the record.
 COMPARE_REPORT = "compare-report.csv"
 COMPARE_COLUMNS = ["status", "code", "column", "old", "new"]
+
+# --compare also writes how far our Close sits from the old file's, as a
+# distribution, to this name beside the report.  The deviation is RELATIVE,
+# (new - old) / old in percent: the universe spans currencies, so an
+# absolute gap of 5 is noise on a won price and a disaster on a dollar one.
+CLOSE_REPORT = "close-deviation.csv"
+CLOSE_COLUMNS = ["bucket", "count", "share_pct"]
+# Upper edges, in percent, of the signed buckets either side of zero.  Zero
+# itself is its own bucket: an identical close is the answer the cutover
+# wants, and it should not hide inside "under 0.1%".
+CLOSE_EDGES = ("0.1", "1", "5", "10")
 
 # equity_master stores volatility as a fraction; Volatility10D is a
 # percentage.
@@ -428,6 +448,82 @@ def differences(old_rows, new_rows):
     return out
 
 
+def close_deviations(old_rows, new_rows) -> dict:
+    """Our Close against the old file's, name by name, as percentages.
+
+    Only names in both files count, and only where BOTH have a close: a
+    blank on one side is not a deviation of any size, so it is counted
+    under its own heading rather than folded in.  A zero in the old file is
+    no close either - it is what the R job writes when Bloomberg had none,
+    and dividing by it would say nothing."""
+    old = {r["#FidessaCode"]: r for r in old_rows}
+    new = {r["#FidessaCode"]: r for r in new_rows}
+    devs, blank_old, blank_new = [], 0, 0
+    for k in sorted(set(old) & set(new)):
+        a, b = _D(old[k].get("Close")), _D(new[k].get("Close"))
+        if a is None or a == 0:
+            blank_old += 1
+        elif b is None:
+            blank_new += 1
+        else:
+            devs.append((b - a) / a * 100)
+    return {"devs": devs, "blank_old": blank_old, "blank_new": blank_new}
+
+
+def close_distribution(d) -> list:
+    """(bucket, count) for every shared name: the signed buckets from most
+    negative to most positive, then the two kinds of blank."""
+    edges = [_D(e) for e in CLOSE_EDGES]
+    spans = list(zip(("0",) + CLOSE_EDGES, CLOSE_EDGES))
+    up = [f"{lo}% to {hi}%" for lo, hi in spans] + [f"> {CLOSE_EDGES[-1]}%"]
+    down = ([f"< -{CLOSE_EDGES[-1]}%"]
+            + [f"-{hi}% to {'-' if lo != '0' else ''}{lo}%"
+               for lo, hi in reversed(spans)])
+    labels = down + ["0%"] + up
+    counts = [0] * len(labels)
+    mid = len(edges) + 1                       # the "0%" bucket
+    for v in d["devs"]:
+        if v == 0:
+            counts[mid] += 1
+            continue
+        i = sum(1 for e in edges if abs(v) > e)  # 0 .. len(edges)
+        counts[mid + 1 + i if v > 0 else mid - 1 - i] += 1
+    return (list(zip(labels, counts))
+            + [("no close in old", d["blank_old"]),
+               ("no close in new", d["blank_new"])])
+
+
+def _pct(devs, q):
+    """The q-th percentile of sorted devs, nearest rank."""
+    return devs[min(len(devs) - 1, int(q * len(devs)))]
+
+
+def write_close_report(path, dist) -> str:
+    total = sum(n for _, n in dist) or 1
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(CLOSE_COLUMNS)
+        for label, n in dist:
+            w.writerow([label, n, f"{100 * n / total:.2f}"])
+    return str(path)
+
+
+def print_close(d, dist):
+    devs = sorted(d["devs"])
+    print(f"\n  Close deviation, (new - old) / old, over {len(devs)} names "
+          f"with a close in both")
+    if devs:
+        mean = sum(devs) / len(devs)
+        print(f"    mean {mean:+.4f}%   median {_pct(devs, .5):+.4f}%   "
+              f"p5 {_pct(devs, .05):+.4f}%   p95 {_pct(devs, .95):+.4f}%")
+        print(f"    min {devs[0]:+.4f}%   max {devs[-1]:+.4f}%")
+    most = max((n for _, n in dist), default=0) or 1
+    for label, n in dist:
+        print(f"    {label:<18} {n:6d}  {'#' * round(40 * n / most)}")
+
+
 def write_compare_report(path, records) -> str:
     """A run with nothing to report still writes the header, which is the
     readable way to say there was nothing to report."""
@@ -698,11 +794,18 @@ def main(argv=None) -> int:
         records = differences(old, new)
         print(f"\n  {len(records)} difference(s) written to "
               f"{write_compare_report(args.report, records)}")
+        dev = close_deviations(old, new)
+        dist = close_distribution(dev)
+        print_close(dev, dist)
+        close_path = Path(args.report).with_name(CLOSE_REPORT)
+        print(f"\n  Close distribution written to "
+              f"{write_close_report(close_path, dist)}")
     return rc
 
 
 def self_test() -> int:
     import tempfile
+    from decimal import Decimal
     ok = True
 
     def check(name, got, want):
@@ -973,6 +1076,39 @@ def self_test() -> int:
         check("nothing to report still writes the header",
               p.read_text(encoding="utf-8").splitlines(),
               [",".join(COMPARE_COLUMNS)])
+
+    print("\nhow far our Close sits from the old file's")
+    old = [{"#FidessaCode": k, "Close": c} for k, c in
+           (("A", "100"), ("B", "100"), ("C", "100"), ("D", "100"),
+            ("E", ""), ("F", "0"), ("G", "50"))]
+    new = [{"#FidessaCode": k, "Close": c} for k, c in
+           (("A", "100"), ("B", "100.05"), ("C", "88"), ("D", "130"),
+            ("E", "10"), ("F", "10"), ("G", ""), ("H", "1"))]
+    dev = close_deviations(old, new)
+    check("the deviation is relative, in percent, signed new minus old",
+          sorted(dev["devs"]), [-12, 0, Decimal("0.05"), 30])
+    check("a blank or zero old close, and a blank new one, are counted "
+          "apart rather than as a deviation",
+          (dev["blank_old"], dev["blank_new"]), (2, 1))
+    dist = dict(close_distribution(dev))
+    check("the buckets run most negative to most positive, zero its own",
+          list(dist)[:11],
+          ["< -10%", "-10% to -5%", "-5% to -1%", "-1% to -0.1%",
+           "-0.1% to 0%", "0%", "0% to 0.1%", "0.1% to 1%", "1% to 5%",
+           "5% to 10%", "> 10%"])
+    check("and each name lands in one",
+          (dist["0%"], dist["0% to 0.1%"], dist["< -10%"], dist["> 10%"],
+           dist["no close in old"], dist["no close in new"]),
+          (1, 1, 1, 1, 2, 1))
+    check("every name in both files is accounted for exactly once",
+          sum(dist.values()), 7)
+    with tempfile.TemporaryDirectory() as dd:
+        p = Path(dd) / "close.csv"
+        write_close_report(p, close_distribution(dev))
+        lines = p.read_text(encoding="utf-8").splitlines()
+        check("the file is a row per bucket with its share",
+              (lines[0], lines[6]),
+              (",".join(CLOSE_COLUMNS), "0%,1,14.29"))
 
     print("\nthe input files' modified times")
     with tempfile.TemporaryDirectory() as d:
