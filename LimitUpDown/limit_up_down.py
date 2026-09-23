@@ -375,11 +375,11 @@ SOURCES_CSV = "sources.csv"
 SOURCES_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Source"]
 
 
-def input_files(cfg, config_dir):
-    """Every file the run reads: the crosscode, the two config tables, each
-    .tsr a rounding venue takes its ladder from, and India's .stra files."""
-    files = [Path(CROSSCODE_PATH), Path(config_dir) / "markets.csv",
-             Path(config_dir) / "bands.csv"]
+def input_files(cfg):
+    """The generated inputs the run reads: the crosscode, each .tsr a
+    rounding venue takes its ladder from, and India's .stra files.  Not
+    markets.csv or bands.csv - those are ours, in git, not produced daily."""
+    files = [Path(CROSSCODE_PATH)]
     for v in cfg.venues.values():
         if v.rounding != "none" and v.tick_source:
             files.append(Path(TSR_DIR) / v.tick_source)
@@ -984,7 +984,7 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
         _check_connection_settings()
         here = Path(__file__).resolve().parent
         cfg = marketcfg.load(here / "config", Path(TSR_DIR))
-        for line in input_file_lines(input_files(cfg, here / "config")):
+        for line in input_file_lines(input_files(cfg)):
             print(line)
         now = dt.datetime.now().time()
         #  READ BEFORE THE CROSSCODE, and only for the venues whose cutoff
@@ -2823,12 +2823,10 @@ def self_test() -> int:
               True)
     shipped = marketcfg.load(Path(__file__).resolve().parent / "config",
                              Path(__file__).resolve().parent / "config")
-    names = [p.name for p in input_files(
-        shipped, Path(__file__).resolve().parent / "config")]
-    check("the list covers the crosscode, both config tables, the .tsr and "
-          "India's .stra files",
-          sorted(names), sorted([Path(CROSSCODE_PATH).name, "markets.csv",
-                                 "bands.csv", "spol_JKT.tsr",
+    names = [p.name for p in input_files(shipped)]
+    check("the list covers the crosscode, the .tsr and India's .stra files "
+          "- not markets.csv or bands.csv",
+          sorted(names), sorted([Path(CROSSCODE_PATH).name, "spol_JKT.tsr",
                                  "in-nse_drv.stra", "in-bse_drv.stra"]))
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))

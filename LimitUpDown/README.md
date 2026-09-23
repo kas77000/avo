@@ -740,14 +740,15 @@ Bloomberg rescued: `bloomberg`.
 The log's report carries the same split as a ratio of the published rows:
 `Computed: 20% (3200)  Bloomberg: 80% (12800)`.
 
-It also opens with every input file's last-modified time and age — CrossCode,
-`markets.csv`, `bands.csv`, each `.tsr` a rounding venue reads and India's two
-`.stra` files — so a run that read yesterday's CrossCode says so:
+It also opens with the last-modified time and age of every generated input —
+CrossCode, each `.tsr` a rounding venue reads and India's two `.stra` files —
+so a run that read yesterday's CrossCode says so. `markets.csv` and `bands.csv`
+are left out: they are ours, in git, not produced daily.
 
 ```
 input files (last modified):
   2026-09-23 06:10:02  (1.3h ago)  \\share\CrossCode.csv
-  2026-09-17 15:10:43  (6 days ago)  config\markets.csv
+  2026-09-09 17:43:22  (14 days ago)  \\share\spol_JKT.tsr
   MISSING              \\share\in-nse_drv.stra
 ```
 
