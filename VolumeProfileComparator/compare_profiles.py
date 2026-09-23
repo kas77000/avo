@@ -206,10 +206,25 @@ def read_profile(path) -> Profile:
 # COMPARING
 # =============================================================================
 
+def session_origin(old, new):
+    """Where the session starts: the EARLIER of the two first buckets.
+
+    Taking OLD's alone broke on a file missing its opening bucket - NEW's
+    9:15 measured from OLD's 9:20 wraps to the end of the day, and a stock
+    10 pp early reads as 90 pp late.  "Earlier" is within half a day, so a
+    session across midnight still picks its evening start."""
+    firsts = [next(iter(s.points)) for s in (old, new) if s is not None]
+    o = firsts[0]
+    for n in firsts[1:]:
+        if 0 < (o - n) % DAY < DAY / 2:
+            o = n
+    return o
+
+
 def session(series_list, origin):
     """Each series as [(seconds since origin, cum)], in session order.
 
-    Measured from the OLD file's first bucket and wrapped at midnight, so a
+    Measured from session_origin() and wrapped at midnight, so a
     session that crosses 00:00 stays in trading order instead of sorting
     its evening before its morning."""
     return [sorted(((t - origin) % DAY, v) for t, v in s.points.items())
@@ -241,7 +256,7 @@ class Result:
 
 
 def compare(old: Series, new: Series, threshold):
-    origin = next(iter(old.points))
+    origin = session_origin(old, new)
     o, n = session([old, new], origin)
     grid = sorted({t for t, _ in o} | {t for t, _ in n})
     ov, nv = step_values(o, grid), step_values(n, grid)
@@ -317,7 +332,7 @@ def page_data(old: Profile, new: Profile, results, threshold):
     for r in results:
         k = (r.code, r.venue)
         o, n = old.stocks.get(k), new.stocks.get(k)
-        origin = next(iter((o or n).points))
+        origin = session_origin(o, n)
         oc, nc = _curve(o, origin), _curve(n, origin)
         if oc and nc and oc[0] == nc[0]:
             nc = [None, nc[1]]
@@ -761,6 +776,22 @@ def self_test() -> int:
         check("an extra bucket is compared against the other curve's last "
               "value - 30% against 10%, 20 pp", round(r.gap, 6), 20.0)
         check("at the time only one file has", r.at, "10:30:00")
+
+        print("\na file missing its first bucket")
+        S = [("9:15:00", 0.10), ("12:00:00", 0.50), ("15:25:00", 0.80),
+             ("15:30:00", 1.0)]
+        old, new = files(HEAD + rows("AAA.IN", S[1:]), HEAD + rows("AAA.IN", S))
+        r = compare_files(old, new, 2.0)[0]
+        check("NEW starting first is 0 against 10% at its open, not wrapped "
+              "to the end of the day", (round(r.gap, 6), r.at),
+              (10.0, "9:15:00"))
+        check("and the page draws from that same open",
+              page_data(old, new, [r], 2.0)["stocks"][0]["origin"],
+              parse_time("9:15:00"))
+        old, new = files(HEAD + rows("AAA.IN", S), HEAD + rows("AAA.IN", S[1:]))
+        r = compare_files(old, new, 2.0)[0]
+        check("and OLD starting first is the mirror", (round(r.gap, 6), r.at),
+              (-10.0, "9:15:00"))
 
         print("\na stock in only one file")
         old, new = files(HEAD + rows("AAA.IN", U) + rows("BBB.IN", U),
