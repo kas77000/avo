@@ -54,7 +54,8 @@ skipped. A column that is only in one file is named in the terminal output.
 The page is named after the old file, so `GlobalAdv_Hong_Kong.csv` gives
 `GlobalAdv_Hong_Kong_comparison.html`, titled *GlobalAdv Hong Kong: old vs
 new*. It is a single self-contained file (inline SVG, nothing loaded from the
-network), so it can be mailed.
+network), so it can be mailed. It is always dark, whatever the browser's
+theme.
 
 ## Input
 

@@ -185,13 +185,10 @@ _PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}: old vs new</title>
 <style>
-:root {{ --page:#f4f4f2; --surface:#fff; --ink:#1b1b1b; --ink2:#52514e;
-  --muted:#6b6a66; --grid:#e6e5df; --axis:#8c8b85; --dot:#1f6f78;
-  --diag:#c0392b; --ring:rgba(11,11,11,.12); --head:#eeeeea; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --page:#0d0d0d;
-  --surface:#1a1a19; --ink:#f2f2f0; --ink2:#c3c2b7; --muted:#9a9993;
-  --grid:#2c2c2a; --axis:#6b6a66; --dot:#4fb3bf; --diag:#e5675a;
-  --ring:rgba(255,255,255,.12); --head:#242422; }} }}
+:root {{ color-scheme:dark; --page:#0d0d0d; --surface:#1a1a19;
+  --ink:#f2f2f0; --ink2:#c3c2b7; --muted:#9a9993; --grid:#2c2c2a;
+  --axis:#6b6a66; --dot:#4fb3bf; --diag:#e5675a;
+  --ring:rgba(255,255,255,.12); --head:#242422; }}
 body {{ margin:0; padding:24px 16px; background:var(--page); color:var(--ink);
   font:14px/1.45 system-ui, sans-serif; }}
 main {{ max-width:1500px; margin:0 auto; }}
