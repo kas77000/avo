@@ -103,25 +103,31 @@ primary listing: the row whose exchange code equals
 `equity_master.EQY_PRIM_EXCH_SHRT`. So Toyota's file is `raw-7203 JT-…`,
 never `raw-7203 JE-…` and never the composite.
 
-**3. A Chinese stock is spelt three ways, and all three are right.**
+**3. A Chinese stock is spelt two ways, and both are right.**
 
 | | |
 |---|---|
-| `600000 C1` | in the crosscode |
+| `600000 C1` | in the crosscode, and on disk |
 | `600000.CH` | the only shape `equity_master` and `qatt` answer to |
-| `600000 CG` | on disk, which is what the consumer reads |
 
-The middle one is why `equity_master` is asked a **third** way: matching
+The second is why `equity_master` is asked a **third** way: matching
 `sym_bpipe` would look for `600000.C1` and find nothing, so a third pass
 matches the `sym` column itself with ticker-plus-composite. It runs only on
 what the first two passes missed, and the tally says how many it caught.
 
-The last one is driven by the **MIC**: `XSHG` takes `CG`, `XSHE` takes `CS`.
-Not by the Fidessa market — `SHA`/`SHH`/`SSC`/`SZA`/`SHZ`/`SZC` do not say on
-their face which side of the border they are, and guessing wrong mislabels
-every Chinese file with nothing in the output to show for it. A name whose
-MIC never came back keeps its `C1`/`C2` code and is **counted loudly**,
-because that file is under the wrong name.
+**4. Some markets are written under their composite code.** `RIO AT` is
+`RIO AU` on disk, `7203 JT` is `7203 JP`, and an Indian line is `IN`
+whichever board it trades on. `config/composites.csv` is that rule, taken
+from the legacy job's `MarketConditionBBG.xml` — one row per Bloomberg
+exchange code, with its `Convert2Composite` flag and `CompositeExchangeCode`
+— and it names the **folder and the file alike**.
+
+China does **not** convert: `C1`, `C2`, `CG` and `CS` all carry
+`Convert2Composite=false` there, so a Shanghai line keeps `600000 C1`. An
+earlier version of this job renamed it to `600000 CG` by MIC; the table is
+now the only rule, for every market. A code the table does not list keeps the
+crosscode's own spelling and is counted, so a market added upstream shows up
+as a line to add rather than a silent default.
 
 Nothing is excluded today. `EXCLUDED_MICS` is empty and the machinery around
 it is kept, tested, and one tuple away from switching a market back off.
@@ -288,11 +294,11 @@ first five. **Exit code is 1 when anything is missing or differs**, so it can
 gate a cutover step — unlike `LimitUpDown --compare`, which returns 0 whatever
 it finds.
 
-> **If Chinese names report `missing` in bulk, suspect the folder, not the
-> data.** The folder is named for the crosscode code and the file for the MIC
-> code — `600000 C1/raw-600000 CG-…` — and they differ only for Shanghai and
-> Shenzhen. `folder` and `code` are separate columns in the report so that is
-> visible at a glance. The design note is
+> **If a whole market reports `missing` in bulk, suspect the name, not the
+> data.** A market written under its composite — `RIO AU` rather than
+> `RIO AT` — is in a different folder from the one the old process wrote, so
+> every file of it reads as missing. `folder` and `code` are separate columns
+> in the report so that is visible at a glance. The design note is
 > `../docs/superpowers/specs/2026-09-16-historical-compare-design.md`.
 
 ## One zip per venue

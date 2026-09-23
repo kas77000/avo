@@ -74,6 +74,32 @@ def load(path):
     return out
 
 
+def load_composites(path) -> dict:
+    """{Bloomberg exchange code: the composite it is WRITTEN as}, from
+    config/composites.csv - and only the codes that convert.
+
+    THE LEGACY JOB'S OWN RULE, kept as a table because it is a table there:
+    MarketConditionBBG.xml gives every BloombergMarketInfo a
+    Convert2Composite flag and a CompositeExchangeCode, and the folder and
+    the file take the composite when the flag is set.  `RIO AT` is written
+    `RIO AU`; `7203 JT` is written `7203 JP`.  A code that does not convert,
+    and a code the file has never heard of, keep what the crosscode says."""
+    out = {}
+    with Path(path).open(newline="", encoding="utf-8-sig") as fh:
+        for r in csv.DictReader(fh):
+            code = (r.get("BBGCode") or "").strip()
+            comp = (r.get("CompositeExchangeCode") or "").strip()
+            convert = (r.get("Convert2Composite") or "").strip().upper()
+            if not code or convert not in ("TRUE", "1", "YES"):
+                continue
+            if not comp:
+                raise ValueError(
+                    f"{path}: {code} converts to a composite but names "
+                    f"none - a file cannot be called '{code} '")
+            out[code] = comp
+    return out
+
+
 def composite(market: str, markets) -> str:
     """The composite for a Fidessa market, or "" if it is not configured.
 

@@ -81,11 +81,11 @@ def filename(bbg: str, date) -> str:
 def folder(crosscode_bbg: str) -> str:
     """The directory one name's files live in: its crosscode BloombergCode.
 
-    NOT the file's own code.  The two differ for China, where the MIC
-    renames the file - folder "600000 C1" holds "raw-600000 CG-...csv" -
-    because the folder answers "which crosscode line is this" and the file
-    answers "what does the consumer call it".  Everywhere else they are the
-    same string.
+    The same string as the file's own code today: config/composites.csv
+    renames folder and file together.  They are still passed separately
+    because the store has held both shapes - a folder "600000 C1" holding
+    "raw-600000 CG-...csv", from when the MIC renamed the file alone - and
+    existing_dates must still find those.
 
     ONE FOLDER PER NAME, and it is what makes a real backfill possible.
     existing_dates is called once per name, and when every file shared one

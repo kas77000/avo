@@ -21,21 +21,23 @@ TWO  COLLAPSE.  `7203 JT`, `7203 JE` and `7203 JI` are three crosscode rows -
      EQY_PRIM_EXCH_SHRT.  So Toyota's file is `raw-7203 JT-...`, never
      `raw-7203 JE-...`, and never the composite.
 
-THREE RENAME.  A Chinese stock is spelt three different ways and this is
-     where the third is made.  Shanghai's 600000 is `600000 C1` in the
-     crosscode, `600000.CH` in kdb, and `raw-600000 CG-...` on disk.  The MIC
-     decides which suffix - XSHG takes CG, XSHE takes CS - and the MIC is not
-     one of the crosscode's seven columns, so this cannot happen until
-     equity_master has answered.
+THREE RENAME.  Some markets are written under their COMPOSITE code rather
+     than the crosscode's own: `RIO AT` is `RIO AU` on disk, `7203 JT` is
+     `7203 JP`, and an Indian line is `IN` whichever board it trades on.
+     config/composites.csv holds that rule, taken from the legacy job's
+     MarketConditionBBG.xml - Convert2Composite and CompositeExchangeCode
+     per Bloomberg exchange code - and it names the FOLDER and the FILE
+     alike.  A code that does not convert, and one the file has never heard
+     of, keep what the crosscode says.
 
      Nothing is excluded today.  EXCLUDED_MICS is empty and the machinery
      around it is kept, because "China is out for now" was true last week and
      may be again.
 
 Every row that falls out is kept with a reason and counted, and so is every
-row whose file could NOT be renamed.  A universe that quietly shrinks - or
-quietly writes half its Chinese names under the wrong code - is the failure
-this whole module exists to prevent.
+exchange code composites.csv does not list.  A universe that quietly shrinks
+- or quietly writes half a market under a code the consumer is not looking
+for - is the failure this whole module exists to prevent.
 
     python universe.py --self-test
 """
@@ -48,30 +50,25 @@ from dataclasses import dataclass, field
 #  come out, and the reporting for it is already built - see build().
 EXCLUDED_MICS = ()
 
-#  SHANGHAI AND SHENZHEN ARE NAMED DIFFERENTLY ON DISK.  A Shanghai line is
-#  `600000 C1` in the crosscode and `600000.CH` in kdb, but the file it
-#  writes is `raw-600000 CG-...`.  Three spellings of one stock, and this is
-#  the third.
-#
-#  The MIC decides, not the Fidessa market: SHA/SHH/SSC/SZA/SHZ/SZC do not
-#  say on their face which side of the border they are, and guessing wrong
-#  mislabels every Chinese file with nothing in the output to show for it.
-#  A name with no MIC therefore keeps its crosscode code and is counted.
-MIC_FILE_EXT = {"XSHG": "CG", "XSHE": "CS"}
+#  CHINA IS NOT RENAMED.  An earlier version wrote Shanghai as `600000 CG`
+#  and Shenzhen as `000001 CS`, chosen by MIC.  The legacy job's own config
+#  says otherwise - C1, C2, CG and CS all carry Convert2Composite=false -
+#  and that config is now the one rule for every market, so a Shanghai line
+#  keeps the `600000 C1` the crosscode gives it.
 
 
 @dataclass(frozen=True)
 class Name:
-    bbg: str          # "7203 JT" - the primary, and what names the FILE
+    bbg: str          # "7203 JP" - what names the FILE and the folder
     sym: str          # "7203.JP" - the qatt key
     mic: str          # "XTKS"
     rows: tuple       # every crosscode row that collapsed into this one
     source: str       # "equity_master" or "markets.csv"
-    #  The crosscode's own BloombergCode, which names the FOLDER.  It is
-    #  the same string as bbg everywhere except China, where the MIC
-    #  renames the file: folder "600000 C1" holds "raw-600000 CG-...csv".
-    #  Kept separately because file_code() has already thrown it away by
-    #  the time anything downstream sees the Name.
+    #  What names the FOLDER.  The same string as bbg: the folder and the
+    #  file take one code, the composite where composites.csv says so.  The
+    #  field is kept because everything downstream - the store, compare.py,
+    #  the zips - is written in terms of the two, and they were once
+    #  different (China's file was renamed by MIC, its folder was not).
     crosscode_bbg: str = ""
 
 
@@ -100,15 +97,15 @@ def resolve_sym(row, master: dict, markets) -> tuple:
     return "", ""
 
 
-def file_code(bbg: str, ticker: str, mic: str) -> str:
-    """What the file is called.
+def file_code(bbg: str, ticker: str, ext: str, composites) -> str:
+    """What the folder and the file are called.
 
-    Normally the crosscode's own BloombergCode - ticker and primary exchange
-    code, `7203 JT`.  Shanghai and Shenzhen are the exception: their primary
-    codes are C1 and C2 and the consumer expects CG and CS, so the ticker
-    takes those instead."""
-    ext = MIC_FILE_EXT.get((mic or "").upper())
-    return f"{ticker} {ext}" if ext and ticker else bbg
+    Normally the crosscode's own BloombergCode - ticker and exchange code,
+    `500325 IB`.  When composites.csv says that code converts, the ticker
+    takes the composite instead: `500325 IN`.  The ticker is what carries,
+    so a name with none keeps its code whatever the table says."""
+    comp = (composites or {}).get((ext or "").strip())
+    return f"{ticker} {comp}" if comp and ticker else bbg
 
 
 def primary_row(rows, prim_ext: str):
@@ -124,11 +121,11 @@ def primary_row(rows, prim_ext: str):
     return rows[0], False
 
 
-def build(rows, master: dict, markets) -> tuple:
-    """(names, excluded, tally)."""
+def build(rows, master: dict, markets, composites=None) -> tuple:
+    """(names, excluded, tally).  `composites` is marketcfg.load_composites."""
     by_sym, excluded = {}, {}
     tally = {"equity_master": 0, "markets.csv": 0, "no primary match": 0,
-             "renamed by MIC": 0, "china without a MIC": 0}
+             "written as the composite": 0, "no code in composites.csv": 0}
 
     def drop(reason, who):
         excluded.setdefault(reason, []).append(who)
@@ -162,18 +159,21 @@ def build(rows, master: dict, markets) -> tuple:
                       group[0][1])
         tally[source] += 1
 
-        bbg = file_code(chosen.bbg, chosen.ticker, mic)
+        bbg = file_code(chosen.bbg, chosen.ticker, chosen.bbg_ext,
+                        composites)
         if bbg != chosen.bbg:
-            tally["renamed by MIC"] += 1
-        elif sym.endswith(".CH"):
-            #  A China sym with no MIC to rename it: the file keeps C1 or C2
-            #  and is not what the consumer is looking for.  Loud in the
-            #  tally rather than silent on disk.
-            tally["china without a MIC"] += 1
+            tally["written as the composite"] += 1
+        elif (chosen.bbg_ext or "").strip() not in (composites or {}):
+            #  A code composites.csv has never heard of keeps the crosscode's
+            #  own spelling.  Counted, because a market added upstream should
+            #  be a line in that file rather than a silent default.
+            tally["no code in composites.csv"] += 1
 
+        #  THE FOLDER AND THE FILE ARE THE SAME CODE.  They differed only
+        #  while China was renamed and the folder kept the crosscode's own.
         names.append(Name(bbg=bbg, sym=sym, mic=mic,
                           rows=tuple(group_rows), source=source,
-                          crosscode_bbg=chosen.bbg))
+                          crosscode_bbg=bbg))
 
     names.sort(key=lambda n: n.bbg)
 
@@ -286,39 +286,47 @@ def self_test() -> int:
     check("and both names resolved off equity_master",
           tally["equity_master"], 2)
 
-    print("\nChina: in, and named a third way")
-    check("Shanghai's file takes CG, not the crosscode's C1",
-          file_code("600000 C1", "600000", "XSHG"), "600000 CG")
-    check("Shenzhen's takes CS, not C2",
-          file_code("000001 C2", "000001", "XSHE"), "000001 CS")
-    check("everywhere else keeps the crosscode's own code",
-          file_code("7203 JT", "7203", "XTKS"), "7203 JT")
-    check("a Hong Kong name is untouched - Stock Connect lines are XHKG, "
-          "and renaming them would be wrong",
-          file_code("700 HK", "700", "XHKG"), "700 HK")
-    check("no MIC, no rename - the file keeps C1 rather than taking a "
-          "guessed suffix",
-          file_code("600000 C1", "600000", ""), "600000 C1")
+    print("\nthe composite decides the name, from composites.csv")
+    import marketcfg as _mc
+    COMP = _mc.load_composites(Path(__file__).resolve().parent / "config"
+                               / "composites.csv")
+    check("the table holds only the codes that convert, and what they "
+          "convert to", COMP, {"AT": "AU", "IB": "IN", "IS": "IN",
+                               "JT": "JP"})
+    check("an Australian line is written as the composite",
+          file_code("RIO AT", "RIO", "AT", COMP), "RIO AU")
+    check("Tokyo's too", file_code("7203 JT", "7203", "JT", COMP),
+          "7203 JP")
+    check("both Indian boards land on IN, and their tickers keep them apart",
+          (file_code("RELIANCE IS", "RELIANCE", "IS", COMP),
+           file_code("500325 IB", "500325", "IB", COMP)),
+          ("RELIANCE IN", "500325 IN"))
+    check("CHINA IS NOT RENAMED - the legacy config says C1 and C2 do not "
+          "convert, and this table is now the only rule",
+          (file_code("600000 C1", "600000", "C1", COMP),
+           file_code("000001 C2", "000001", "C2", COMP)),
+          ("600000 C1", "000001 C2"))
+    check("a code the table does not list keeps the crosscode's own",
+          file_code("700 HK", "700", "HK", COMP), "700 HK")
+    check("and so does one with no ticker to build a name from",
+          file_code("7203 JT", "", "JT", COMP), "7203 JT")
 
-    names, excl, tally = build([tyo, bhp, sha, szn], MASTER, M)
-    check("all four names are fetched - nothing is excluded any more",
+    names, excl, tally = build([tyo, bhp, sha, szn], MASTER, M, COMP)
+    check("Tokyo is written JP and Australia AU; China keeps C1 and C2",
           [n.bbg for n in names],
-          ["000001 CS", "600000 CG", "7203 JT", "BHP AU"])
-    check("nothing was excluded", excl, [])
-    check("but both are still looked up on the composite sym, which is "
-          "what kdb keys them by",
-          sorted(n.sym for n in names if n.sym.endswith(".CH")),
-          ["000001.CH", "600000.CH"])
-    check("and the renames are counted", tally["renamed by MIC"], 2)
-
-    print("\nChina with no equity_master row")
-    names, excl, tally = build([sha], {}, M)
-    check("markets.csv still builds the right kdb key from the composite",
-          [n.sym for n in names], ["600000.CH"])
-    check("but with no MIC the file keeps C1, which is NOT what the "
-          "consumer wants",
-          [n.bbg for n in names], ["600000 C1"])
-    check("so it is counted, loudly", tally["china without a MIC"], 1)
+          ["000001 C2", "600000 C1", "7203 JP", "BHP AU"])
+    check("THE FOLDER IS THE SAME CODE AS THE FILE now that nothing is "
+          "renamed by MIC",
+          [n.crosscode_bbg for n in names],
+          ["000001 C2", "600000 C1", "7203 JP", "BHP AU"])
+    check("the conversion is counted - and BHP AU is ALREADY a composite "
+          "code, so only Tokyo converts here",
+          tally["written as the composite"], 1)
+    check("the codes the table does not list are counted too: AU, C1, C2",
+          tally["no code in composites.csv"], 3)
+    check("the qatt key is untouched by any of it - it is kdb's, not the "
+          "file's", sorted(n.sym for n in names),
+          ["000001.CH", "600000.CH", "7203.JP", "BHP.AU"])
 
     print("\nthe exclusion mechanism, still there and switched off")
     check("nothing is excluded today", EXCLUDED_MICS, ())
@@ -349,9 +357,9 @@ def self_test() -> int:
           [("7203 JT", "")])
 
     print("\nan empty universe")
-    check("is empty, not an error", build([], {}, M), ([], [], {
+    check("is empty, not an error", build([], {}, M, COMP), ([], [], {
         "equity_master": 0, "markets.csv": 0, "no primary match": 0,
-        "renamed by MIC": 0, "china without a MIC": 0}))
+        "written as the composite": 0, "no code in composites.csv": 0}))
 
     print("\na * in the crosscode code")
     star = Row("HPHT* SP", "HPHT*", "SP", "SES-MAIN")

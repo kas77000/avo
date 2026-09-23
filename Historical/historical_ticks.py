@@ -556,13 +556,14 @@ def log_universe(rows, names, excluded, tally, log) -> None:
     if tally["no primary match"]:
         log.warn(f"{tally['no primary match']} names have no primary "
                  f"listing; each is named by its first crosscode row")
-    if tally["renamed by MIC"]:
-        log.kv("renamed CG/CS", tally["renamed by MIC"],
-               "Shanghai and Shenzhen, named for the consumer")
-    if tally["china without a MIC"]:
-        log.warn(f"CHINA, NOT RENAMED: {tally['china without a MIC']} .CH "
-                 f"syms had no MIC, so their files keep C1/C2 - the WRONG "
-                 f"code. Fix before trusting the output.")
+    if tally["written as the composite"]:
+        log.kv("as the composite",
+               logs.thousands(tally["written as the composite"]),
+               "config/composites.csv - RIO AT is RIO AU on disk")
+    if tally["no code in composites.csv"]:
+        log.info(f"    {logs.thousands(tally['no code in composites.csv'])} "
+                 f"name(s) have an exchange code composites.csv does not "
+                 f"list; they keep the crosscode's own")
 
 
 def log_plan(plan_, log) -> None:
@@ -739,6 +740,7 @@ def stage_partitions(conn, date_text, log, from_text=""):
 def trace(cfg, a, log=None) -> int:
     log = log or logs.Log(path=a.log or None)
     markets = marketcfg.load(HERE / "config" / "markets.csv")
+    composites = marketcfg.load_composites(HERE / "config" / "composites.csv")
     out_dir = cfg["OUTPUT_DIR"]
 
     log.info(f"TRACE  {a.trace!r}" + (f" on {a.date}" if a.date
@@ -769,7 +771,8 @@ def trace(cfg, a, log=None) -> int:
             f"{k}={row[k] or '-'}" for k in qattsource.MASTER_FIELDS))
 
     log.step(3, "universe  - collapse, rename, filter")
-    names, excluded, tally = universe.build(rows, master, markets)
+    names, excluded, tally = universe.build(rows, master, markets,
+                                            composites)
     for e in excluded:
         log.warn(f"excluded {e.reason}: {', '.join(e.rows)}")
     if not names:
@@ -968,6 +971,7 @@ def main(argv=None) -> int:
         return demo()
 
     markets = marketcfg.load(HERE / "config" / "markets.csv")
+    composites = marketcfg.load_composites(HERE / "config" / "composites.csv")
     try:
         a.venue_list = parse_venues(a.venues, markets)
     except ValueError as e:
@@ -1032,7 +1036,8 @@ def main(argv=None) -> int:
         em, rows, markets, cfg["MASTER_CHUNK"], log)
 
     log.step(3, "universe")
-    names, excluded, tally = universe.build(rows, master, markets)
+    names, excluded, tally = universe.build(rows, master, markets,
+                                            composites)
     excluded = list(dropped) + excluded
     log_universe(rows, names, excluded, tally, log)
 
@@ -1235,12 +1240,15 @@ def demo() -> int:
         out = Path(d) / "out"
 
         markets = marketcfg.load(HERE / "config" / "markets.csv")
+        composites = marketcfg.load_composites(
+            HERE / "config" / "composites.csv")
         rows, dropped = crosscode.load(cc)
         conn = Conn()
 
         cands = candidates(rows, markets)
         got = qattsource.fetch_master(conn, dt.date(2026, 9, 3), cands)
-        names, excluded, tally = universe.build(rows, got["rows"], markets)
+        names, excluded, tally = universe.build(rows, got["rows"], markets,
+                                                composites)
         parts = qattsource.partitions(conn)
 
         print(f"crosscode  {len(rows)} rows")
@@ -1259,7 +1267,8 @@ def demo() -> int:
         print("\n--- the files ---")
         for f in sorted(out.iterdir()):
             print(f"  {f.name}")
-        sample = ticksfile.path(out, "7203 JT", "7203 JT",
+        #  Tokyo is written as its composite - see config/composites.csv.
+        sample = ticksfile.path(out, "7203 JP", "7203 JP",
                                 dt.date(2026, 9, 3))
         print(f"\n--- {sample.name} ---")
         for line in sample.read_text(encoding="utf-8").splitlines():
@@ -1290,8 +1299,8 @@ def demo() -> int:
         log_plan(plan3, dlog)
         log_result(stats3, False, dlog)
 
-        #  The folder keeps the crosscode's C1; the file takes the MIC's CG.
-        sha = ticksfile.path(out, "600000 C1", "600000 CG",
+        #  China does not convert: C1 in the crosscode, C1 on disk.
+        sha = ticksfile.path(out, "600000 C1", "600000 C1",
                              dt.date(2026, 9, 3))
         print(f"\n--- {sha.name} ---")
         for line in sha.read_text(encoding="utf-8").splitlines():

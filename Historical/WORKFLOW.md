@@ -91,13 +91,17 @@ the composite `JP`.
 | `XSHG` Shanghai | `<ticker> CG` |
 | `XSHE` Shenzhen | `<ticker> CS` |
 
-So one Chinese stock is spelt three ways, and all three are correct:
+So one Chinese stock is spelt two ways, and both are correct:
 
 ```
-600000 C1     in the crosscode
+600000 C1     in the crosscode, and on disk
 600000.CH     the only shape equity_master and qatt answer to
-600000 CG     on disk, which is what the consumer reads
 ```
+
+**The name on disk comes from `config/composites.csv`**, the legacy job's own
+`Convert2Composite` rule per Bloomberg exchange code. `AT`, `JT`, `IS` and
+`IB` convert — `RIO AT` is written `RIO AU`, `7203 JT` is `7203 JP` — and the
+folder takes the same code as the file. China is not among them.
 
 **Filter.** `EXCLUDED_MICS` is **empty** — nothing is dropped today. The
 machinery is kept and tested, one tuple away from switching a market off.
@@ -269,7 +273,8 @@ parallel path would only tell you the parallel path works.
 
 Two things to know about it: it **ignores** the output directory and the miss
 cache and rewrites the file (it is a diagnostic, not a run), and it accepts
-either spelling of a Chinese name — `600000 C1` or `600000 CG`.
+either the crosscode's code or the one the file is written under — `RIO AT`
+or `RIO AU`.
 
 Add `--dry-run` to trace everything and still write nothing.
 
