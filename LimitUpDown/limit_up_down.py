@@ -68,8 +68,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import contextlib
 import datetime as dt
 import sys
+import traceback
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
@@ -78,7 +80,6 @@ import bpipe
 import crosscode
 import india
 import kdbclose
-import mailer
 import marketcfg
 import ticks
 
@@ -120,15 +121,20 @@ CLOSES_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Close"]
 OUT_TEST = ""
 OUT_PILOT = ""
 OUT_PROD = ""
-SMTP_HOST = "CHANGEME"
-EMAIL_FROM = "CHANGEME"
-EMAIL_TO = []
+#  Where each run's log goes, as LimitUpDown-YYYYMMDD-HHMMSS.log.  The log is
+#  everything the run printed - it replaces the report the job used to mail.
+LOG_DIR = str(Path(__file__).resolve().parent / "logs")
+
+#  Settings the job no longer has.  Tolerated, with a note, so that a
+#  local_settings.py written for the mailing version still starts the run
+#  instead of stopping it on the strict check below.
+RETIRED = ("SMTP_HOST", "EMAIL_FROM", "EMAIL_TO")
 
 
 def _apply_local_settings():
     """Servers and paths live beside this file, not in it, so a git pull is
-    always clean.  A name the script does not define is an ERROR: EMAIL_T0
-    with a zero would otherwise sit there sending mail to no one."""
+    always clean.  A name the script does not define is an ERROR: OUT_PR0D
+    with a zero would otherwise sit there publishing to nowhere."""
     path = Path(__file__).resolve().parent / "local_settings.py"
     if not path.is_file():
         return []
@@ -141,6 +147,10 @@ def _apply_local_settings():
     changed, unknown = [], []
     for k, v in ns.items():
         if k.startswith("_"):
+            continue
+        if k in RETIRED:
+            print(f"{path}: {k} is no longer used - the report goes to "
+                  f"LOG_DIR now, not by mail. Delete the line.")
             continue
         if k not in globals():
             unknown.append(k)
@@ -169,7 +179,6 @@ REQUIRED = {
     "marketcfg": ("load", "ConfigError"),
     "bands": ("compute", "BandError"),
     "ticks": ("tick_for",),
-    "mailer": ("send",),
 }
 
 
@@ -360,6 +369,30 @@ def write_closes_csv(path, rows, closes):
                              "Venue": r.venue_id, "Close": _plain(ref)})
             n += 1
     return path, n
+
+
+#  EVERY PUBLISHED ROW and how it was priced: "bloomberg" or "computed".
+#  Written beside OUT_TEMP, not published.  The path it ENDED on is what
+#  counts - a name Bloomberg would not price and that was then computed is
+#  "computed".  Names that were not published at all are in excluded.csv.
+SOURCES_CSV = "sources.csv"
+SOURCES_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Source"]
+
+
+def write_sources_csv(path, sources):
+    """`sources` is (output row, "bloomberg" | "computed") pairs.  Returns
+    (path, count)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=SOURCES_HEADER,
+                                lineterminator="\n")
+        writer.writeheader()
+        for r, source in sources:
+            writer.writerow({"ReutersCode": r["#ReutersCode"],
+                             "BloombergCode": r["BloombergCode"],
+                             "Venue": r["Venue"], "Source": source})
+    return path, len(sources)
 
 
 def read_closes_csv(path):
@@ -903,7 +936,6 @@ def write_compare_report(path, records) -> str:
 
 
 def run(envs_spec: str, venues_spec: str = "") -> int:
-    mail = (SMTP_HOST, EMAIL_FROM, EMAIL_TO)
     session = None
     only = []
     try:
@@ -1124,15 +1156,13 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
         #  every argument. Printing only type(e).__name__ threw all of that
         #  away, which is how a live run produced a bare "QError: type".
         detail = str(e)
-        mailer.send("LimitUpDown FAILED", f"{type(e).__name__}: {detail}",
-                    *mail)
         print(f"FATAL {type(e).__name__}: {detail}", file=sys.stderr)
         return 1
     finally:
         if session is not None:
             session.stop()
 
-    out, more = price_from_bloomberg(ask, limits, refused)
+    out_bbg, more = price_from_bloomberg(ask, limits, refused)
 
     #  THE OTHER DIRECTION: a name B-PIPE would not price, given the
     #  venue's own band instead.  Only for venues that asked for it, and
@@ -1172,8 +1202,14 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
         print(f"{len(fb_out)} of {len(fallback)} names with no close were "
               f"rescued from Bloomberg")
 
-    out = (out + computed_out + sec_out + fb_out + cd_out
-           + india.publish_both(sec_out))
+    sec_both = india.publish_both(sec_out)
+    out = out_bbg + computed_out + sec_out + fb_out + cd_out + sec_both
+    #  HOW EACH PUBLISHED ROW WAS PRICED, by where it ENDED UP: a name
+    #  Bloomberg would not price that was then computed is "computed", and a
+    #  computed name with no close that Bloomberg rescued is "bloomberg".
+    sources = ([(r, "bloomberg") for r in out_bbg + sec_out + fb_out
+                + sec_both]
+               + [(r, "computed") for r in computed_out + cd_out])
     excluded = (list(excluded) + list(more) + list(computed_excluded)
                 + list(sec_excluded) + list(fb_excluded) + list(cd_excluded))
     #  Every refusal B-PIPE made, whether or not a band rescued the name.
@@ -1184,14 +1220,12 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
     if problems:
         body = ("Output failed validation, nothing published:\n\n"
                 + "\n".join(problems[:200]))
-        mailer.send("LimitUpDown FAILED validation", body, *mail)
         print(body, file=sys.stderr)
         return 1
 
     try:
         write_csv(OUT_TEMP, out)
     except OSError as e:
-        mailer.send("LimitUpDown FAILED to write", str(e), *mail)
         print(f"FATAL {e}", file=sys.stderr)
         return 1
 
@@ -1209,8 +1243,6 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
     targets = {"Test": OUT_TEST, "Pilot": OUT_PILOT, "Prod": OUT_PROD}
     failures = copy_to_envs(OUT_TEMP, envs, targets)
     if failures:
-        mailer.send("LimitUpDown FAILED to publish", "\n".join(failures),
-                    *mail)
         print("\n".join(failures), file=sys.stderr)
         return 1
 
@@ -1241,6 +1273,14 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
                       f"limit, written to {cl_path}")
     except Exception as e:                                  # noqa: BLE001
         report.append(f"  closes csv FAILED: {type(e).__name__}: {e}")
+
+    try:
+        src_path, src_count = write_sources_csv(
+            Path(OUT_TEMP).parent / SOURCES_CSV, sources)
+        report.append(f"  sources     {src_count:6d}  published rows with "
+                      f"how each was priced, written to {src_path}")
+    except Exception as e:                                  # noqa: BLE001
+        report.append(f"  sources csv FAILED: {type(e).__name__}: {e}")
 
     try:
         exc_path, exc_count = write_excluded_csv(
@@ -1295,10 +1335,7 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
     for field, (message, count) in sorted(field_problems.items()):
         report.append(f"  field      {count:6d}  {field}: {message}")
 
-    text = "\n".join(report)
-    print(text)
-    if excluded:
-        mailer.send(f"LimitUpDown report - {len(out)} rows", text, *mail)
+    print("\n".join(report))
     return 0
 
 
@@ -1619,6 +1656,55 @@ def kdb_check(sample: int = 5, venues_spec: str = "") -> int:
     return 0 if closes else 1
 
 
+class _Tee:
+    """Writes to the console and to the log file both.  A progress line
+    ends in a carriage return so the console overwrites it; the file gets a
+    newline instead."""
+
+    def __init__(self, console, log):
+        self.console, self.log = console, log
+
+    def write(self, text):
+        self.console.write(text)
+        self.log.write(text.replace("\r", "\n"))
+        return len(text)
+
+    def flush(self):
+        self.console.flush()
+        self.log.flush()
+
+
+@contextlib.contextmanager
+def run_log(log_dir, now=None):
+    """Everything printed inside the block also goes to
+    LOG_DIR/LimitUpDown-YYYYMMDD-HHMMSS.log.  A crash is written into the
+    log too, traceback and all, before it propagates."""
+    now = now or dt.datetime.now()
+    #  Blank is the default, not the current directory.
+    log_dir = log_dir or Path(__file__).resolve().parent / "logs"
+    path = Path(log_dir) / f"LimitUpDown-{now:%Y%m%d-%H%M%S}.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        out, err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = _Tee(out, fh), _Tee(err, fh)
+        try:
+            print(f"LimitUpDown started {now:%Y-%m-%d %H:%M:%S}, "
+                  f"args {sys.argv[1:]}")
+            yield path
+        except SystemExit as e:
+            #  A SystemExit with a message is how the startup checks stop
+            #  the run; Python prints it only after this block has exited.
+            if not isinstance(e.code, (int, type(None))):
+                fh.write(f"{e.code}\n")
+            raise
+        except BaseException:
+            fh.write(traceback.format_exc())
+            raise
+        finally:
+            fh.write(f"finished {dt.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+            sys.stdout, sys.stderr = out, err
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description="Build limitUpDown.csv from Bloomberg limits over "
@@ -1690,7 +1776,9 @@ def main(argv=None) -> int:
         print(f"written to {write_compare_report(a.report, records)}")
         return 0
 
-    return run(a.envs, a.venues)
+    with run_log(LOG_DIR) as log_path:
+        print(f"log: {log_path}")
+        return run(a.envs, a.venues)
 
 
 # =============================================================================
@@ -2606,6 +2694,40 @@ def self_test() -> int:
     check("every configured venue appears, published or not - matched by "
           "name, since BSE-SECONDARY is not spelled like the others",
           sorted(l.split()[0] for l in lines[1:]), sorted(cfg2.venues))
+
+    print("\nthe run log and the sources csv")
+    with tempfile.TemporaryDirectory() as tmp:
+        with run_log(tmp, dt.datetime(2026, 9, 23, 7, 5, 9)) as lp:
+            print("to the console and the file")
+            print("  batch 1/2", end="\r")
+            print("an error line", file=sys.stderr)
+        check("the log is named LimitUpDown-YYYYMMDD-HHMMSS.log", lp.name,
+              "LimitUpDown-20260923-070509.log")
+        text = lp.read_text(encoding="utf-8")
+        check("stdout reaches it", "to the console and the file" in text,
+              True)
+        check("stderr reaches it", "an error line" in text, True)
+        check("a progress line gets a newline, not a carriage return",
+              "\r" in text, False)
+        check("and the console is given back afterwards",
+              isinstance(sys.stdout, _Tee), False)
+        try:
+            with run_log(tmp, dt.datetime(2026, 9, 23, 7, 6, 0)) as lp2:
+                raise ValueError("boom")
+        except ValueError:
+            pass
+        check("a crash is written into the log, traceback and all",
+              "ValueError: boom" in lp2.read_text(encoding="utf-8"), True)
+
+        a_row = row("A.T", "A JT", "A")
+        sp, n = write_sources_csv(
+            Path(tmp) / SOURCES_CSV,
+            [(_out_row(a_row, Decimal(90), Decimal(110)), "computed")])
+        with sp.open(newline="", encoding="utf-8") as fh:
+            got = list(csv.DictReader(fh))
+        check("sources.csv says how each published row was priced",
+              (n, got), (1, [{"ReutersCode": "A.T", "BloombergCode": "A JT",
+                              "Venue": "TYO-MAIN", "Source": "computed"}]))
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

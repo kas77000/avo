@@ -352,8 +352,7 @@ to see once. The cheap, fragile side now fails fast.
 ```
 python bands.py --self-test        python marketcfg.py --self-test
 python ticks.py --self-test        python crosscode.py --self-test
-python bpipe.py --self-test        python mailer.py --self-test
-python india.py --self-test
+python bpipe.py --self-test        python india.py --self-test
 ```
 
 ## First run
@@ -364,7 +363,7 @@ copy local_settings.py.example local_settings.py
 ```
 
 Fill in `BPIPE_HOST`, `BPIPE_PORT`, `BPIPE_APP`, `EQUITY_MASTER_SERVER`,
-`TSR_DIR` and the SMTP host. `EQUITY_MASTER_SERVER` is only read when some
+`TSR_DIR` and `LOG_DIR`. `EQUITY_MASTER_SERVER` is only read when some
 venue is `computed`.
 
 `TSR_DIR` now carries India's two `.stra` strategy files as well as the tick
@@ -710,6 +709,26 @@ saved the row.
 
 A name that fails both keeps both halves: `no data from Bloomberg, then no
 previous close in equity_master`.
+
+### The run log, and how each name was priced
+
+Nothing is mailed. Everything a real run prints — progress, the report, a
+fatal error with its traceback — also goes to
+`LOG_DIR\LimitUpDown-YYYYMMDD-HHMMSS.log`, one file per run. `LOG_DIR` is set in
+`local_settings.py` and defaults to `logs\` beside the script.
+
+`sources.csv`, written beside the output every run, lists every published row
+with how it was priced:
+
+```
+ReutersCode,BloombergCode,Venue,Source
+7203.T,7203 JT,TYO-MAIN,bloomberg
+A.KS,A KP,KSC-MAIN,computed
+```
+
+**The path the name ended on is what counts.** Bloomberg would not price it and
+the band was computed instead: `computed`. A computed name with no close that
+Bloomberg rescued: `bloomberg`.
 
 ### Which names did not make the file
 
