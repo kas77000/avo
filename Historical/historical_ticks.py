@@ -46,6 +46,8 @@ Bloomberg version had.
     python historical_ticks.py --date 2026-09-02   as if that were today
     python historical_ticks.py --from 2026-08-22 --to 2026-09-21   a range
     python historical_ticks.py --only "7203 JT"    one name, for a check
+    python historical_ticks.py --only "7203 JT" --day 2026-07-01
+                                               that name, that day, again
     python historical_ticks.py --venues "NSI-MAIN|BSE-MAIN"   those markets only
     python historical_ticks.py --venues "SET-MAIN" --compress_venues   into SET-MAIN.zip
     python historical_ticks.py --retry-misses  ask again about the empties
@@ -901,6 +903,12 @@ def main(argv=None) -> int:
     p.add_argument("--date", "--to", dest="date", default="",
                    help="the last day, YYYY-MM-DD, as if it were the newest; "
                         "--to and --date are the same flag")
+    p.add_argument("--day", default="",
+                   help="ONE date, YYYY-MM-DD, fetched and rewritten "
+                        "whatever is already on disk or in a venue zip.  "
+                        "With --only it is one name on one day.  Not for a "
+                        "daily run: it takes neither --backfill nor "
+                        "--from/--to.")
     p.add_argument("--from", dest="date_from", default="",
                    help="the first day, YYYY-MM-DD.  Every qatt day from "
                         "here to --to (or the newest) is wanted; replaces "
@@ -960,9 +968,18 @@ def main(argv=None) -> int:
         return 2
     try:
         start, end = parse_day(a.date_from, "--from"), parse_day(a.date, "--to")
+        one_day = parse_day(a.day, "--day")
     except ValueError as e:
         print(f"FAIL  {e}", file=sys.stderr)
         return 2
+    if one_day:
+        #  --day IS the window, so it cannot share the run with another way
+        #  of saying which days: one of them would have to lose, silently.
+        if start or end or a.backfill is not None:
+            print("FAIL  --day is one date on its own; it takes neither "
+                  "--backfill nor --from/--to", file=sys.stderr)
+            return 2
+        a.date = a.date_from = a.day
     if start and end and start > end:
         print(f"FAIL  --from {start} is after --to {end}", file=sys.stderr)
         return 2
@@ -1047,6 +1064,15 @@ def main(argv=None) -> int:
                logs.thousands(sum(len(v) for v in zipped.values())),
                "count as done, like files on disk")
     plan_ = plan(names, parts, out_dir, backfill, cache, zipped)
+    if a.day:
+        #  ASKED FOR BY NAME, SO FETCHED: a day already on disk, in a zip or
+        #  in the miss cache is the reason someone reaches for --day, and
+        #  skipping it would make the flag do nothing.
+        plan_ = add_today({"by_date": {}, "per_name": {}}, names,
+                          parts[-1])
+        log.kv("--day", str(parts[-1]),
+               f"{logs.thousands(len(names))} name(s), rewritten whatever "
+               f"is already there")
     today = None
     if a.today:
         today = dt.date.today()
@@ -1379,6 +1405,12 @@ def self_test() -> int:
 
     check("--from with --backfill is refused before any server is asked",
           main(["--from", "2026-09-01", "--backfill", "5"]), 2)
+    check("--day says which days on its own, so it takes neither",
+          (main(["--day", "2026-09-01", "--backfill", "5"]),
+           main(["--day", "2026-09-01", "--to", "2026-09-02"]),
+           main(["--day", "2026-09-01", "--from", "2026-09-02"])), (2, 2, 2))
+    check("and a --day that is not a date is refused like the rest",
+          main(["--day", "1 July"]), 2)
     check("and so is a --from after its --to",
           main(["--from", "2026-09-10", "--to", "2026-09-01"]), 2)
     c = candidates([Row("7203 JT"), Row("7203 JE", market="JNX-MAIN"),
@@ -1615,6 +1647,24 @@ def self_test() -> int:
     check("'wsfull and 'limit read as too big too",
           (too_big(Exception("wsfull")), too_big(Exception("limit")),
            too_big(Exception("type"))), (True, True, False))
+
+    print("\n--day: one date, fetched whatever is already there")
+    with tempfile.TemporaryDirectory() as d:
+        day = D(2026, 9, 3)
+        pl = plan([toyota], [day], d, 1, {})
+        check("an ordinary run wants the day when nothing is on disk",
+              pl["by_date"].get(day, []), [toyota])
+        ticksfile.write_rows(ticksfile.path(d, toyota.crosscode_bbg,
+                                            toyota.bbg, day), [])
+        cache = {}
+        misscache.record(cache, toyota.bbg, toyota.sym, day)
+        check("with a file AND a miss cached, an ordinary run wants nothing",
+              plan([toyota], [day], d, 1, cache)["by_date"], {})
+        forced = add_today({"by_date": {}, "per_name": {}}, [toyota], day)
+        check("--day asks for it anyway - that is the whole point of "
+              "reaching for it",
+              (forced["by_date"][day], forced["per_name"][toyota.bbg]),
+              ([toyota], [day]))
 
     print("\nkdb's clock is Hong Kong's; the file carries the market's")
 

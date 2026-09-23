@@ -200,6 +200,7 @@ python historical_ticks.py                 the daily run
 python historical_ticks.py --backfill 90   a deeper first run
 python historical_ticks.py --date 2026-09-02   as if that were today
 python historical_ticks.py --only "7203 JT"    one name
+python historical_ticks.py --only "7203 JT" --day 2026-07-01   that name, that day, again
 python historical_ticks.py --venues "NSI-MAIN|BSE-MAIN"   those FidessaMarkets only
 python historical_ticks.py --venues "SET-MAIN" --compress_venues   files into SET-MAIN.zip
 python historical_ticks.py --from 2026-08-22 --to 2026-09-21   every qatt day in that range
