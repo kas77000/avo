@@ -47,7 +47,6 @@ Bloomberg version had.
     python historical_ticks.py --from 2026-08-22 --to 2026-09-21   a range
     python historical_ticks.py --only "7203 JT"    one name, for a check
     python historical_ticks.py --venues "NSI-MAIN|BSE-MAIN"   those markets only
-    python historical_ticks.py --venues "SET-MAIN" --compress_venues   into SET-MAIN.zip
     python historical_ticks.py --retry-misses  ask again about the empties
     python historical_ticks.py --log run.log   tee the log to a file
     python historical_ticks.py --quiet         warnings and failures only
@@ -136,8 +135,7 @@ def chunked(items, size):
         yield items[i:i + size]
 
 
-def plan(names, partitions, out_dir, backfill, cache=None,
-         zipped=None) -> dict:
+def plan(names, partitions, out_dir, backfill, cache=None) -> dict:
     """{date: [name, ...]} - who needs what, before anything is fetched.
 
     Inverted from per-name to per-date on purpose: qatt is partitioned by
@@ -148,15 +146,11 @@ def plan(names, partitions, out_dir, backfill, cache=None,
     A date counts as ALREADY TRIED if there is a file for it or a line in
     the miss cache.  Without the second half, a name qatt has never carried
     is re-asked for every day of the backfill on every run, forever."""
-    cache, zipped = cache or {}, zipped or {}
+    cache = cache or {}
     by_date, per_name = {}, {}
     for name in names:
-        #  `zipped` is ticksfile.zipped_dates(): a day --compress_venues has
-        #  moved into SET-MAIN.zip is as done as one still in its folder.
         have = (ticksfile.existing_dates(out_dir, name.crosscode_bbg,
                                          name.bbg)
-                | zipped.get((ticksfile.folder(name.crosscode_bbg),
-                              ticksfile.safe(name.bbg)), set())
                 | misscache.tried(cache, name.bbg))
         want = ticksfile.days_wanted(have, partitions, backfill)
         per_name[name.bbg] = want
@@ -165,83 +159,12 @@ def plan(names, partitions, out_dir, backfill, cache=None,
     return {"by_date": dict(sorted(by_date.items())), "per_name": per_name}
 
 
-#  What the demo pretends kdb is stamped in, and settings.py's default: the
-#  plant's own clock.
-DEMO_ZONE = "China Standard Time"
-
-
-def shift_for(markets, source_zone, log=None):
-    """(date, name) -> seconds to move kdb's clock into the name's market.
-
-    KDB STAMPS EVERY PRINT IN ONE ZONE - the plant's, Hong Kong - and each
-    file is read as the exchange's own local time; its seventh header cell
-    says which.  So the two are reconciled here, per market and per date,
-    and a market with no TimeZone in config/markets.csv is left alone and
-    said so once.
-
-    Cached per (market, date): a run is thousands of names over tens of
-    days, and a handful of markets."""
-    seen, quiet = {}, set()
-
-    def shift(date, name):
-        market = venue_of(name)
-        key = (market, date)
-        if key in seen:
-            return seen[key]
-        target = marketcfg.tz_of(markets, market)
-        if not target:
-            if log and market not in quiet:
-                quiet.add(market)
-                log.warn(f"{market or '(no market)'} has no TimeZone in "
-                         f"config/markets.csv: its files keep kdb's clock, "
-                         f"{source_zone}")
-            seen[key] = 0
-            return 0
-        seen[key] = marketcfg.shift_seconds(date, source_zone, target)
-        return seen[key]
-
-    return shift
-
-
-def venue_of(name) -> str:
-    """The FidessaMarket of the crosscode row that names the folder - the
-    zip a name's files go into under --compress_venues."""
-    for r in name.rows:
-        if r.bbg == name.crosscode_bbg:
-            return r.market
-    return name.rows[0].market if name.rows else ""
-
-
-def stage_compress(names, out_dir, dry_run, log):
-    """--compress_venues: each venue's day files into <VENUE>.zip."""
-    by_venue = {}
-    for n in names:
-        by_venue.setdefault(venue_of(n), set()).add(
-            ticksfile.folder(n.crosscode_bbg))
-    if "" in by_venue:
-        log.warn(f"{len(by_venue.pop(''))} name(s) have no FidessaMarket and "
-                 f"are left unzipped")
-    for venue, folders in sorted(by_venue.items()):
-        t = ticksfile.compress_venue(out_dir, venue, folders, dry_run)
-        log.kv(t["zip"].name,
-               f"{logs.thousands(t['added'])} added, "
-               f"{logs.thousands(t['replaced'])} replaced",
-               str(t["zip"]) + ("   NOT WRITTEN, --dry-run" if dry_run
-                                else ""))
-
-
 def stage_migrate(names, out_dir, dry_run, log):
     """Move anything written before there were folders, so a day already
     fetched is not fetched again.
 
     Silent when there is nothing loose, which is every run after the first.
     """
-    slashed = ticksfile.migrate_slashed(
-        out_dir, [(n.crosscode_bbg, n.bbg) for n in names], dry_run)
-    if slashed:
-        log.kv("slash codes renamed", logs.thousands(slashed),
-               "LPN/F TB's files, from nested folders to LPN_F TB"
-               + ("   NOT MOVED, --dry-run" if dry_run else ""))
     tally = ticksfile.migrate_flat(
         out_dir, {n.bbg: n.crosscode_bbg for n in names}, dry_run)
     if not any(tally.values()):
@@ -320,7 +243,7 @@ def connect_again(host, port, log, tries=6, wait=10.0):
 
 def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
         log=None, live_conn=None, live_date=None, cols=None,
-        reconnect=None, live_cols=None, depth=3, shift_of=None) -> dict:
+        reconnect=None, live_cols=None, depth=3) -> dict:
     """Extract, transform, load - three stages at once, one chunk apiece.
 
         extract    this thread's own kdb connection; asks for one chunk,
@@ -342,11 +265,6 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
     miss cache INSTEAD - not an empty file.  Today (--today, live_date) is
     asked of the RDB and never cached as a miss: a session still running is
     not an answer.
-
-    THE CLOCK IS THE NAME'S, NOT THE CHUNK'S.  kdb stamps every print in
-    one zone and each file carries its own market's - see shift_for() - so
-    shape() hands the time on as seconds and the load stage formats it with
-    that name's shift.  shift_of(date, name) -> seconds.
 
     A READ THAT IS TOO BIG IS HALVED, NOT FATAL.  reconnect(live) opens a
     fresh connection - a reset socket is dead - and the same syms are asked
@@ -458,14 +376,10 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
                     t0 = time.monotonic()
                     by_sym = qattsource.shape(raw)
                     del raw
-                    #  The MIC and the clock are both the NAME's, so two
-                    #  names on one sym get their own rows either way.
-                    files = []
-                    for n in names:
-                        stamp = qattsource.clock_maker(
-                            shift_of(date, n) if shift_of else 0)
-                        files.append((n, [(stamp(r[0]),) + r[1:] + (n.mic,)
-                                          for r in by_sym.get(n.sym, ())]))
+                    #  The MIC is the last cell of every row, and it is the
+                    #  name's, so two names on one sym get their own rows.
+                    files = [(n, [r + (n.mic,) for r in by_sym.get(n.sym, ())])
+                             for n in names]
                     del by_sym
                     item = (kind, date, live, files, label, t_read,
                             time.monotonic() - t0)
@@ -838,13 +752,7 @@ def trace(cfg, a, log=None) -> int:
         else:
             log.kv("the assumed columns", "all present")
 
-    shift_of = shift_for(markets, cfg["KDB_TIMEZONE"], log)
-    for n in names:
-        log.kv("clock", f"{cfg['KDB_TIMEZONE']} -> "
-                        f"{marketcfg.tz_of(markets, venue_of(n)) or '(none)'}",
-               f"{shift_of(date, n) / 3600:+.1f}h on {date}")
-    fetched = qattsource.fetch_ticks(conn, date, [n.sym for n in names],
-                                     shift=shift_of(date, names[0]))
+    fetched = qattsource.fetch_ticks(conn, date, [n.sym for n in names])
     for n in names:
         got = fetched.get(n.sym, [])
         log.kv("rows returned", logs.thousands(len(got)), n.sym)
@@ -931,13 +839,6 @@ def main(argv=None) -> int:
     p.add_argument("--retry-misses", action="store_true",
                    help="ignore the miss cache for this run and rebuild it "
                         "from what today's run actually finds")
-    p.add_argument("--compress_venues", "--compress-venues",
-                   dest="compress_venues", action="store_true",
-                   help="after writing, move each venue's files into "
-                        "OUTPUT_DIR/<VENUE>.zip (SET-MAIN.zip) and delete "
-                        "them.  An existing zip keeps what it holds and gains "
-                        "only what was missing; days in it are never fetched "
-                        "again.")
     p.add_argument("--dry-run", action="store_true",
                    help="read the crosscode and kdb, decide everything, "
                         "write nothing")
@@ -1037,16 +938,7 @@ def main(argv=None) -> int:
     log.kv("miss cache", f"{logs.thousands(misscache.count(cache))} pairs",
            f"{miss_path}" + ("   IGNORED, --retry-misses"
                              if a.retry_misses else ""))
-    try:
-        zipped = ticksfile.zipped_dates(out_dir)
-    except ValueError as e:
-        log.fail(str(e))
-        return 1
-    if zipped:
-        log.kv("days in venue zips",
-               logs.thousands(sum(len(v) for v in zipped.values())),
-               "count as done, like files on disk")
-    plan_ = plan(names, parts, out_dir, backfill, cache, zipped)
+    plan_ = plan(names, parts, out_dir, backfill, cache)
     today = None
     if a.today:
         today = dt.date.today()
@@ -1069,33 +961,13 @@ def main(argv=None) -> int:
     def reconnect(live):
         return connect_again(*(rdb if live else (q_host, q_port)), log=log)
 
-    source_zone = cfg["KDB_TIMEZONE"]
-    try:
-        shift_of = shift_for(markets, source_zone, log)
-        sample = sorted({(marketcfg.tz_of(markets, venue_of(n)),
-                          shift_of(parts[-1], n)) for n in names})
-    except ValueError as e:
-        log.fail(str(e))
-        return 1
-    log.kv("kdb's clock", source_zone, "KDB_TIMEZONE; every print is stamped "
-                                       "in it")
-    for target, secs in sample:
-        log.kv("  -> " + (target or "(no TimeZone, left as kdb has it)"),
-               f"{secs // 3600:+d}h" if secs % 3600 == 0
-               else f"{secs / 3600:+.1f}h", f"on {parts[-1]}")
-
     stats = run(conn, plan_, markets, out_dir, chunk, a.dry_run, cache, log,
-                live_conn, today, cols, reconnect, live_cols,
-                shift_of=shift_of)
+                live_conn, today, cols, reconnect, live_cols)
     if not a.dry_run:
         n = misscache.save(miss_path, cache)
         log.kv("miss cache now", f"{logs.thousands(n)} pairs", str(miss_path))
 
-    if a.compress_venues:
-        log.step(7, "compress venues")
-        stage_compress(names, out_dir, a.dry_run, log)
-
-    log.step(8 if a.compress_venues else 7, "result")
+    log.step(7, "result")
     log_result(stats, a.dry_run, log)
     log.info()
     log.info(f"{log.counts[logs.WARN]} warning(s) above" if
@@ -1212,8 +1084,7 @@ def demo() -> int:
         cache = {}
         print("\n--- first run: nothing on disk, so everything backfills ---")
         plan_ = plan(names, parts, out, 2, cache)
-        stats = run(conn, plan_, markets, out, 200, False, cache, dlog,
-                    shift_of=shift_for(markets, DEMO_ZONE))
+        stats = run(conn, plan_, markets, out, 200, False, cache, dlog)
         log_universe(rows, names, list(dropped) + excluded, tally, dlog)
         log_plan(plan_, dlog)
         log_result(stats, False, dlog)
@@ -1237,8 +1108,7 @@ def demo() -> int:
 
         print("\n--- second run, same day: everything is up to date ---")
         plan2 = plan(names, parts, out, 2, cache)
-        stats2 = run(conn, plan2, markets, out, 200, False, cache, dlog,
-                     shift_of=shift_for(markets, DEMO_ZONE))
+        stats2 = run(conn, plan2, markets, out, 200, False, cache, dlog)
         log_plan(plan2, dlog)
         log_result(stats2, False, dlog)
         print("  ZZZ SP was not re-queried: the cache says it was asked and "
@@ -1247,8 +1117,7 @@ def demo() -> int:
         print("\n--- a new day arrives ---")
         parts3 = parts + [dt.date(2026, 9, 4)]
         plan3 = plan(names, parts3, out, 2, cache)
-        stats3 = run(conn, plan3, markets, out, 200, False, cache, dlog,
-                     shift_of=shift_for(markets, DEMO_ZONE))
+        stats3 = run(conn, plan3, markets, out, 200, False, cache, dlog)
         log_plan(plan3, dlog)
         log_result(stats3, False, dlog)
 
@@ -1614,95 +1483,6 @@ def self_test() -> int:
     check("'wsfull and 'limit read as too big too",
           (too_big(Exception("wsfull")), too_big(Exception("limit")),
            too_big(Exception("type"))), (True, True, False))
-
-    print("\nkdb's clock is Hong Kong's; the file carries the market's")
-
-    class R0:
-        def __init__(self, bbg, market):
-            self.bbg, self.market = bbg, market
-
-    HK = "China Standard Time"
-    shift_of = shift_for(MK, HK)
-    tokyo, mumbai = N("7203 JT", "7203.JP"), N("RELIANCE IS", "RELIANCE.IN")
-    sydney, home = N("BHP AU", "BHP.AU"), N("5 HK", "5.HK")
-    tokyo.rows = (R0("7203 JT", "TYO-MAIN"),)
-    mumbai.rows = (R0("RELIANCE IS", "NSI-MAIN"),)
-    sydney.rows = (R0("BHP AU", "ASX-MAIN"),)
-    home.rows = (R0("5 HK", "HKG-MAIN"),)
-    check("Tokyo is an hour ahead of the plant",
-          shift_of(D(2026, 9, 3), tokyo), 3600)
-    check("Mumbai two and a half behind",
-          shift_of(D(2026, 9, 3), mumbai), -9000)
-    check("Hong Kong itself does not move at all",
-          shift_of(D(2026, 9, 3), home), 0)
-    check("SYDNEY FOLLOWS ITS DAYLIGHT SAVING, so the same market is +2 in "
-          "July and +3 in January - which is why the date decides and a "
-          "fixed offset per market would be wrong",
-          (shift_of(D(2026, 7, 15), sydney), shift_of(D(2026, 1, 15), sydney)),
-          (7200, 10800))
-
-    with tempfile.TemporaryDirectory() as d:
-        day = D(2026, 9, 3)
-
-        class AtNine:
-            """kdb answers 09:00 Hong Kong for every name."""
-
-            def __call__(self, q, date, syms):
-                return [{"sym": s, qattsource.TIME_FIELD:
-                         dt.timedelta(hours=9), "price": 1.5, "size": 100,
-                         "cond": "T", "ex": "T"} for s in syms]
-
-        run(AtNine(), plan([tokyo, mumbai, home], [day], d, 1, {}), MK, d,
-            10, False, {}, shift_of=shift_of)
-
-        def first(name):
-            return ticksfile.path(d, name.crosscode_bbg, name.bbg, day) \
-                .read_text(encoding="utf-8").splitlines()[1].split(",")[0]
-
-        check("one 09:00 print from kdb is 10:00 in Tokyo's file",
-              first(tokyo), "10:00:00")
-        check("06:30 in Mumbai's", first(mumbai), "06:30:00")
-        check("and 09:00 in Hong Kong's own", first(home), "09:00:00")
-        check("the header still names the zone the times are now in",
-              ticksfile.path(d, tokyo.crosscode_bbg, tokyo.bbg, day)
-              .read_text(encoding="utf-8").splitlines()[0].split(",")[-1],
-              "Tokyo Standard Time")
-
-    print("\n--compress_venues, end to end")
-
-    class R:
-        def __init__(self, bbg, market):
-            self.bbg, self.market = bbg, market
-
-    class Quiet2:
-        counts = {logs.WARN: 0}
-
-        def __getattr__(self, _name):
-            return lambda *a, **k: None
-
-    ptt, aot = N("PTT TB", "PTT.TB"), N("AOT TB", "AOT.TB")
-    ptt.rows = (R("PTT TB", "SET-MAIN"), R("PTT TB2", "OTHER-MAIN"))
-    aot.rows = (R("AOT TB", "SET-MAIN"),)
-    check("a name's venue is the market of the row that names its folder",
-          venue_of(ptt), "SET-MAIN")
-    with tempfile.TemporaryDirectory() as d:
-        days = [D(2026, 9, 3), D(2026, 9, 4)]
-        run(Ordered(d), plan([ptt, aot], days[:1], d, 5, {}), {}, d, 10,
-            False, {})
-        stage_compress([ptt, aot], d, False, Quiet2())
-        check("the run's files end up in SET-MAIN.zip and nowhere else",
-              sorted(e.name for e in Path(d).iterdir()), ["SET-MAIN.zip"])
-        zipped = ticksfile.zipped_dates(d)
-        pl = plan([ptt, aot], days, d, 5, {}, zipped)
-        check("the next run asks only for the day the zip does not have",
-              sorted(pl["by_date"]), [days[1]])
-        check("without looking in the zip it would fetch both days again - "
-              "which is what the zip lookup is for",
-              sorted(plan([ptt, aot], days, d, 5, {})["by_date"]), days)
-        run(Ordered(d), pl, {}, d, 10, False, {})
-        stage_compress([ptt, aot], d, False, Quiet2())
-        check("and that day is added to the same zip",
-              sorted(ticksfile.zipped_dates(d)[("PTT TB", "PTT TB")]), days)
 
     print("\na day generated before the folders existed is not redone")
     with tempfile.TemporaryDirectory() as d:
