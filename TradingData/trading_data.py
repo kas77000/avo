@@ -60,7 +60,11 @@ is uncapped.
 It also writes close-deviation.csv beside that report: how far our Close
 sits from the old file's, (new - old) / old in percent, bucketed.  Names
 with no close on one side are counted on their own lines, not as a
-deviation.  The printed form adds the mean, median, p5, p95, min and max.
+deviation.  The printed form adds the mean, median, p5, p95, min and max,
+and close-deviation.html draws it, to show whether the deviation is a
+Gaussian centred on zero: the non-zero deviations in equal bins symmetric
+about zero, a normal fit over them, and skew and excess kurtosis (both 0 for
+a Gaussian).  One file that opens in a browser.
 
     bucket,count,share_pct
     0%,4210,93.10
@@ -510,18 +514,282 @@ def write_close_report(path, dist) -> str:
     return str(path)
 
 
+def close_stats(devs) -> list:
+    """(name, value) for the summary both the screen and the chart show."""
+    devs = sorted(devs)
+    if not devs:
+        return []
+    return [("mean", sum(devs) / len(devs)), ("median", _pct(devs, .5)),
+            ("p5", _pct(devs, .05)), ("p95", _pct(devs, .95)),
+            ("min", devs[0]), ("max", devs[-1])]
+
+
 def print_close(d, dist):
-    devs = sorted(d["devs"])
-    print(f"\n  Close deviation, (new - old) / old, over {len(devs)} names "
-          f"with a close in both")
-    if devs:
-        mean = sum(devs) / len(devs)
-        print(f"    mean {mean:+.4f}%   median {_pct(devs, .5):+.4f}%   "
-              f"p5 {_pct(devs, .05):+.4f}%   p95 {_pct(devs, .95):+.4f}%")
-        print(f"    min {devs[0]:+.4f}%   max {devs[-1]:+.4f}%")
+    stats = close_stats(d["devs"])
+    print(f"\n  Close deviation, (new - old) / old, over {len(d['devs'])} "
+          f"names with a close in both")
+    if stats:
+        print("    " + "   ".join(f"{k} {v:+.4f}%" for k, v in stats[:4]))
+        print("    " + "   ".join(f"{k} {v:+.4f}%" for k, v in stats[4:]))
+    shape = shape_stats([float(v) for v in d["devs"] if v != 0])
+    if shape:
+        print(f"    non-zero only ({shape['n']}): sd {shape['sd']:.4f}%   "
+              f"skew {shape['skew']:+.2f}   "
+              f"excess kurtosis {shape['kurtosis']:+.2f}   (a Gaussian is 0, 0)")
     most = max((n for _, n in dist), default=0) or 1
     for label, n in dist:
         print(f"    {label:<18} {n:6d}  {'#' * round(40 * n / most)}")
+
+
+CLOSE_CHART = "close-deviation.html"
+
+# The chart's histogram: equal-width bins, symmetric about zero, over the
+# 1st to 99th percentile.  Equal widths are what make the SHAPE readable -
+# the report's buckets are uneven on purpose and would hide it.
+CHART_BINS = 40
+
+
+def shape_stats(xs) -> dict:
+    """How Gaussian a list of floats is.  A normal has skew 0 and excess
+    kurtosis 0; kurtosis well above 0 means fat tails - most names agree
+    closely and a few are far off.
+
+    `centre` and `width` are the robust fit the chart draws: the median and
+    1.4826 x the median absolute deviation, which is the sd for a normal.
+    Mean and sd would let a handful of far-off names flatten the curve
+    until it fits nothing."""
+    n = len(xs)
+    if n < 2:
+        return {}
+    mean = sum(xs) / n
+    m2 = sum((x - mean) ** 2 for x in xs) / n
+    m3 = sum((x - mean) ** 3 for x in xs) / n
+    m4 = sum((x - mean) ** 4 for x in xs) / n
+    s = sorted(xs)
+    med = s[n // 2]
+    mad = sorted(abs(x - med) for x in xs)[n // 2]
+    return {"n": n, "sd": m2 ** .5,
+            "skew": m3 / m2 ** 1.5 if m2 else 0.0,
+            "kurtosis": m4 / m2 ** 2 - 3 if m2 else 0.0,
+            "centre": med, "width": 1.4826 * mad or m2 ** .5}
+
+
+_CHART_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Close deviation</title>
+<style>
+:root {{ --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e;
+  --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --bar:#2a78d6;
+  --ring:rgba(11,11,11,.10); }}
+@media (prefers-color-scheme: dark) {{ :root {{ --page:#0d0d0d;
+  --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --bar:#3987e5;
+  --ring:rgba(255,255,255,.10); }} }}
+body {{ margin:0; padding:24px 16px; background:var(--page); color:var(--ink);
+  font:14px/1.45 system-ui, sans-serif; }}
+main {{ max-width:820px; margin:0 auto; }}
+h1 {{ font-size:18px; margin:0 0 4px; }}
+h2 {{ font-size:13px; font-weight:600; color:var(--ink2); margin:0 0 6px; }}
+.sub {{ color:var(--ink2); margin:0 0 16px; }}
+.card {{ background:var(--surface); border:1px solid var(--ring);
+  border-radius:8px; padding:16px; margin-bottom:16px; position:relative; }}
+.stats {{ display:flex; flex-wrap:wrap; gap:4px 24px; margin-bottom:12px; }}
+.stats div {{ color:var(--ink2); }}
+.stats b {{ color:var(--ink); font-variant-numeric:tabular-nums; }}
+.legend {{ display:flex; gap:20px; color:var(--ink2); font-size:13px;
+  margin-bottom:8px; }}
+.legend i {{ display:inline-block; vertical-align:middle; margin-right:6px; }}
+.sw {{ width:10px; height:10px; border-radius:2px; background:var(--bar); }}
+.ln {{ width:18px; height:0; border-top:2px solid var(--ink); }}
+.zl {{ width:18px; height:0; border-top:1px dashed var(--ink2); }}
+svg {{ width:100%; height:auto; display:block; }}
+svg text {{ fill:var(--muted); font-size:11px; }}
+svg text.ink {{ fill:var(--ink2); }}
+.bar {{ fill:var(--bar); }}
+.hit {{ fill:transparent; }}
+.bar.on {{ opacity:.75; }}
+#tip {{ position:absolute; pointer-events:none; display:none;
+  background:var(--surface); border:1px solid var(--ring); border-radius:6px;
+  padding:6px 8px; box-shadow:0 2px 8px rgba(0,0,0,.12); white-space:nowrap; }}
+#tip span {{ color:var(--ink2); }}
+table {{ border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }}
+th, td {{ text-align:right; padding:4px 8px; border-bottom:1px solid var(--grid); }}
+th:first-child, td:first-child {{ text-align:left; }}
+th {{ color:var(--ink2); font-weight:600; }}
+.note {{ color:var(--ink2); font-size:13px; margin:8px 0 0; }}
+</style></head><body><main>
+<h1>Close deviation, new against old</h1>
+<p class="sub">(new &minus; old) / old in percent &middot; old {old}
+&middot; new {new}</p>
+<div class="card">
+<h2>All {n} names with a close in both files</h2>
+<div class="stats">{stats}</div>
+<h2>Shape of the non-zero deviations</h2>
+<div class="stats">{shape}</div>
+<p class="note">A Gaussian has skew 0 and excess kurtosis 0.  Skew away from
+0 means one side is heavier; kurtosis well above 0 means fat tails.</p>
+</div>
+<div class="card" id="chart">
+<div class="legend"><span><i class="sw"></i>names per bin</span>
+<span><i class="ln"></i>normal fit (median, 1.4826&middot;MAD)</span>
+<span><i class="zl"></i>zero</span></div>
+<svg viewBox="0 0 {w} {h}" role="img"
+ aria-label="Histogram of the non-zero Close deviations with a normal fit">{svg}</svg>
+<div id="tip"></div>
+<p class="note">{note}</p>
+</div>
+<div class="card"><h2>The buckets in close-deviation.csv</h2>
+<table><thead><tr><th>bucket</th><th>count</th>
+<th>share %</th></tr></thead><tbody>{rows}</tbody></table></div>
+</main><script>
+const tip = document.getElementById("tip"), box = document.getElementById("chart");
+document.querySelectorAll(".hit").forEach(h => {{
+  const bar = h.nextElementSibling;
+  h.addEventListener("mousemove", e => {{
+    const r = box.getBoundingClientRect();
+    tip.innerHTML = "<b>" + h.dataset.label + "</b><br><span>" +
+      h.dataset.count + " names</span>";
+    tip.style.display = "block";
+    let x = e.clientX - r.left + 12;
+    if (x + tip.offsetWidth > r.width) x = e.clientX - r.left - tip.offsetWidth - 12;
+    tip.style.left = x + "px"; tip.style.top = (e.clientY - r.top - 44) + "px";
+    bar.classList.add("on");
+  }});
+  h.addEventListener("mouseleave", () => {{
+    tip.style.display = "none"; bar.classList.remove("on"); }});
+}});
+</script></body></html>
+"""
+
+
+def _num(x) -> str:
+    return "0" if x == 0 else f"{x:+.3g}"
+
+
+def write_close_chart(path, dev, dist, old_name="", new_name="") -> str:
+    """The distribution as a page, to answer one question by eye: is the
+    deviation a Gaussian centred on zero, or something else?
+
+    The histogram is of the NON-ZERO deviations, in equal bins symmetric
+    about zero, with the normal fit drawn over it.  Identical closes are
+    counted on the zero line rather than binned: when most names agree
+    exactly they are one spike that would flatten everything else to
+    nothing.  One self-contained file - inline SVG, no library."""
+    from html import escape
+    import math
+    nz = sorted(float(v) for v in dev["devs"] if v != 0)
+    zeros = len(dev["devs"]) - len(nz)
+    w, h, left, top, bottom, right = 820, 320, 44, 24, 40, 24
+    plot_w, plot_h = w - left - right, h - top - bottom
+
+    parts, note = [], ""
+    shape = shape_stats(nz)
+    if nz:
+        #  The 1st-99th percentile, but no wider than five fit widths
+        #  either side of the centre: a fat tail would otherwise set the
+        #  axis and squeeze the core - the part whose shape is the question
+        #  - into a handful of bins.  A Gaussian has nothing beyond 5 sigma.
+        lim = max(abs(_pct(nz, .01)), abs(_pct(nz, .99))) or abs(nz[-1])
+        if shape and shape["width"]:
+            lim = min(lim, abs(shape["centre"]) + 5 * shape["width"])
+        bw = 2 * lim / CHART_BINS
+        counts = [0] * CHART_BINS
+        below = above = 0
+        for v in nz:
+            if v < -lim:
+                below += 1
+            elif v > lim:
+                above += 1
+            else:
+                counts[min(CHART_BINS - 1, int((v + lim) / bw))] += 1
+        curve = []
+        if shape and shape["width"]:
+            mu, sg, k = shape["centre"], shape["width"], sum(counts) * bw
+            for j in range(161):
+                x = -lim + 2 * lim * j / 160
+                curve.append((x, k / (sg * math.sqrt(2 * math.pi))
+                              * math.exp(-.5 * ((x - mu) / sg) ** 2)))
+        most = max(max(counts), max((c for _, c in curve), default=0))
+        step = next(s * 10 ** e for e in range(12) for s in (1, 2, 5)
+                    if most <= 5 * s * 10 ** e)
+        ymax = max(step, math.ceil(most / step) * step)
+
+        def X(v):
+            return left + plot_w * (v + lim) / (2 * lim)
+
+        def Y(v):
+            return top + plot_h * (1 - v / ymax)
+
+        for v in range(0, ymax + 1, step):
+            parts.append(f'<line x1="{left}" x2="{w - right}" y1="{Y(v):.1f}" '
+                         f'y2="{Y(v):.1f}" stroke="var(--grid)"/>'
+                         f'<text x="{left - 6}" y="{Y(v) + 4:.1f}" '
+                         f'text-anchor="end">{v}</text>')
+        slot = plot_w / CHART_BINS
+        base = top + plot_h
+        for i, n in enumerate(counts):
+            lo = -lim + i * bw
+            bx, bwid = left + i * slot + 1, slot - 2
+            bh = plot_h * n / ymax
+            r = min(4, bh, bwid / 2)
+            yt = base - bh
+            d = (f"M{bx:.1f},{base:.1f}V{yt + r:.1f}"
+                 f"Q{bx:.1f},{yt:.1f} {bx + r:.1f},{yt:.1f}"
+                 f"H{bx + bwid - r:.1f}Q{bx + bwid:.1f},{yt:.1f} "
+                 f"{bx + bwid:.1f},{yt + r:.1f}V{base:.1f}Z") if n else ""
+            parts.append(
+                f'<rect class="hit" x="{left + i * slot:.1f}" y="{top}" '
+                f'width="{slot:.1f}" height="{plot_h}" '
+                f'data-label="{_num(lo)}% to {_num(lo + bw)}%" '
+                f'data-count="{n}"/><path class="bar" d="{d}"/>')
+        if curve:
+            parts.append('<polyline fill="none" stroke="var(--ink)" '
+                         'stroke-width="2" stroke-linejoin="round" points="'
+                         + " ".join(f"{X(x):.1f},{Y(c):.1f}" for x, c in curve)
+                         + '"/>')
+        parts.append(f'<line x1="{left}" x2="{w - right}" y1="{base}" '
+                     f'y2="{base}" stroke="var(--axis)"/>')
+        for t in (-lim, -lim / 2, 0, lim / 2, lim):
+            parts.append(f'<text x="{X(t):.1f}" y="{base + 16}" '
+                         f'text-anchor="middle">{_num(t)}</text>')
+        parts.append(f'<line x1="{X(0):.1f}" x2="{X(0):.1f}" y1="{top - 8}" '
+                     f'y2="{base}" stroke="var(--ink2)" stroke-dasharray="3 3"/>'
+                     f'<text class="ink" x="{X(0) + 6:.1f}" y="{top - 10}">'
+                     f'{zeros} identical (exactly 0%) not binned</text>'
+                     f'<text x="{left + plot_w / 2:.1f}" y="{h - 4}" '
+                     f'text-anchor="middle">deviation, %</text>')
+        note = (f"{len(nz)} non-zero deviations in {CHART_BINS} bins of "
+                f"{bw:.3g}%, the 1st to 99th percentile or five fit widths "
+                f"either side, whichever is narrower. "
+                f"{below} below {_num(-lim)}% and {above} above "
+                f"{_num(lim)}% are off the axis &mdash; min and max above "
+                f"say how far.")
+    else:
+        note = (f"Nothing to draw: every one of the {zeros} closes is "
+                f"identical." if zeros else
+                "Nothing to draw: no name has a close in both files.")
+
+    stats = "".join(f"<div>{k} <b>{v:+.4f}%</b></div>"
+                    for k, v in close_stats(dev["devs"])) or "<div>&mdash;</div>"
+    shape_html = "".join(
+        f"<div>{k} <b>{v}</b></div>" for k, v in (
+            ("n", shape["n"]), ("sd", f"{shape['sd']:.4f}%"),
+            ("skew", f"{shape['skew']:+.2f}"),
+            ("excess kurtosis", f"{shape['kurtosis']:+.2f}"),
+            ("fit centre", f"{shape['centre']:+.4f}%"),
+            ("fit width", f"{shape['width']:.4f}%"))) if shape else \
+        "<div>fewer than two non-zero deviations</div>"
+    total = sum(n for _, n in dist) or 1
+    rows = "".join(f"<tr><td>{escape(label)}</td><td>{n}</td>"
+                   f"<td>{100 * n / total:.2f}</td></tr>" for label, n in dist)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_CHART_PAGE.format(
+        n=len(dev["devs"]), old=escape(str(old_name)),
+        new=escape(str(new_name)), stats=stats, shape=shape_html, w=w, h=h,
+        svg="".join(parts), note=note, rows=rows), encoding="utf-8")
+    return str(path)
 
 
 def write_compare_report(path, records) -> str:
@@ -800,6 +1068,9 @@ def main(argv=None) -> int:
         close_path = Path(args.report).with_name(CLOSE_REPORT)
         print(f"\n  Close distribution written to "
               f"{write_close_report(close_path, dist)}")
+        chart = write_close_chart(close_path.with_name(CLOSE_CHART), dev,
+                                  dist, args.compare, s.OUTPUT_PATH)
+        print(f"  and drawn in {chart}")
     return rc
 
 
@@ -1109,6 +1380,29 @@ def self_test() -> int:
         check("the file is a row per bucket with its share",
               (lines[0], lines[6]),
               (",".join(CLOSE_COLUMNS), "0%,1,14.29"))
+        page = Path(write_close_chart(Path(dd) / "c.html", dev,
+                                      close_distribution(dev))).read_text(
+                                          encoding="utf-8")
+        check("the chart bins in equal widths, not the report's buckets",
+              page.count('class="hit"'), CHART_BINS)
+        check("and says how many identical closes it left out of the bins",
+              "1 identical (exactly 0%) not binned" in page, True)
+        check("and an empty comparison still draws",
+              "no name has a close" in Path(write_close_chart(
+                  Path(dd) / "e.html", close_deviations([], []),
+                  close_distribution(close_deviations([], [])))).read_text(
+                      encoding="utf-8"), True)
+
+    print("\nhow Gaussian the deviations are")
+    sym = [-2.0, -1.0, -1.0, 0.5, 0.5, 1.0, 1.0, 2.0, -0.5, -0.5]
+    got = shape_stats(sym)
+    check("a symmetric spread has no skew", round(got["skew"], 9), 0)
+    check("one far-off name makes the tails fat",
+          shape_stats(sym + [40.0])["kurtosis"] > 3, True)
+    check("and the fit's width barely moves for it, where the sd balloons",
+          (round(shape_stats(sym + [40.0])["width"] / got["width"], 1),
+           shape_stats(sym + [40.0])["sd"] > 5 * got["sd"]), (1.0, True))
+    check("fewer than two values has no shape", shape_stats([1.0]), {})
 
     print("\nthe input files' modified times")
     with tempfile.TemporaryDirectory() as d:
