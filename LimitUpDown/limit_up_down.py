@@ -375,6 +375,37 @@ SOURCES_CSV = "sources.csv"
 SOURCES_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Source"]
 
 
+def input_files(cfg, config_dir):
+    """Every file the run reads: the crosscode, the two config tables, each
+    .tsr a rounding venue takes its ladder from, and India's .stra files."""
+    files = [Path(CROSSCODE_PATH), Path(config_dir) / "markets.csv",
+             Path(config_dir) / "bands.csv"]
+    for v in cfg.venues.values():
+        if v.rounding != "none" and v.tick_source:
+            files.append(Path(TSR_DIR) / v.tick_source)
+        if v.exclude_file:
+            files.append(Path(v.exclude_file))
+    return list(dict.fromkeys(files))
+
+
+def input_file_lines(files, now=None):
+    """WHEN EACH INPUT WAS LAST WRITTEN, and how long ago, so the log says
+    whether this run read today's CrossCode or one left over from last
+    week."""
+    now = now or dt.datetime.now()
+    lines = ["input files (last modified):"]
+    for f in files:
+        try:
+            mtime = dt.datetime.fromtimestamp(f.stat().st_mtime)
+        except OSError:
+            lines.append(f"  MISSING              {f}")
+            continue
+        hours = (now - mtime).total_seconds() / 3600
+        age = f"{hours:.1f}h ago" if hours < 48 else f"{hours / 24:.0f} days ago"
+        lines.append(f"  {mtime:%Y-%m-%d %H:%M:%S}  ({age})  {f}")
+    return lines
+
+
 def source_ratio(sources) -> str:
     """"Computed: 20% (3200)  Bloomberg: 80% (12800)" over the published
     rows - the same split sources.csv lists name by name."""
@@ -953,6 +984,8 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
         _check_connection_settings()
         here = Path(__file__).resolve().parent
         cfg = marketcfg.load(here / "config", Path(TSR_DIR))
+        for line in input_file_lines(input_files(cfg, here / "config")):
+            print(line)
         now = dt.datetime.now().time()
         #  READ BEFORE THE CROSSCODE, and only for the venues whose cutoff
         #  has passed.  An unreadable strategy file is fatal - an empty
@@ -2772,6 +2805,31 @@ def self_test() -> int:
           "Computed: 20% (1)  Bloomberg: 80% (4)")
     check("and a run that published nothing does not divide by zero",
           source_ratio([]), "Computed: 0% (0)  Bloomberg: 0% (0)")
+
+    print("\nthe input files' modified times")
+    with tempfile.TemporaryDirectory() as tmp:
+        f = Path(tmp) / "CrossCode.csv"
+        f.write_text("x", encoding="utf-8")
+        import os
+        os.utime(f, (0, dt.datetime(2026, 9, 23, 6, 0).timestamp()))
+        got = input_file_lines([f, Path(tmp) / "gone.csv"],
+                               now=dt.datetime(2026, 9, 23, 7, 30))
+        check("each file gets its modified time and its age",
+              got[1], f"  2026-09-23 06:00:00  (1.5h ago)  {f}")
+        check("a file that is not there says so",
+              got[2].startswith("  MISSING"), True)
+        old = input_file_lines([f], now=dt.datetime(2026, 9, 30, 6, 0))
+        check("an old one is counted in days", "(7 days ago)" in old[1],
+              True)
+    shipped = marketcfg.load(Path(__file__).resolve().parent / "config",
+                             Path(__file__).resolve().parent / "config")
+    names = [p.name for p in input_files(
+        shipped, Path(__file__).resolve().parent / "config")]
+    check("the list covers the crosscode, both config tables, the .tsr and "
+          "India's .stra files",
+          sorted(names), sorted([Path(CROSSCODE_PATH).name, "markets.csv",
+                                 "bands.csv", "spol_JKT.tsr",
+                                 "in-nse_drv.stra", "in-bse_drv.stra"]))
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1
