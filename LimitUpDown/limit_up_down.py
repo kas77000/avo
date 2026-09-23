@@ -80,6 +80,7 @@ import bpipe
 import crosscode
 import india
 import kdbclose
+import mailer
 import marketcfg
 import ticks
 
@@ -121,20 +122,18 @@ CLOSES_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Close"]
 OUT_TEST = ""
 OUT_PILOT = ""
 OUT_PROD = ""
-#  Where each run's log goes, as LimitUpDown-YYYYMMDD-HHMMSS.log.  The log is
-#  everything the run printed - it replaces the report the job used to mail.
+#  Where each run's log goes, as LimitUpDown-YYYYMMDD-HHMMSS.log: everything
+#  the run printed.  It is attached to the SUCCEEDED / FAILED mail.
 LOG_DIR = str(Path(__file__).resolve().parent / "logs")
-
-#  Settings the job no longer has.  Tolerated, with a note, so that a
-#  local_settings.py written for the mailing version still starts the run
-#  instead of stopping it on the strict check below.
-RETIRED = ("SMTP_HOST", "EMAIL_FROM", "EMAIL_TO")
+SMTP_HOST = "CHANGEME"
+EMAIL_FROM = "CHANGEME"
+EMAIL_TO = []
 
 
 def _apply_local_settings():
     """Servers and paths live beside this file, not in it, so a git pull is
-    always clean.  A name the script does not define is an ERROR: OUT_PR0D
-    with a zero would otherwise sit there publishing to nowhere."""
+    always clean.  A name the script does not define is an ERROR: EMAIL_T0
+    with a zero would otherwise sit there sending mail to no one."""
     path = Path(__file__).resolve().parent / "local_settings.py"
     if not path.is_file():
         return []
@@ -147,10 +146,6 @@ def _apply_local_settings():
     changed, unknown = [], []
     for k, v in ns.items():
         if k.startswith("_"):
-            continue
-        if k in RETIRED:
-            print(f"{path}: {k} is no longer used - the report goes to "
-                  f"LOG_DIR now, not by mail. Delete the line.")
             continue
         if k not in globals():
             unknown.append(k)
@@ -179,6 +174,7 @@ REQUIRED = {
     "marketcfg": ("load", "ConfigError"),
     "bands": ("compute", "BandError"),
     "ticks": ("tick_for",),
+    "mailer": ("send",),
 }
 
 
@@ -1776,9 +1772,37 @@ def main(argv=None) -> int:
         print(f"written to {write_compare_report(a.report, records)}")
         return 0
 
-    with run_log(LOG_DIR) as log_path:
-        print(f"log: {log_path}")
-        return run(a.envs, a.venues)
+    #  ONE MAIL PER RUN, success or failure, with the log attached.  Sent
+    #  after the log is closed so the attachment is the whole of it - and
+    #  from `finally`, so a crash or a startup check that stops the run is
+    #  mailed as FAILED rather than not mailed at all.
+    rc, log_path = 1, None
+    try:
+        with run_log(LOG_DIR) as log_path:
+            print(f"log: {log_path}")
+            rc = run(a.envs, a.venues)
+    finally:
+        _mail_result(rc, log_path)
+    return rc
+
+
+def _mail_result(rc, log_path):
+    status = "SUCCEEDED" if rc == 0 else "FAILED"
+    body = (f"LimitUpDown {status} at {dt.datetime.now():%Y-%m-%d %H:%M:%S}."
+            f"\n\nThe log is attached"
+            + (f" and kept at {log_path}." if log_path else
+               " - except that it could not be written, so there is none.")
+            + "\n")
+    try:
+        mailer.send(f"LimitUpDown {status}", body, SMTP_HOST, EMAIL_FROM,
+                    EMAIL_TO,
+                    log_path if log_path and Path(log_path).is_file()
+                    else None)
+    except Exception as e:                                  # noqa: BLE001
+        #  The run has already happened; a mail server being down must not
+        #  turn a good run into a failed one.
+        print(f"could not send the {status} mail: {type(e).__name__}: {e}",
+              file=sys.stderr)
 
 
 # =============================================================================

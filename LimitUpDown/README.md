@@ -352,7 +352,8 @@ to see once. The cheap, fragile side now fails fast.
 ```
 python bands.py --self-test        python marketcfg.py --self-test
 python ticks.py --self-test        python crosscode.py --self-test
-python bpipe.py --self-test        python india.py --self-test
+python bpipe.py --self-test        python mailer.py --self-test
+python india.py --self-test
 ```
 
 ## First run
@@ -363,7 +364,7 @@ copy local_settings.py.example local_settings.py
 ```
 
 Fill in `BPIPE_HOST`, `BPIPE_PORT`, `BPIPE_APP`, `EQUITY_MASTER_SERVER`,
-`TSR_DIR` and `LOG_DIR`. `EQUITY_MASTER_SERVER` is only read when some
+`TSR_DIR`, `LOG_DIR` and the SMTP host. `EQUITY_MASTER_SERVER` is only read when some
 venue is `computed`.
 
 `TSR_DIR` now carries India's two `.stra` strategy files as well as the tick
@@ -712,10 +713,16 @@ previous close in equity_master`.
 
 ### The run log, and how each name was priced
 
-Nothing is mailed. Everything a real run prints — progress, the report, a
+Everything a real run prints — progress, the report, a
 fatal error with its traceback — also goes to
 `LOG_DIR\LimitUpDown-YYYYMMDD-HHMMSS.log`, one file per run. `LOG_DIR` is set in
 `local_settings.py` and defaults to `logs\` beside the script.
+
+Every run then mails `LimitUpDown SUCCEEDED` or `LimitUpDown FAILED` to
+`EMAIL_TO`, with that log attached — including a run that stopped at a startup
+check or crashed. The mail goes out after the log is closed, so the attachment
+is the whole run. A mail server that is down is reported on the console and
+does not turn a good run into a failed one.
 
 `sources.csv`, written beside the output every run, lists every published row
 with how it was priced:

@@ -2,8 +2,8 @@
 #  git pull is always clean and these survive it.
 #
 #  STRICT: a name this file sets that limit_up_down.py does not define is an
-#  ERROR, not a new setting.  OUT_PR0D with a zero would otherwise sit there
-#  publishing to nowhere.
+#  ERROR, not a new setting.  EMAIL_T0 with a zero would otherwise sit there
+#  mailing no one.
 #
 #  The three B-PIPE settings are the Bloomberg API Demo Tool's fields, with
 #  API Product = BPipe and Authorization Type = Application:
@@ -36,6 +36,11 @@ OUT_PILOT = r""
 OUT_PROD = r""
 
 #  Where each run writes LimitUpDown-YYYYMMDD-HHMMSS.log - everything the run
-#  printed, which is what used to be mailed.  Defaults to logs/ beside the
-#  script.
+#  printed.  Defaults to logs/ beside the script.
 LOG_DIR = r""
+
+#  Every run mails LimitUpDown SUCCEEDED or LimitUpDown FAILED with that log
+#  attached.  No host or no recipients: no mail.
+SMTP_HOST = "CHANGEME"
+EMAIL_FROM = "CHANGEME"
+EMAIL_TO = []
