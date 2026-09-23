@@ -73,6 +73,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime
+import os
 import shutil
 import sys
 import time
@@ -528,6 +529,28 @@ def say(line=""):
     print(line, flush=True)
 
 
+def input_file_lines(paths, now=None):
+    """WHEN EACH INPUT WAS LAST WRITTEN, and how long ago, so the output
+    says whether this run read today's CrossCode or one left over from last
+    week.  A path left blank in local_settings is not an input and is
+    skipped - the run already says "not supplied" for it."""
+    now = now or datetime.datetime.now()
+    lines = ["  input files (last modified):"]
+    for p in paths:
+        if not p:
+            continue
+        p = Path(p)
+        try:
+            mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
+        except OSError:
+            lines.append(f"    MISSING              {p}")
+            continue
+        hours = (now - mtime).total_seconds() / 3600
+        age = f"{hours:.1f}h ago" if hours < 48 else f"{hours / 24:.0f} days ago"
+        lines.append(f"    {mtime:%Y-%m-%d %H:%M:%S}  ({age})  {p}")
+    return lines
+
+
 def run(crosscode_path, server, output_path, temp_path,
         mapping_path="", date=None, nse_cas_path="", bse_cas_path="",
         hkex_cas_path="", override_path="") -> int:
@@ -535,6 +558,13 @@ def run(crosscode_path, server, output_path, temp_path,
 
     def step(label):
         say(f"[{time.time() - started:6.1f}s] {label}")
+
+    #  BEFORE ANY OF THEM IS READ, so a run that then fails on one still
+    #  says how old it was.
+    for line in input_file_lines([crosscode_path, mapping_path,
+                                  nse_cas_path, bse_cas_path, hkex_cas_path,
+                                  override_path]):
+        say(line)
 
     step(f"reading crosscode {crosscode_path}")
     rows, excluded = crosscode.load(crosscode_path)
@@ -943,6 +973,23 @@ def self_test() -> int:
         check("nothing to report still writes the header",
               p.read_text(encoding="utf-8").splitlines(),
               [",".join(COMPARE_COLUMNS)])
+
+    print("\nthe input files' modified times")
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "CrossCode.csv"
+        f.write_text("x", encoding="utf-8")
+        os.utime(f, (0, datetime.datetime(2026, 9, 23, 6, 0).timestamp()))
+        got = input_file_lines([str(f), "", str(Path(d) / "gone.csv")],
+                               now=datetime.datetime(2026, 9, 23, 7, 30))
+        check("each file gets its modified time and its age",
+              got[1], f"    2026-09-23 06:00:00  (1.5h ago)  {f}")
+        check("a blank setting is skipped and a file that is not there "
+              "says so", (len(got), got[2].startswith("    MISSING")),
+              (3, True))
+        old = input_file_lines([str(f)],
+                               now=datetime.datetime(2026, 9, 30, 6, 0))
+        check("an old one is counted in days", "(7 days ago)" in old[1],
+              True)
 
     print("\nthe demo runs end to end with no kdb")
     check("demo returns success", demo(), 0)
