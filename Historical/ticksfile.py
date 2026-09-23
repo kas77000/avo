@@ -372,8 +372,18 @@ def write(path, rows, mic: str, tz_label: str = "") -> int:
     newline="" is required, not cosmetic: without it csv writes \\r\\r\\n on
     Windows and every other line of the file reads as blank."""
     return write_rows(path, [(r["time"], _num(r["price"]), _num(r["size"]),
-                              r["cond"], r["ex"], mic) for r in rows],
-                      tz_label)
+                              condition(r["cond"]), r["ex"], mic)
+                             for r in rows], tz_label)
+
+
+#  A PRINT WITH NO CONDITION CODE IS WRITTEN "#N/A N.A.", not blank.  That is
+#  what the Bloomberg files carry, and whatever reads these was written
+#  against them.  qatt leaves the column empty instead.
+NO_CONDITION = "#N/A N.A."
+
+
+def condition(cond) -> str:
+    return (cond or "").strip() or NO_CONDITION
 
 
 def write_rows(path, rows, tz_label: str = "") -> int:
@@ -507,8 +517,9 @@ def self_test() -> int:
               "AUS Eastern Standard Time")
         check("a data row has six fields and no seventh",
               lines[1], "09:31:33,0.105,1000,T,T,XASX")
-        check("an empty condition is an empty field, not the word None",
-              lines[3], "10:00:15,0.105,4998,,H,XASX")
+        check("an empty condition is Bloomberg's marker, never blank and "
+              "never the word None",
+              lines[3], "10:00:15,0.105,4998,#N/A N.A.,H,XASX")
         check("three prints, one header", len(lines), 4)
         check("no blank line between rows - the Windows csv trap",
               "\r\r\n" in text, False)
@@ -673,6 +684,22 @@ def self_test() -> int:
         migrate_flat(d, {"LPN/F TB": "LPN/F TB"})
         check("a loose file of a slash code goes to its underscore folder",
               existing_dates(d, "LPN/F TB", "LPN/F TB"), {lpn})
+
+    print("\na print with no condition code")
+    check("blank is written as Bloomberg writes it", condition(""),
+          "#N/A N.A.")
+    check("and so is whitespace, which is the same absence",
+          condition("  "), "#N/A N.A.")
+    check("nothing at all is too", condition(None), "#N/A N.A.")
+    check("a code the exchange did send is untouched", condition("T"), "T")
+    check("with its surrounding space trimmed", condition(" XT "), "XT")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "c.csv"
+        write(p, [{"time": "09:00:00", "price": Decimal("1"),
+                   "size": Decimal("100"), "cond": "", "ex": ""}], "XBKK")
+        check("so the cell is never empty in the file",
+              p.read_text(encoding="utf-8").splitlines()[1],
+              "09:00:00,1,100,#N/A N.A.,,XBKK")
 
     print("\n--compress_venues: one zip per venue")
     import zipfile as zf_

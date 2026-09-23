@@ -709,7 +709,7 @@ def shape(result, time_field: str = None) -> dict:
     clock, to_decimal and text, and the same number formatting - but a
     column at a time and each distinct value once, instead of a dict and a
     Decimal for every print.  The self-test holds the two paths together."""
-    from ticksfile import _num
+    from ticksfile import _num, condition
     field = time_field or TIME_FIELD
     src = _frame(result)
     c = _columns_of(src, ("sym",) + TICK_FIELDS)
@@ -721,7 +721,8 @@ def shape(result, time_field: str = None) -> dict:
     for sym, row in zip(map(txt, c["sym"]),
                         zip(clocks,
                             map(num, c["price"]), map(num, c["size"]),
-                            map(txt, c["cond"]), map(txt, c["ex"]))):
+                            map(_memo(lambda v: condition(text(v))),
+                                c["cond"]), map(txt, c["ex"]))):
         out.setdefault(sym, []).append(row)
     return out
 
