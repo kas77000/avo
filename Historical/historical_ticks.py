@@ -693,8 +693,15 @@ def parse_day(text, flag):
 
 def stage_partitions(conn, date_text, log, from_text=""):
     """What days qatt actually holds, capped at --to (--date) when given and
-    starting at --from when given."""
+    starting at --from when given.
+
+    TIMED, because this stage has been seen to take over a minute for a
+    list of dates that costs the server nothing to produce.  Whatever the
+    answer is - the socket, the queue in front of us, or the read itself -
+    the log should say which."""
+    t0 = time.monotonic()
     parts = qattsource.partitions(conn)
+    took = time.monotonic() - t0
     if not parts:
         log.fail("qatt holds no partitions at all")
         return None
@@ -716,7 +723,7 @@ def stage_partitions(conn, date_text, log, from_text=""):
                      + (f" to {cutoff}" if cutoff else ""))
             return None
     log.kv("qatt partitions", logs.thousands(len(parts)),
-           f"{parts[0]} .. {parts[-1]}")
+           f"{parts[0]} .. {parts[-1]}   .Q.pv answered in {took:.1f}s")
     log.kv("time column", qattsource.TIME_FIELD,
            "set from qatt_time_probe.py")
     return parts
@@ -1030,18 +1037,23 @@ def main(argv=None) -> int:
     log_universe(rows, names, excluded, tally, log)
 
     log.step(4, "qatt")
+    t0 = time.monotonic()
     conn = qattsource.connect(q_host, q_port)
+    log.kv("connected", f"{q_host}:{q_port}",
+           f"in {time.monotonic() - t0:.1f}s")
     parts = stage_partitions(conn, a.date, log, a.date_from)
     if parts is None:
         return 1
     try:
+        t0 = time.monotonic()
         have = qattsource.columns(conn)
+        cols_took = time.monotonic() - t0
         cols = qattsource.select_columns(have)
     except ValueError as e:
         log.fail(str(e))
         return 1
     log.kv("columns asked for", ", ".join(cols),
-           f"of the {len(have)} qatt has")
+           f"of the {len(have)} qatt has   `cols qatt` in {cols_took:.1f}s")
     if a.date_from:
         #  The window IS the range: every partition left after the cut.
         backfill = len(parts)
