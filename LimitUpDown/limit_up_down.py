@@ -375,6 +375,19 @@ SOURCES_CSV = "sources.csv"
 SOURCES_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Source"]
 
 
+def source_ratio(sources) -> str:
+    """"Computed: 20% (3200)  Bloomberg: 80% (12800)" over the published
+    rows - the same split sources.csv lists name by name."""
+    total = len(sources)
+    computed = sum(1 for _, s in sources if s == "computed")
+    bloomberg = total - computed
+
+    def pct(n):
+        return round(100 * n / total) if total else 0
+    return (f"Computed: {pct(computed)}% ({computed})  "
+            f"Bloomberg: {pct(bloomberg)}% ({bloomberg})")
+
+
 def write_sources_csv(path, sources):
     """`sources` is (output row, "bloomberg" | "computed") pairs.  Returns
     (path, count)."""
@@ -1243,7 +1256,8 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
         return 1
 
     report = [f"{len(out)} rows -> {OUT_TEMP}",
-              f"published to {', '.join(envs) if envs else 'nowhere'}"]
+              f"published to {', '.join(envs) if envs else 'nowhere'}",
+              source_ratio(sources)]
     report.extend(_venue_summary(cfg, out, excluded))
     report.extend(_exclusion_lines(excluded))
 
@@ -2752,6 +2766,12 @@ def self_test() -> int:
         check("sources.csv says how each published row was priced",
               (n, got), (1, [{"ReutersCode": "A.T", "BloombergCode": "A JT",
                               "Venue": "TYO-MAIN", "Source": "computed"}]))
+
+    check("the ratio of computed to Bloomberg rows, as the log says it",
+          source_ratio([({}, "computed")] + [({}, "bloomberg")] * 4),
+          "Computed: 20% (1)  Bloomberg: 80% (4)")
+    check("and a run that published nothing does not divide by zero",
+          source_ratio([]), "Computed: 0% (0)  Bloomberg: 0% (0)")
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

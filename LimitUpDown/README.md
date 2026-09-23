@@ -737,6 +737,9 @@ A.KS,A KP,KSC-MAIN,computed
 the band was computed instead: `computed`. A computed name with no close that
 Bloomberg rescued: `bloomberg`.
 
+The log's report carries the same split as a ratio of the published rows:
+`Computed: 20% (3200)  Bloomberg: 80% (12800)`.
+
 ### Which names did not make the file
 
 `excluded.csv`, written beside the output every run:
