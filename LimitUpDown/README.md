@@ -722,19 +722,17 @@ tables in one file, each opened by a `## Title` row.
 
 | Table | What it says |
 |---|---|
-| Summary | CrossCode lines, excluded on reading, lines priced, published, computed and Bloomberg with their %, not published — and **Accounted for** |
+| Summary | CrossCode lines, excluded on reading, lines priced, published, computed and Bloomberg with their %, not published |
 | Per venue | published / computed / Bloomberg / not priced / excluded at CrossCode |
 | Why lines were not published | each reason, its stage and how many lines |
 | Not published | every line, with stage (`crosscode` or `pricing`), reason and detail |
 | Computed | every computed stock, with the close it came from |
 | From Bloomberg | every stock priced off B-PIPE |
 
-**Accounted for** is the check: every line priced — the universe, India's BSE
-listings and their BSE-SECONDARY copies — must be published or excluded with a
-reason. If one vanished without a reason it reads `MISMATCH`. A stock is counted
-by the path it ended on, as in `sources.csv`. The summary is written on every
-way out of a priced run, including a failed validation or copy, where it shows
-`FAILED`.
+A stock is counted by the path it ended on, as in `sources.csv`. The summary
+is written on every way out of a priced run, including a failed validation or
+copy, where it shows `FAILED`. Long tables scroll inside their own box, with a
+scroll bar that stays visible.
 
 **After every `--compare` — `LimitUpDown-YYYYMMDD-HHMMSS-compare.html` / `.csv`:**
 

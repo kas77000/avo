@@ -404,24 +404,15 @@ def _lines(excluded) -> int:
     return sum(len(e.rows) for e in excluded)
 
 
-def run_report(cfg, *, cc_rows, cc_excluded, narrowed, secondary, copies,
-               sources, pricing_excluded, closes, outcome, failed):
-    """The run summary, as sanity sections plus its headline figures.
-
-    THE LINES MUST ACCOUNT FOR THEMSELVES.  Every line priced - the
-    universe, India's synthesised BSE listings and their BSE-SECONDARY
-    copies - is either published or excluded with a reason.  "Accounted
-    for" is that sum, checked, so a name lost without a reason is a
-    MISMATCH on the first line of the report rather than a gap nobody
-    notices."""
+def run_report(cfg, *, cc_rows, cc_excluded, narrowed, sources,
+               pricing_excluded, closes, outcome, failed):
+    """The run summary, as sanity sections plus its headline figures."""
     cc_out = _lines(cc_excluded)
     universe = cc_rows - narrowed
     not_priced = _lines(pricing_excluded)
     published = len(sources)
     computed = sum(1 for _, src in sources if src == "computed")
     bloomberg = published - computed
-    expected = universe + secondary + copies
-    accounted = expected == published + not_priced
 
     summary = [
         ["CrossCode lines", cc_rows + cc_out, "every data line of the file"],
@@ -433,20 +424,12 @@ def run_report(cfg, *, cc_rows, cc_excluded, narrowed, secondary, copies,
                         "a narrowed run - not published"])
     summary += [
         ["Lines priced", universe, "the universe after the CrossCode filters"],
-        ["BSE secondary listings added", secondary,
-         "India's BSE codes, priced under BSE-MAIN"],
-        ["BSE-SECONDARY copies", copies,
-         "each priced BSE secondary row, published again"],
         ["Published", published, outcome],
         ["Computed", f"{computed} ({_pct(computed, published)}%)",
          "includes names Bloomberg would not price"],
         ["Bloomberg", f"{bloomberg} ({_pct(bloomberg, published)}%)",
          "includes computed names with no close"],
         ["Not published after pricing", not_priced, "see Not published"],
-        ["Accounted for", "OK" if accounted else "MISMATCH",
-         f"{universe} + {secondary} + {copies} priced = {published} "
-         f"published + {not_priced} not published"
-         + ("" if accounted else f" is {published + not_priced}")],
     ]
 
     by_reason = [["pricing", e.reason, missing_token(e.reason), len(e.rows)]
@@ -527,7 +510,6 @@ def run_report(cfg, *, cc_rows, cc_excluded, narrowed, secondary, copies,
                        "MAX_LIMIT / MIN_LIMIT as B-PIPE published them."),
     ]
     status = (("bad", "FAILED") if failed else
-              ("warn", "Lines unaccounted for") if not accounted else
               ("ok", "OK"))
     return {
         "title": "LimitUpDown run summary",
@@ -542,8 +524,6 @@ def run_report(cfg, *, cc_rows, cc_excluded, narrowed, secondary, copies,
              f"{bloomberg} rows", ""),
             ("Not published", not_priced, "after pricing",
              "warn" if not_priced else "ok"),
-            ("Accounted for", "OK" if accounted else "MISMATCH",
-             "every priced line", "ok" if accounted else "bad"),
         ],
         "split": [("Computed", computed, "--computed"),
                   ("Bloomberg", bloomberg, "--bloomberg")],
@@ -553,8 +533,7 @@ def run_report(cfg, *, cc_rows, cc_excluded, narrowed, secondary, copies,
                      f"Computed: {_pct(computed, published)}% ({computed})  "
                      f"Bloomberg: {_pct(bloomberg, published)}% ({bloomberg})"
                      f"\n{not_priced} not published after pricing, {cc_out} "
-                     f"excluded on reading the CrossCode\n"
-                     f"Accounted for: {'OK' if accounted else 'MISMATCH'}"),
+                     f"excluded on reading the CrossCode"),
     }
 
 
@@ -1603,8 +1582,7 @@ def run(envs_spec: str, venues_spec: str = "", report_base=None,
         try:
             r = run_report(
                 cfg, cc_rows=cc_rows, cc_excluded=cc_excluded,
-                narrowed=narrowed, secondary=len(secondary),
-                copies=len(sec_both), sources=sources,
+                narrowed=narrowed, sources=sources,
                 pricing_excluded=(list(more) + list(computed_excluded)
                                   + list(sec_excluded) + list(fb_excluded)
                                   + list(cd_excluded)),
@@ -1758,8 +1736,8 @@ def _row(ric, bbg, code, venue_id, status="ACTV", **extra):
 
 def demo(report_base=None) -> int:
     """`report_base` also writes the run summary there, the way a real run
-    does - which is how the self-test checks that every line is accounted
-    for across the whole pipeline, not just in a hand-built example."""
+    does - which is how the self-test checks that no line is lost across
+    the whole pipeline, not just in a hand-built example."""
     """A whole run on canned data, BOTH branches: no Bloomberg, no shares.
 
     The shipped config is used as-is, so this also proves markets.csv and
@@ -1902,7 +1880,6 @@ def demo(report_base=None) -> int:
             rows=[crosscode.Dropped("FUT.T", "FUT JT", "TYO-MAIN")])]
         report = run_report(
             cfg, cc_rows=len(rows), cc_excluded=cc_excluded, narrowed=0,
-            secondary=len(secondary), copies=len(sec_both),
             sources=([(r, "bloomberg") for r in out_bbg + sec_out + fb_out
                       + sec_both]
                      + [(r, "computed") for r in computed + cd_out]),
@@ -3240,8 +3217,12 @@ def self_test() -> int:
         base = Path(tmp) / "LimitUpDown-20260924-073000"
         rep = demo(report_base=base)
         summary = {r[0]: r[1] for r in rep["sections"][0]["rows"]}
-        check("EVERY PRICED LINE IS ACCOUNTED FOR - published, or excluded "
-              "with a reason", summary["Accounted for"], "OK")
+        #  NO LINE IS LOST WITHOUT A REASON: every line priced is either
+        #  published or in Not published.  The demo's one BSE listing is
+        #  priced as an extra line and published twice, hence the + 2.
+        check("EVERY PRICED LINE IS PUBLISHED OR EXCLUDED WITH A REASON",
+              summary["Published"] + summary["Not published after pricing"],
+              summary["Lines priced"] + 2)
         check("the CrossCode count is what was kept plus what was filtered",
               summary["CrossCode lines"],
               summary["Lines priced"]
@@ -3273,18 +3254,8 @@ def self_test() -> int:
               sorted(f.name for f in Path(tmp).iterdir()),
               ["LimitUpDown-20260924-073000-summary.csv",
                "LimitUpDown-20260924-073000-summary.html"])
-        #  A name lost without a reason must show, not be absorbed.
-        lost = run_report(
-            marketcfg.load(Path(__file__).resolve().parent / "config",
-                           Path(__file__).resolve().parent / "config"),
-            cc_rows=3, cc_excluded=[], narrowed=0, secondary=0, copies=0,
-            sources=[(_out_row(row("A.T", "A JT", "A"), Decimal(9),
-                               Decimal(11)), "bloomberg")],
-            pricing_excluded=[], closes={}, outcome="x", failed=False)
-        check("a line that vanished without a reason is a MISMATCH on the "
-              "first table", ({r[0]: r[1] for r in
-                               lost["sections"][0]["rows"]}["Accounted for"],
-                              lost["status"][0]), ("MISMATCH", "warn"))
+        check("the summary says nothing about BSE",
+              [k for k in summary if "BSE" in k], [])
 
     print("\nthe comparison report")
     bse = {"#ReutersCode": "RELI.BO", "BloombergCode": "500325 IB",

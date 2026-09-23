@@ -56,7 +56,7 @@ _NUMERIC = re.compile(r"^[+-]?\d[\d,]*(\.\d+)?%?( \(\d+(\.\d+)?%\))?$")
 #  result.
 PILL_COLUMNS = {"Source", "Value"}
 _PILLS = {"computed": "computed", "bloomberg": "bloomberg",
-          "OK": "ok", "MISMATCH": "bad", "FAILED": "bad", "differs": "warn"}
+          "OK": "ok", "FAILED": "bad", "differs": "warn"}
 
 _CSS = """
 :root {
@@ -114,7 +114,20 @@ summary h2 { font-size: 16px; font-weight: 600; margin: 0; }
   color: var(--text); border: 1px solid var(--border); border-radius: 6px;
   padding: 7px 10px; font: inherit; }
 .tools input:focus { outline: none; border-color: var(--accent); }
-.scroll { max-height: 560px; overflow: auto; border-top: 1px solid var(--border); }
+.scroll { max-height: 480px; overflow: auto; border-top: 1px solid var(--border); }
+/* ALWAYS-VISIBLE SCROLL BARS.  Windows 11 hides them until hovered, and on
+   a dark page they vanish, so a table that scrolls looked like one that
+   had ended.  Styling them makes Chromium/Edge draw classic bars; Firefox
+   takes scrollbar-color, which Chromium would read as "use overlay". */
+.scroll::-webkit-scrollbar { width: 14px; height: 14px; }
+.scroll::-webkit-scrollbar-track { background: var(--panel-2); }
+.scroll::-webkit-scrollbar-thumb { background: #5b6577; border-radius: 7px;
+  border: 3px solid var(--panel-2); }
+.scroll::-webkit-scrollbar-thumb:hover { background: #7a859a; }
+.scroll::-webkit-scrollbar-corner { background: var(--panel-2); }
+@supports (-moz-appearance: none) {
+  .scroll { scrollbar-color: #5b6577 var(--panel-2); }
+}
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 7px 14px; text-align: left; white-space: nowrap;
   border-bottom: 1px solid var(--border); }
