@@ -210,13 +210,25 @@ svg .diag {{ stroke:var(--diag); stroke-width:1.2; stroke-dasharray:5 4; }}
 svg .key {{ fill:var(--surface); stroke:var(--ring); }}
 svg circle {{ fill:var(--dot); fill-opacity:.6; }}
 svg circle:hover {{ fill-opacity:1; r:4; }}
-.wrap {{ overflow-x:auto; }}
+.wrap {{ max-height:400px; overflow:auto; }}
+/* Overlay scroll bars vanish on a dark page, so a table that scrolls looks
+   like one that ends: keep them drawn.  Firefox has only scrollbar-color,
+   which Chromium would read as "use overlay", so it goes in its own rule. */
+.wrap::-webkit-scrollbar {{ width:14px; height:14px; }}
+.wrap::-webkit-scrollbar-track {{ background:var(--head); }}
+.wrap::-webkit-scrollbar-thumb {{ background:#5b6577; border-radius:7px;
+  border:3px solid var(--head); }}
+.wrap::-webkit-scrollbar-thumb:hover {{ background:#7a859a; }}
+.wrap::-webkit-scrollbar-corner {{ background:var(--head); }}
+@supports (-moz-appearance:none) {{
+  .wrap {{ scrollbar-color:#5b6577 var(--head); }} }}
 table {{ border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums;
   font-size:13px; }}
 th, td {{ text-align:right; padding:5px 8px; border-bottom:1px solid var(--grid);
   white-space:nowrap; }}
 th:first-child, td:first-child {{ text-align:left; }}
-th {{ background:var(--head); color:var(--ink2); font-weight:600; }}
+th {{ background:var(--head); color:var(--ink2); font-weight:600;
+  position:sticky; top:0; }}
 .none {{ color:var(--muted); margin:0; }}
 </style></head><body><main>
 <h1>{title}: old vs new</h1>
@@ -245,7 +257,7 @@ def write_page(path, title, old_name, new_name, old, new, threshold) -> dict:
             f'{len(pairs):,} shared instruments</p>'
             + scatter_svg(pairs, f"Old: {old_name} {col}",
                           f"New: {new_name} {col}")
-            + f"<h3>Differences greater than {threshold:g}% ({len(big)})</h3>"
+            + f"<h3>Differences greater than {threshold:g}% ({len(big):,})</h3>"
             f'<div class="wrap">{table_html(big, key, old_name, new_name)}'
             f"</div></section>")
     sub = (f"Old: {escape(old_name)} | New: {escape(new_name)} | "

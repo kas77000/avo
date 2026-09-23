@@ -49,7 +49,8 @@ skipped. A column that is only in one file is named in the terminal output.
 - **Differences greater than `-t`%**: `#FidessaCode`, old, new, change and
   direction. Change is `(new − old) / old`. Rows where old is 0 and new is not
   come first, marked `N/A (old = 0)`. The rest are sorted with the largest
-  change first.
+  change first. A long table scrolls inside its own box, and the header row
+  stays in view.
 
 The page is named after the old file, so `GlobalAdv_Hong_Kong.csv` gives
 `GlobalAdv_Hong_Kong_comparison.html`, titled *GlobalAdv Hong Kong: old vs
