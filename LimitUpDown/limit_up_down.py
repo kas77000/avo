@@ -82,6 +82,7 @@ import india
 import kdbclose
 import mailer
 import marketcfg
+import sanity
 import ticks
 
 OUT_HEADER = ["#ReutersCode", "BloombergCode", "LimitDate", "LimitUpPrice",
@@ -175,6 +176,7 @@ REQUIRED = {
     "bands": ("compute", "BandError"),
     "ticks": ("tick_for",),
     "mailer": ("send",),
+    "sanity": ("section", "write_csv", "write_html"),
 }
 
 
@@ -373,6 +375,322 @@ def write_closes_csv(path, rows, closes):
 #  "computed".  Names that were not published at all are in excluded.csv.
 SOURCES_CSV = "sources.csv"
 SOURCES_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Source"]
+
+
+def read_sources_csv(path):
+    """RIC -> bloomberg | computed, or {} when there is no sources.csv."""
+    path = Path(path)
+    if not path.is_file():
+        return {}
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        return {r["ReutersCode"]: r.get("Source", "")
+                for r in csv.DictReader(fh) if r.get("ReutersCode")}
+
+
+# =============================================================================
+# THE SANITY-CHECK REPORTS
+# =============================================================================
+#
+#  Two of them, both written to LOG_DIR beside the log and named after it,
+#  both attached to the mail: the run summary after every generation, and
+#  the comparison against the legacy file after every --compare.  Each is a
+#  CSV of titled tables and the same tables as a dark-mode HTML page.
+
+def _pct(n, total) -> int:
+    return round(100 * n / total) if total else 0
+
+
+def _lines(excluded) -> int:
+    return sum(len(e.rows) for e in excluded)
+
+
+def run_report(cfg, *, cc_rows, cc_excluded, narrowed, secondary, copies,
+               sources, pricing_excluded, closes, outcome, failed):
+    """The run summary, as sanity sections plus its headline figures.
+
+    THE LINES MUST ACCOUNT FOR THEMSELVES.  Every line priced - the
+    universe, India's synthesised BSE listings and their BSE-SECONDARY
+    copies - is either published or excluded with a reason.  "Accounted
+    for" is that sum, checked, so a name lost without a reason is a
+    MISMATCH on the first line of the report rather than a gap nobody
+    notices."""
+    cc_out = _lines(cc_excluded)
+    universe = cc_rows - narrowed
+    not_priced = _lines(pricing_excluded)
+    published = len(sources)
+    computed = sum(1 for _, src in sources if src == "computed")
+    bloomberg = published - computed
+    expected = universe + secondary + copies
+    accounted = expected == published + not_priced
+
+    summary = [
+        ["CrossCode lines", cc_rows + cc_out, "every data line of the file"],
+        ["Excluded while reading the CrossCode", cc_out,
+         "type, venue, cutoff, status, duplicate, ATS strategy file"],
+    ]
+    if narrowed:
+        summary.append(["Left out by --venues", narrowed,
+                        "a narrowed run - not published"])
+    summary += [
+        ["Lines priced", universe, "the universe after the CrossCode filters"],
+        ["BSE secondary listings added", secondary,
+         "India's BSE codes, priced under BSE-MAIN"],
+        ["BSE-SECONDARY copies", copies,
+         "each priced BSE secondary row, published again"],
+        ["Published", published, outcome],
+        ["Computed", f"{computed} ({_pct(computed, published)}%)",
+         "includes names Bloomberg would not price"],
+        ["Bloomberg", f"{bloomberg} ({_pct(bloomberg, published)}%)",
+         "includes computed names with no close"],
+        ["Not published after pricing", not_priced, "see Not published"],
+        ["Accounted for", "OK" if accounted else "MISMATCH",
+         f"{universe} + {secondary} + {copies} priced = {published} "
+         f"published + {not_priced} not published"
+         + ("" if accounted else f" is {published + not_priced}")],
+    ]
+
+    by_reason = [["pricing", e.reason, missing_token(e.reason), len(e.rows)]
+                 for e in pricing_excluded if e.rows]
+    by_reason.sort(key=lambda r: -r[3])
+    cc_reasons = [["crosscode", e.reason, "", len(e.rows)]
+                  for e in cc_excluded if e.rows]
+    by_reason += sorted(cc_reasons, key=lambda r: -r[3])
+
+    count = {}
+
+    def add(venue, col, n=1):
+        count.setdefault(venue, {}).setdefault(col, 0)
+        count[venue][col] += n
+    for r, src in sources:
+        add(r["Venue"], src)
+    for col, group in (("priced", pricing_excluded), ("cc", cc_excluded)):
+        for e in group:
+            for d in e.rows:
+                add(d.venue_id, col)
+    venues = sorted(set(cfg.venues) | {r["Venue"] for r, _ in sources})
+    per_venue = []
+    for v in venues:
+        c = count.get(v, {})
+        cp, bb = c.get("computed", 0), c.get("bloomberg", 0)
+        vc = cfg.venues.get(v)
+        per_venue.append([v, "" if vc is None else vc.source + (
+                              f", else {vc.no_data_fallback}"
+                              if vc.no_data_fallback else ""),
+                          cp + bb, cp, bb, c.get("priced", 0),
+                          c.get("cc", 0)])
+
+    dropped = []
+    for stage, group in (("pricing", pricing_excluded),
+                         ("crosscode", cc_excluded)):
+        for e in group:
+            for d in e.rows:
+                dropped.append([stage, d.ric, d.bbg, d.venue_id,
+                                missing_token(e.reason)
+                                if stage == "pricing" else "",
+                                e.reason, d.detail])
+
+    def priced(which, with_close):
+        rows = []
+        for r, src in sources:
+            if src != which:
+                continue
+            row = [r["#ReutersCode"], r["BloombergCode"], r["Venue"]]
+            if with_close:
+                ref = closes.get(r["#ReutersCode"])
+                row.append(_plain(ref) if ref is not None else "")
+            rows.append(row + [r["LimitUpPrice"], r["LimitDownPrice"]])
+        return sorted(rows, key=lambda x: (x[2], x[1]))
+
+    sections = [
+        sanity.section("Summary", ["Metric", "Value", "Note"], summary),
+        sanity.section("Per venue", ["Venue", "Configured", "Published",
+                                     "Computed", "Bloomberg", "Not priced",
+                                     "Excluded at CrossCode"], per_venue),
+        sanity.section("Why lines were not published",
+                       ["Stage", "Reason", "Missing", "Lines"], by_reason),
+        sanity.section("Not published", ["Stage", "ReutersCode",
+                                         "BloombergCode", "Venue", "Missing",
+                                         "Reason", "Detail"], dropped,
+                       "Every line that did not make the file. Stage "
+                       "crosscode: filtered on reading the CrossCode. "
+                       "Stage pricing: kept, but no limit could be set."),
+        sanity.section("Computed", ["ReutersCode", "BloombergCode", "Venue",
+                                    "Close", "LimitUpPrice",
+                                    "LimitDownPrice"],
+                       priced("computed", True),
+                       "Band from the venue's tiers and the previous close "
+                       "in equity_master."),
+        sanity.section("From Bloomberg", ["ReutersCode", "BloombergCode",
+                                          "Venue", "LimitUpPrice",
+                                          "LimitDownPrice"],
+                       priced("bloomberg", False),
+                       "MAX_LIMIT / MIN_LIMIT as B-PIPE published them."),
+    ]
+    status = (("bad", "FAILED") if failed else
+              ("warn", "Lines unaccounted for") if not accounted else
+              ("ok", "OK"))
+    return {
+        "title": "LimitUpDown run summary",
+        "status": status,
+        "kpis": [
+            ("CrossCode lines", cc_rows + cc_out,
+             f"{cc_out} excluded on reading", ""),
+            ("Published", published, outcome, "bad" if failed else "ok"),
+            ("Computed", f"{_pct(computed, published)}%", f"{computed} rows",
+             ""),
+            ("Bloomberg", f"{_pct(bloomberg, published)}%",
+             f"{bloomberg} rows", ""),
+            ("Not published", not_priced, "after pricing",
+             "warn" if not_priced else "ok"),
+            ("Accounted for", "OK" if accounted else "MISMATCH",
+             "every priced line", "ok" if accounted else "bad"),
+        ],
+        "split": [("Computed", computed, "--computed"),
+                  ("Bloomberg", bloomberg, "--bloomberg")],
+        "sections": sections,
+        "short": f"{published} rows, {_pct(computed, published)}% computed",
+        "headline": (f"{published} rows - {outcome}\n"
+                     f"Computed: {_pct(computed, published)}% ({computed})  "
+                     f"Bloomberg: {_pct(bloomberg, published)}% ({bloomberg})"
+                     f"\n{not_priced} not published after pricing, {cc_out} "
+                     f"excluded on reading the CrossCode\n"
+                     f"Accounted for: {'OK' if accounted else 'MISMATCH'}"),
+    }
+
+
+def compare_report(old_path, new_path, old_rows, new_rows, closes,
+                   sources):
+    """The comparison against the legacy file, as sanity sections.
+
+    Built on differences(), so the tables and compare-report.csv can never
+    disagree about what was found."""
+    records = differences(old_rows, new_rows, closes)
+    old, new = _keyed(old_rows), _keyed(new_rows)
+    price = [d for d in records if d["status"] == "price"]
+    up = [d for d in price if d["column"] == "LimitUpPrice"]
+    down = [d for d in price if d["column"] == "LimitDownPrice"]
+    either = {(d["ric"], d["venue"]) for d in price}
+    only_old = [d for d in records if d["status"] == "only_in_old"]
+    only_new = [d for d in records if d["status"] == "only_in_new"]
+    both = set(old) & set(new)
+
+    summary = [
+        ["Old file", old_path, ""], ["New file", new_path, ""],
+        ["Rows in old", len(old_rows), ""], ["Rows in new", len(new_rows), ""],
+        ["Stocks in both", len(both), "matched on #ReutersCode and Venue"],
+        ["Only in old", len(only_old), "see Only in old"],
+        ["Only in new", len(only_new), "see Only in new"],
+        ["LimitUpPrice differs", len(up), "stocks in both"],
+        ["LimitDownPrice differs", len(down), "stocks in both"],
+        ["Either price differs", len(either), "see Differences"],
+        ["Identical", f"{len(both) - len(either)} "
+                      f"({_pct(len(both) - len(either), len(both))}%)",
+         "stocks in both, both prices equal"],
+    ]
+
+    def tally(ds):
+        out = {}
+        for d in ds:
+            out[d["venue"]] = out.get(d["venue"], 0) + 1
+        return out
+    o_n, n_n = tally({"venue": r["Venue"]} for r in old_rows), \
+        tally({"venue": r["Venue"]} for r in new_rows)
+    oo, on, uu, dd = tally(only_old), tally(only_new), tally(up), tally(down)
+    per_market = []
+    for v in sorted(set(o_n) | set(n_n)):
+        a, b = o_n.get(v, 0), n_n.get(v, 0)
+        per_market.append([v, a, b, f"{b - a:+d}" if b != a else "0",
+                           oo.get(v, 0), on.get(v, 0), uu.get(v, 0),
+                           dd.get(v, 0)])
+
+    def change(a, b):
+        try:
+            a, b = Decimal(a), Decimal(b)
+            return f"{(b - a) / a * 100:+.2f}%" if a else ""
+        except (TypeError, ArithmeticError):
+            return ""
+    diff_rows = [[d["venue"], d["code"], d["ric"],
+                  sources.get(d["ric"], ""), d["close"], d["column"],
+                  d["old"], d["new"], change(d["old"], d["new"])]
+                 for d in price]
+
+    def listed(ds, rows, with_source):
+        out = []
+        for d in ds:
+            r = rows[(d["ric"], d["venue"])]
+            out.append([d["ric"], r.get("BloombergCode", ""), d["venue"],
+                        r.get("LimitUpPrice", ""), r.get("LimitDownPrice", "")]
+                       + ([sources.get(d["ric"], "")] if with_source else []))
+        return sorted(out, key=lambda x: (x[2], x[1]))
+
+    listing = ["ReutersCode", "BloombergCode", "Venue", "LimitUpPrice",
+               "LimitDownPrice"]
+    sections = [
+        sanity.section("Summary", ["Metric", "Value", "Note"], summary),
+        sanity.section("Per market", ["Venue", "Old", "New", "Change",
+                                      "Only in old", "Only in new",
+                                      "LimitUpPrice differs",
+                                      "LimitDownPrice differs"], per_market),
+        sanity.section("Differences", ["Venue", "BloombergCode",
+                                       "ReutersCode", "Source", "Close",
+                                       "Column", "Old", "New", "Change"],
+                       diff_rows,
+                       "One line per price that moved. Source is how the "
+                       "new file priced it; Close is the close a computed "
+                       "limit came from."),
+        sanity.section("Only in old", listing,
+                       listed(only_old, old, False)),
+        sanity.section("Only in new", listing + ["Source"],
+                       listed(only_new, new, True)),
+    ]
+    n = len(either) + len(only_old) + len(only_new)
+    differ = f"{n} stock differs" if n == 1 else f"{n} stocks differ"
+    return {
+        "title": "LimitUpDown comparison",
+        "status": ("ok", "Identical") if not n else
+                  ("warn", differ),
+        "kpis": [
+            ("Rows in old", len(old_rows), Path(old_path).name, ""),
+            ("Rows in new", len(new_rows), Path(new_path).name, ""),
+            ("LimitUp differs", len(up), "stocks in both",
+             "warn" if up else "ok"),
+            ("LimitDown differs", len(down), "stocks in both",
+             "warn" if down else "ok"),
+            ("Only in old", len(only_old), "", "warn" if only_old else "ok"),
+            ("Only in new", len(only_new), "", "warn" if only_new else "ok"),
+        ],
+        "split": None,
+        "sections": sections,
+        "short": "identical" if not n else differ,
+        "headline": (f"{len(old_rows)} rows in old, {len(new_rows)} in new\n"
+                     f"LimitUpPrice differs: {len(up)}  "
+                     f"LimitDownPrice differs: {len(down)}\n"
+                     f"Only in old: {len(only_old)}  "
+                     f"Only in new: {len(only_new)}"),
+    }
+
+
+def _stamp_text(name: str) -> str:
+    """'LimitUpDown-20260924-073000' -> '2026-09-24 07:30:00'."""
+    try:
+        return f"{dt.datetime.strptime(name[-15:], '%Y%m%d-%H%M%S'):%Y-%m-%d %H:%M:%S}"
+    except ValueError:
+        return name
+
+
+def write_report(base, name, report):
+    """<base>-<name>.html and .csv, returned html first."""
+    base = Path(base)
+    page = base.with_name(f"{base.name}-{name}.html")
+    table = base.with_name(f"{base.name}-{name}.csv")
+    sanity.write_csv(table, report["sections"])
+    sanity.write_html(page, report["title"],
+                      f"{_stamp_text(base.name)} - "
+                      f"{report['headline'].splitlines()[0]}",
+                      report["status"], report["kpis"], report["sections"],
+                      split=report.get("split"),
+                      footer=f"Tables also in {table.name}")
+    return [page, table]
 
 
 def input_files(cfg):
@@ -890,8 +1208,7 @@ def differences(old_rows, new_rows, closes=None):
     from ever disagreeing about what was found."""
     closes = closes or {}
     out = []
-    old = {r["#ReutersCode"]: r for r in old_rows}
-    new = {r["#ReutersCode"]: r for r in new_rows}
+    old, new = _keyed(old_rows), _keyed(new_rows)
 
     venues = sorted({r["Venue"] for r in old_rows} |
                     {r["Venue"] for r in new_rows})
@@ -902,27 +1219,39 @@ def differences(old_rows, new_rows, closes=None):
             out.append({"status": "rowcount", "venue": v, "code": "",
                         "close": "", "column": "", "old": o, "new": n})
 
-    for ric in sorted(set(old) - set(new)):
-        out.append({"status": "only_in_old", "venue": old[ric].get("Venue", ""),
-                    "code": _code(old[ric], ric), "ric": ric,
+    for key in sorted(set(old) - set(new)):
+        ric, venue = key
+        out.append({"status": "only_in_old", "venue": venue,
+                    "code": _code(old[key], ric), "ric": ric,
                     "close": closes.get(ric, ""), "column": "",
                     "old": "", "new": ""})
-    for ric in sorted(set(new) - set(old)):
-        out.append({"status": "only_in_new", "venue": new[ric].get("Venue", ""),
-                    "code": _code(new[ric], ric), "ric": ric,
+    for key in sorted(set(new) - set(old)):
+        ric, venue = key
+        out.append({"status": "only_in_new", "venue": venue,
+                    "code": _code(new[key], ric), "ric": ric,
                     "close": closes.get(ric, ""), "column": "",
                     "old": "", "new": ""})
 
-    for ric in sorted(set(old) & set(new)):
+    for key in sorted(set(old) & set(new)):
+        ric, venue = key
         for col in ("LimitUpPrice", "LimitDownPrice"):
-            a, b = old[ric].get(col), new[ric].get(col)
+            a, b = old[key].get(col), new[key].get(col)
             if not _same_price(a, b):
-                out.append({"status": "price",
-                            "venue": new[ric].get("Venue", ""),
-                            "code": _code(new[ric], ric), "ric": ric,
+                out.append({"status": "price", "venue": venue,
+                            "code": _code(new[key], ric), "ric": ric,
                             "close": closes.get(ric, ""),
                             "column": col, "old": a, "new": b})
     return out
+
+
+def _keyed(rows):
+    """(RIC, Venue) -> row.
+
+    NOT THE RIC ALONE.  India's BSE listings are published twice under one
+    RIC, as BSE-MAIN and BSE-SECONDARY, so a RIC key let the copy stand in
+    for the original: a row missing from BSE-MAIN in one file was matched
+    against its BSE-SECONDARY twin and never reported."""
+    return {(r["#ReutersCode"], r.get("Venue", "")): r for r in rows}
 
 
 def _code(row, ric: str) -> str:
@@ -975,9 +1304,14 @@ def write_compare_report(path, records) -> str:
     return str(path)
 
 
-def run(envs_spec: str, venues_spec: str = "") -> int:
+def run(envs_spec: str, venues_spec: str = "", report_base=None,
+        result=None) -> int:
+    """`report_base` is the log's path without its suffix; the run summary
+    is written beside it and added to result["attach"] for the mail."""
+    result = result if result is not None else {"attach": []}
     session = None
     only = []
+    narrowed = 0
     try:
         envs = parse_envs(envs_spec)
         _check_modules()
@@ -999,6 +1333,7 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
             {v.venue_id: v.exclude_file for v in cfg.venues.values()})
         rows, excluded = crosscode.load(CROSSCODE_PATH, cfg.venues, now,
                                         strat)
+        cc_rows, cc_excluded = len(rows), list(excluded)
 
         #  NARROWED AFTER THE CROSSCODE, NOT BEFORE.  The exclusions above
         #  are about the whole file - a venue nobody configured, a type we
@@ -1008,6 +1343,7 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
         if only:
             before = len(rows)
             rows = only_venues(rows, only)
+            narrowed = before - len(rows)
             print(f"--venues {'|'.join(only)}: {len(rows)} of {before} rows")
             if not rows:
                 print("no rows on those venues have reached their cutoff")
@@ -1258,17 +1594,44 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
     entitlement_source = (bloomberg_failures + list(sec_excluded)
                           + list(fb_excluded))
 
+    def summary_report(outcome, failed=False):
+        """Written on EVERY way out from here, a failed validation or copy
+        included: that is exactly the run whose numbers you want to see.
+        A diagnostic, so it never takes the run down with it."""
+        if report_base is None:
+            return
+        try:
+            r = run_report(
+                cfg, cc_rows=cc_rows, cc_excluded=cc_excluded,
+                narrowed=narrowed, secondary=len(secondary),
+                copies=len(sec_both), sources=sources,
+                pricing_excluded=(list(more) + list(computed_excluded)
+                                  + list(sec_excluded) + list(fb_excluded)
+                                  + list(cd_excluded)),
+                closes=closes, outcome=outcome, failed=failed)
+            paths = write_report(report_base, "summary", r)
+            result["attach"].extend(paths)
+            result["short"], result["headline"] = r["short"], r["headline"]
+            print(f"run summary written to {paths[0]} and {paths[1].name}")
+        except Exception as e:                              # noqa: BLE001
+            print(f"run summary FAILED: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+
     problems = validate(out)
     if problems:
         body = ("Output failed validation, nothing published:\n\n"
                 + "\n".join(problems[:200]))
         print(body, file=sys.stderr)
+        summary_report(f"NOT published: {len(problems)} rows failed "
+                       f"validation", failed=True)
         return 1
 
     try:
         write_csv(OUT_TEMP, out)
     except OSError as e:
         print(f"FATAL {e}", file=sys.stderr)
+        summary_report(f"NOT published: could not write {OUT_TEMP}",
+                       failed=True)
         return 1
 
     #  A NARROWED RUN NEVER PUBLISHES, and this is not a convenience.  The
@@ -1286,6 +1649,8 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
     failures = copy_to_envs(OUT_TEMP, envs, targets)
     if failures:
         print("\n".join(failures), file=sys.stderr)
+        summary_report("NOT published: the copy to an environment failed",
+                       failed=True)
         return 1
 
     report = [f"{len(out)} rows -> {OUT_TEMP}",
@@ -1379,6 +1744,8 @@ def run(envs_spec: str, venues_spec: str = "") -> int:
         report.append(f"  field      {count:6d}  {field}: {message}")
 
     print("\n".join(report))
+    summary_report(f"published to {', '.join(envs)}" if envs
+                   else "written, published nowhere")
     return 0
 
 
@@ -1389,7 +1756,10 @@ def _row(ric, bbg, code, venue_id, status="ACTV", **extra):
                          **extra)
 
 
-def demo() -> int:
+def demo(report_base=None) -> int:
+    """`report_base` also writes the run summary there, the way a real run
+    does - which is how the self-test checks that every line is accounted
+    for across the whole pipeline, not just in a hand-built example."""
     """A whole run on canned data, BOTH branches: no Bloomberg, no shares.
 
     The shipped config is used as-is, so this also proves markets.csv and
@@ -1502,6 +1872,7 @@ def demo() -> int:
     compute = [r for r in compute if r.ric in closes]
 
     out, excluded = price_from_bloomberg(ask, limits, refused)
+    out_bbg = out
 
     #  The same retry run() does: a name Bloomberg would not price, given
     #  the venue's own band.  With the shipped config asking Bloomberg for
@@ -1520,8 +1891,27 @@ def demo() -> int:
     fb_excluded = [crosscode.Excluded(
         reason=f"no close in equity_master, then {e.reason}", rows=e.rows)
         for e in fb_excluded]
-    out = (out + computed + sec_out + fb_out + cd_out
-           + india.publish_both(sec_out))
+    sec_both = india.publish_both(sec_out)
+    out = out + computed + sec_out + fb_out + cd_out + sec_both
+
+    if report_base is not None:
+        #  One CrossCode-stage exclusion, so that table has a line of each
+        #  stage; the demo builds its rows rather than reading a file.
+        cc_excluded = [crosscode.Excluded(
+            reason="security type not Equity/ETF",
+            rows=[crosscode.Dropped("FUT.T", "FUT JT", "TYO-MAIN")])]
+        report = run_report(
+            cfg, cc_rows=len(rows), cc_excluded=cc_excluded, narrowed=0,
+            secondary=len(secondary), copies=len(sec_both),
+            sources=([(r, "bloomberg") for r in out_bbg + sec_out + fb_out
+                      + sec_both]
+                     + [(r, "computed") for r in computed + cd_out]),
+            pricing_excluded=(list(excluded) + list(computed_excluded)
+                              + list(sec_excluded) + list(fb_excluded)
+                              + list(cd_excluded)),
+            closes=closes, outcome="demo, published nowhere", failed=False)
+        write_report(report_base, "summary", report)
+        return report
 
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=OUT_HEADER, lineterminator="\n")
@@ -1788,63 +2178,85 @@ def main(argv=None) -> int:
     if a.kdb_check:
         return kdb_check(a.sample, a.venues)
 
-    if a.compare:
-        def read(path):
-            with open(path, newline="", encoding="utf-8-sig") as fh:
-                return list(csv.DictReader(fh))
-        if not Path(OUT_TEMP).is_file():
-            raise SystemExit(
-                f"nothing to compare against: {OUT_TEMP} does not exist.\n"
-                "--compare diffs the LAST run's output, it does not run the "
-                "job.  Run it first.")
-        def keep(rows):
-            #  The output carries the venue in a column, so the same
-            #  narrowing works on a file nobody is going to re-run.
-            return ([r for r in rows if r.get("Venue") in set(a.venues.split("|"))]
-                    if a.venues else rows)
-
-        old_rows, new_rows = read(a.compare), read(OUT_TEMP)
-        if a.venues:
-            print(f"--venues {a.venues}: comparing "
-                  f"{len(keep(old_rows))} old and {len(keep(new_rows))} new "
-                  f"rows of {len(old_rows)} and {len(new_rows)}")
-        used = read_closes_csv(Path(OUT_TEMP).parent / CLOSES_CSV)
-        if not used:
-            print(f"no {CLOSES_CSV} beside {OUT_TEMP}, so the close column "
-                  f"will be blank - it is written by a real run")
-        records = differences(keep(old_rows), keep(new_rows), used)
-        for d in records:
-            print(_line(d))
-        print(f"\n{len(records)} difference(s)")
-        print(f"written to {write_compare_report(a.report, records)}")
-        return 0
-
-    #  ONE MAIL PER RUN, success or failure, with the log attached.  Sent
-    #  after the log is closed so the attachment is the whole of it - and
-    #  from `finally`, so a crash or a startup check that stops the run is
-    #  mailed as FAILED rather than not mailed at all.
-    rc, log_path = 1, None
+    #  ONE MAIL PER RUN AND PER COMPARISON, success or failure, with the
+    #  log and the report attached.  Sent after the log is closed so the
+    #  attachment is the whole of it - and from `finally`, so a crash or a
+    #  startup check that stops the job is mailed as FAILED rather than not
+    #  mailed at all.
+    rc, log_path, result = 1, None, {"attach": []}
     try:
         with run_log(LOG_DIR) as log_path:
             print(f"log: {log_path}")
-            rc = run(a.envs, a.venues)
+            base = log_path.with_suffix("")
+            if a.compare:
+                rc = compare_job(a.compare, a.venues, a.report, base, result)
+            else:
+                rc = run(a.envs, a.venues, base, result)
     finally:
-        _mail_result(rc, log_path)
+        _mail_result(rc, log_path, result, "compare" if a.compare else "")
     return rc
 
 
-def _mail_result(rc, log_path):
+def compare_job(old_path, venues, report_path, report_base, result) -> int:
+    """--compare: the last run's output against another file - the legacy
+    job's, or yesterday's."""
+    def read(path):
+        with open(path, newline="", encoding="utf-8-sig") as fh:
+            return list(csv.DictReader(fh))
+    if not Path(OUT_TEMP).is_file():
+        raise SystemExit(
+            f"nothing to compare against: {OUT_TEMP} does not exist.\n"
+            "--compare diffs the LAST run's output, it does not run the "
+            "job.  Run it first.")
+    def keep(rows):
+        #  The output carries the venue in a column, so the same
+        #  narrowing works on a file nobody is going to re-run.
+        return ([r for r in rows if r.get("Venue") in set(venues.split("|"))]
+                if venues else rows)
+
+    old_rows, new_rows = read(old_path), read(OUT_TEMP)
+    if venues:
+        print(f"--venues {venues}: comparing "
+              f"{len(keep(old_rows))} old and {len(keep(new_rows))} new "
+              f"rows of {len(old_rows)} and {len(new_rows)}")
+    used = read_closes_csv(Path(OUT_TEMP).parent / CLOSES_CSV)
+    if not used:
+        print(f"no {CLOSES_CSV} beside {OUT_TEMP}, so the close column "
+              f"will be blank - it is written by a real run")
+    old_rows, new_rows = keep(old_rows), keep(new_rows)
+    records = differences(old_rows, new_rows, used)
+    for d in records:
+        print(_line(d))
+    print(f"\n{len(records)} difference(s)")
+    print(f"written to {write_compare_report(report_path, records)}")
+
+    sources = read_sources_csv(Path(OUT_TEMP).parent / SOURCES_CSV)
+    r = compare_report(old_path, OUT_TEMP, old_rows, new_rows, used,
+                       sources)
+    print(r["headline"])
+    paths = write_report(report_base, "compare", r)
+    result["attach"].extend(paths)
+    result["short"], result["headline"] = r["short"], r["headline"]
+    print(f"comparison written to {paths[0]} and {paths[1].name}")
+    return 0
+
+
+def _mail_result(rc, log_path, result=None, kind=""):
+    result = result or {}
     status = "SUCCEEDED" if rc == 0 else "FAILED"
-    body = (f"LimitUpDown {status} at {dt.datetime.now():%Y-%m-%d %H:%M:%S}."
-            f"\n\nThe log is attached"
-            + (f" and kept at {log_path}." if log_path else
-               " - except that it could not be written, so there is none.")
-            + "\n")
+    job = f"LimitUpDown {kind}".strip()
+    subject = f"{job} {status}" + (f" - {result['short']}"
+                                   if result.get("short") else "")
+    attach = [p for p in [log_path] + list(result.get("attach", []))
+              if p and Path(p).is_file()]
+    body = (f"{job} {status} at {dt.datetime.now():%Y-%m-%d %H:%M:%S}.\n\n"
+            + (result["headline"] + "\n\n" if result.get("headline") else "")
+            + ("Attached: " + ", ".join(Path(p).name for p in attach)
+               + ".\nOpen the .html in a browser for the full report.\n"
+               if attach else "No log could be written, so nothing is "
+                              "attached.\n"))
     try:
-        mailer.send(f"LimitUpDown {status}", body, SMTP_HOST, EMAIL_FROM,
-                    EMAIL_TO,
-                    log_path if log_path and Path(log_path).is_file()
-                    else None)
+        mailer.send(subject, body, SMTP_HOST, EMAIL_FROM, EMAIL_TO, attach)
     except Exception as e:                                  # noqa: BLE001
         #  The run has already happened; a mail server being down must not
         #  turn a good run into a failed one.
@@ -2823,6 +3235,106 @@ def self_test() -> int:
               True)
     shipped = marketcfg.load(Path(__file__).resolve().parent / "config",
                              Path(__file__).resolve().parent / "config")
+    print("\nthe run summary, over the whole demo pipeline")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp) / "LimitUpDown-20260924-073000"
+        rep = demo(report_base=base)
+        summary = {r[0]: r[1] for r in rep["sections"][0]["rows"]}
+        check("EVERY PRICED LINE IS ACCOUNTED FOR - published, or excluded "
+              "with a reason", summary["Accounted for"], "OK")
+        check("the CrossCode count is what was kept plus what was filtered",
+              summary["CrossCode lines"],
+              summary["Lines priced"]
+              + summary["Excluded while reading the CrossCode"])
+        rows_of = {s["title"]: s["rows"] for s in rep["sections"]}
+        check("the computed and Bloomberg tables add up to what was "
+              "published",
+              len(rows_of["Computed"]) + len(rows_of["From Bloomberg"]),
+              summary["Published"])
+        check("the not-published table carries both stages",
+              sorted({r[0] for r in rows_of["Not published"]}),
+              ["crosscode", "pricing"])
+        check("it lists the same lines the counts say",
+              len(rows_of["Not published"]),
+              summary["Not published after pricing"]
+              + summary["Excluded while reading the CrossCode"])
+        check("the per-venue table adds up to the same published count",
+              sum(r[2] for r in rows_of["Per venue"]), summary["Published"])
+        computed_codes = {r[1] for r in rows_of["Computed"]}
+        bbg_codes = {r[1] for r in rows_of["From Bloomberg"]}
+        check("a name is counted where it ENDED UP: Bloomberg did not "
+              "answer for 005930 KP, so it was computed",
+              ("005930 KP" in computed_codes, "005930 KP" in bbg_codes),
+              (True, False))
+        check("and NOCL CG had no close, so Bloomberg priced it",
+              ("NOCL CG" in bbg_codes, "NOCL CG" in computed_codes),
+              (True, False))
+        check("both files are written beside the log, named after it",
+              sorted(f.name for f in Path(tmp).iterdir()),
+              ["LimitUpDown-20260924-073000-summary.csv",
+               "LimitUpDown-20260924-073000-summary.html"])
+        #  A name lost without a reason must show, not be absorbed.
+        lost = run_report(
+            marketcfg.load(Path(__file__).resolve().parent / "config",
+                           Path(__file__).resolve().parent / "config"),
+            cc_rows=3, cc_excluded=[], narrowed=0, secondary=0, copies=0,
+            sources=[(_out_row(row("A.T", "A JT", "A"), Decimal(9),
+                               Decimal(11)), "bloomberg")],
+            pricing_excluded=[], closes={}, outcome="x", failed=False)
+        check("a line that vanished without a reason is a MISMATCH on the "
+              "first table", ({r[0]: r[1] for r in
+                               lost["sections"][0]["rows"]}["Accounted for"],
+                              lost["status"][0]), ("MISMATCH", "warn"))
+
+    print("\nthe comparison report")
+    bse = {"#ReutersCode": "RELI.BO", "BloombergCode": "500325 IB",
+           "LimitUpPrice": "1610", "LimitDownPrice": "1190",
+           "Venue": "BSE-MAIN"}
+    bse2 = dict(bse, Venue="BSE-SECONDARY")
+    check("A ROW IS MATCHED ON ITS VENUE TOO: a BSE-MAIN line missing from "
+          "the new file is not hidden by its BSE-SECONDARY copy, which "
+          "carries the same RIC",
+          [(d["status"], d["venue"]) for d in
+           differences([bse, bse2], [bse2])],
+          [("rowcount", "BSE-MAIN"), ("only_in_old", "BSE-MAIN")])
+    old_f = [{"#ReutersCode": "A.T", "BloombergCode": "A JT",
+              "LimitUpPrice": "110", "LimitDownPrice": "90",
+              "Venue": "TYO-MAIN"},
+             {"#ReutersCode": "B.T", "BloombergCode": "B JT",
+              "LimitUpPrice": "220", "LimitDownPrice": "180",
+              "Venue": "TYO-MAIN"},
+             {"#ReutersCode": "GONE.T", "BloombergCode": "GONE JT",
+              "LimitUpPrice": "5", "LimitDownPrice": "3",
+              "Venue": "TYO-MAIN"}]
+    new_f = [dict(old_f[0], LimitUpPrice="110.0"),
+             dict(old_f[1], LimitUpPrice="230", LimitDownPrice="170"),
+             {"#ReutersCode": "NEW.KS", "BloombergCode": "NEW KS",
+              "LimitUpPrice": "13", "LimitDownPrice": "7",
+              "Venue": "KSC-MAIN"}]
+    cr = compare_report("old.csv", "new.csv", old_f, new_f,
+                        {"B.T": "200"}, {"B.T": "computed",
+                                         "NEW.KS": "bloomberg"})
+    cs = {r[0]: r[1] for r in cr["sections"][0]["rows"]}
+    check("how many differ in each price, and 110 against 110.0 is not one",
+          (cs["LimitUpPrice differs"], cs["LimitDownPrice differs"]), (1, 1))
+    check("only in old and only in new are counted",
+          (cs["Only in old"], cs["Only in new"]), (1, 1))
+    check("identical counts the stocks in both with both prices equal",
+          cs["Identical"], "1 (50%)")
+    cm = {r[0]: r for r in cr["sections"][1]["rows"]}
+    check("per market: old and new rows, and where the differences are",
+          (cm["TYO-MAIN"][1:], cm["KSC-MAIN"][1:]),
+          ([3, 2, "-1", 1, 0, 1, 1], [0, 1, "+1", 0, 1, 0, 0]))
+    diffs = cr["sections"][2]["rows"]
+    check("a difference line carries the source, the close and the move",
+          diffs[0], ["TYO-MAIN", "B JT", "B.T", "computed", "200",
+                     "LimitUpPrice", "220", "230", "+4.55%"])
+    check("the only-in lists name the stocks, and the new one its source",
+          (cr["sections"][3]["rows"][0][:3], cr["sections"][4]["rows"][0][-1]),
+          (["GONE.T", "GONE JT", "TYO-MAIN"], "bloomberg"))
+    check("and a difference makes the status a warning", cr["status"],
+          ("warn", "3 stocks differ"))
+
     names = [p.name for p in input_files(shipped)]
     check("the list covers the crosscode, the .tsr and India's .stra files "
           "- not markets.csv or bands.csv",

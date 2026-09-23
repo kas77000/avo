@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The run's result by email: SUCCEEDED or FAILED, with the log attached.
+"""The run's result by email: SUCCEEDED or FAILED, with the log and the
+sanity-check reports attached.
 
 Plain text, one message, no templates.  The XML MailConfigurationList the R
 job used carried nine named templates; every one of them said "something
@@ -18,26 +19,31 @@ from email.message import EmailMessage
 from pathlib import Path
 
 
+#  By extension; anything else goes as plain text, which is what a .log is.
+SUBTYPES = {".html": "html", ".csv": "csv"}
+
+
 def build(subject: str, body: str, sender: str, to,
-          attachment=None) -> EmailMessage:
+          attachments=()) -> EmailMessage:
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = sender
     msg["To"] = ", ".join(to)
     msg.set_content(body)
-    if attachment is not None:
+    for attachment in attachments:
         path = Path(attachment)
         msg.add_attachment(path.read_text(encoding="utf-8", errors="replace"),
+                           subtype=SUBTYPES.get(path.suffix.lower(), "plain"),
                            filename=path.name)
     return msg
 
 
 def send(subject: str, body: str, host: str, sender: str, to,
-         attachment=None) -> None:
+         attachments=()) -> None:
     if not to or not host or host == "CHANGEME":
         return
     with smtplib.SMTP(host) as s:
-        s.send_message(build(subject, body, sender, to, attachment))
+        s.send_message(build(subject, body, sender, to, attachments))
 
 
 # =============================================================================
@@ -61,14 +67,19 @@ def self_test() -> int:
     check("recipients are joined", m["To"], "a@x, b@x")
     check("the body", m.get_content(), "body\n")
 
-    print("\nattaching the log")
+    print("\nattaching the log and the reports")
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         log = Path(d) / "LimitUpDown-20260923-070509.log"
         log.write_text("line one\nline two\n", encoding="utf-8")
-        m = build("s", "body\n", "f@x", ["a@x"], log)
+        page = Path(d) / "LimitUpDown-20260923-070509-summary.html"
+        page.write_text("<p>x</p>", encoding="utf-8")
+        m = build("s", "body\n", "f@x", ["a@x"], [log, page])
         parts = list(m.iter_attachments())
-        check("one attachment", len(parts), 1)
+        check("both attached", len(parts), 2)
+        check("the log as text and the report as html",
+              [p.get_content_type() for p in parts],
+              ["text/plain", "text/html"])
         check("named after the log", parts[0].get_filename(), log.name)
         check("carrying the log's text", parts[0].get_content(),
               "line one\nline two\n")

@@ -353,7 +353,7 @@ to see once. The cheap, fragile side now fails fast.
 python bands.py --self-test        python marketcfg.py --self-test
 python ticks.py --self-test        python crosscode.py --self-test
 python bpipe.py --self-test        python mailer.py --self-test
-python india.py --self-test
+python india.py --self-test         python sanity.py --self-test
 ```
 
 ## First run
@@ -710,6 +710,45 @@ saved the row.
 
 A name that fails both keeps both halves: `no data from Bloomberg, then no
 previous close in equity_master`.
+
+### The sanity-check reports
+
+Two reports, each a CSV and a dark-mode HTML page, written to `LOG_DIR` beside
+the log and named after it, and attached to the mail with it. The HTML opens
+offline in any browser; every long table has a filter box. The CSV is the same
+tables in one file, each opened by a `## Title` row.
+
+**After every run — `LimitUpDown-YYYYMMDD-HHMMSS-summary.html` / `.csv`:**
+
+| Table | What it says |
+|---|---|
+| Summary | CrossCode lines, excluded on reading, lines priced, published, computed and Bloomberg with their %, not published — and **Accounted for** |
+| Per venue | published / computed / Bloomberg / not priced / excluded at CrossCode |
+| Why lines were not published | each reason, its stage and how many lines |
+| Not published | every line, with stage (`crosscode` or `pricing`), reason and detail |
+| Computed | every computed stock, with the close it came from |
+| From Bloomberg | every stock priced off B-PIPE |
+
+**Accounted for** is the check: every line priced — the universe, India's BSE
+listings and their BSE-SECONDARY copies — must be published or excluded with a
+reason. If one vanished without a reason it reads `MISMATCH`. A stock is counted
+by the path it ended on, as in `sources.csv`. The summary is written on every
+way out of a priced run, including a failed validation or copy, where it shows
+`FAILED`.
+
+**After every `--compare` — `LimitUpDown-YYYYMMDD-HHMMSS-compare.html` / `.csv`:**
+
+| Table | What it says |
+|---|---|
+| Summary | rows in old and new, in both, only in old, only in new, how many differ in `LimitUpPrice` and in `LimitDownPrice`, identical |
+| Per market | old and new rows per venue, the change, and where the differences are |
+| Differences | one line per price that moved: source, close, old, new, % change |
+| Only in old / Only in new | the stocks themselves |
+
+`--compare` now has its own log and mail too: `LimitUpDown compare SUCCEEDED -
+3 stocks differ`, with the numbers in the body. Rows are matched on
+`#ReutersCode` **and** `Venue` — the RIC alone let a BSE-MAIN row missing from
+one file hide behind its BSE-SECONDARY copy, which carries the same RIC.
 
 ### The run log, and how each name was priced
 
