@@ -165,6 +165,44 @@ def plan(names, partitions, out_dir, backfill, cache=None,
     return {"by_date": dict(sorted(by_date.items())), "per_name": per_name}
 
 
+#  What the demo pretends kdb is stamped in, and settings.py's default: the
+#  plant's own clock.
+DEMO_ZONE = "China Standard Time"
+
+
+def shift_for(markets, source_zone, log=None):
+    """(date, name) -> seconds to move kdb's clock into the name's market.
+
+    KDB STAMPS EVERY PRINT IN ONE ZONE - the plant's, Hong Kong - and each
+    file is read as the exchange's own local time; its seventh header cell
+    says which.  So the two are reconciled here, per market and per date,
+    and a market with no TimeZone in config/markets.csv is left alone and
+    said so once.
+
+    Cached per (market, date): a run is thousands of names over tens of
+    days, and a handful of markets."""
+    seen, quiet = {}, set()
+
+    def shift(date, name):
+        market = venue_of(name)
+        key = (market, date)
+        if key in seen:
+            return seen[key]
+        target = marketcfg.tz_of(markets, market)
+        if not target:
+            if log and market not in quiet:
+                quiet.add(market)
+                log.warn(f"{market or '(no market)'} has no TimeZone in "
+                         f"config/markets.csv: its files keep kdb's clock, "
+                         f"{source_zone}")
+            seen[key] = 0
+            return 0
+        seen[key] = marketcfg.shift_seconds(date, source_zone, target)
+        return seen[key]
+
+    return shift
+
+
 def venue_of(name) -> str:
     """The FidessaMarket of the crosscode row that names the folder - the
     zip a name's files go into under --compress_venues."""
@@ -282,7 +320,7 @@ def connect_again(host, port, log, tries=6, wait=10.0):
 
 def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
         log=None, live_conn=None, live_date=None, cols=None,
-        reconnect=None, live_cols=None, depth=3) -> dict:
+        reconnect=None, live_cols=None, depth=3, shift_of=None) -> dict:
     """Extract, transform, load - three stages at once, one chunk apiece.
 
         extract    this thread's own kdb connection; asks for one chunk,
@@ -304,6 +342,11 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
     miss cache INSTEAD - not an empty file.  Today (--today, live_date) is
     asked of the RDB and never cached as a miss: a session still running is
     not an answer.
+
+    THE CLOCK IS THE NAME'S, NOT THE CHUNK'S.  kdb stamps every print in
+    one zone and each file carries its own market's - see shift_for() - so
+    shape() hands the time on as seconds and the load stage formats it with
+    that name's shift.  shift_of(date, name) -> seconds.
 
     A READ THAT IS TOO BIG IS HALVED, NOT FATAL.  reconnect(live) opens a
     fresh connection - a reset socket is dead - and the same syms are asked
@@ -415,10 +458,14 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
                     t0 = time.monotonic()
                     by_sym = qattsource.shape(raw)
                     del raw
-                    #  The MIC is the last cell of every row, and it is the
-                    #  name's, so two names on one sym get their own rows.
-                    files = [(n, [r + (n.mic,) for r in by_sym.get(n.sym, ())])
-                             for n in names]
+                    #  The MIC and the clock are both the NAME's, so two
+                    #  names on one sym get their own rows either way.
+                    files = []
+                    for n in names:
+                        stamp = qattsource.clock_maker(
+                            shift_of(date, n) if shift_of else 0)
+                        files.append((n, [(stamp(r[0]),) + r[1:] + (n.mic,)
+                                          for r in by_sym.get(n.sym, ())]))
                     del by_sym
                     item = (kind, date, live, files, label, t_read,
                             time.monotonic() - t0)
@@ -791,7 +838,13 @@ def trace(cfg, a, log=None) -> int:
         else:
             log.kv("the assumed columns", "all present")
 
-    fetched = qattsource.fetch_ticks(conn, date, [n.sym for n in names])
+    shift_of = shift_for(markets, cfg["KDB_TIMEZONE"], log)
+    for n in names:
+        log.kv("clock", f"{cfg['KDB_TIMEZONE']} -> "
+                        f"{marketcfg.tz_of(markets, venue_of(n)) or '(none)'}",
+               f"{shift_of(date, n) / 3600:+.1f}h on {date}")
+    fetched = qattsource.fetch_ticks(conn, date, [n.sym for n in names],
+                                     shift=shift_of(date, names[0]))
     for n in names:
         got = fetched.get(n.sym, [])
         log.kv("rows returned", logs.thousands(len(got)), n.sym)
@@ -1016,8 +1069,24 @@ def main(argv=None) -> int:
     def reconnect(live):
         return connect_again(*(rdb if live else (q_host, q_port)), log=log)
 
+    source_zone = cfg["KDB_TIMEZONE"]
+    try:
+        shift_of = shift_for(markets, source_zone, log)
+        sample = sorted({(marketcfg.tz_of(markets, venue_of(n)),
+                          shift_of(parts[-1], n)) for n in names})
+    except ValueError as e:
+        log.fail(str(e))
+        return 1
+    log.kv("kdb's clock", source_zone, "KDB_TIMEZONE; every print is stamped "
+                                       "in it")
+    for target, secs in sample:
+        log.kv("  -> " + (target or "(no TimeZone, left as kdb has it)"),
+               f"{secs // 3600:+d}h" if secs % 3600 == 0
+               else f"{secs / 3600:+.1f}h", f"on {parts[-1]}")
+
     stats = run(conn, plan_, markets, out_dir, chunk, a.dry_run, cache, log,
-                live_conn, today, cols, reconnect, live_cols)
+                live_conn, today, cols, reconnect, live_cols,
+                shift_of=shift_of)
     if not a.dry_run:
         n = misscache.save(miss_path, cache)
         log.kv("miss cache now", f"{logs.thousands(n)} pairs", str(miss_path))
@@ -1143,7 +1212,8 @@ def demo() -> int:
         cache = {}
         print("\n--- first run: nothing on disk, so everything backfills ---")
         plan_ = plan(names, parts, out, 2, cache)
-        stats = run(conn, plan_, markets, out, 200, False, cache, dlog)
+        stats = run(conn, plan_, markets, out, 200, False, cache, dlog,
+                    shift_of=shift_for(markets, DEMO_ZONE))
         log_universe(rows, names, list(dropped) + excluded, tally, dlog)
         log_plan(plan_, dlog)
         log_result(stats, False, dlog)
@@ -1167,7 +1237,8 @@ def demo() -> int:
 
         print("\n--- second run, same day: everything is up to date ---")
         plan2 = plan(names, parts, out, 2, cache)
-        stats2 = run(conn, plan2, markets, out, 200, False, cache, dlog)
+        stats2 = run(conn, plan2, markets, out, 200, False, cache, dlog,
+                     shift_of=shift_for(markets, DEMO_ZONE))
         log_plan(plan2, dlog)
         log_result(stats2, False, dlog)
         print("  ZZZ SP was not re-queried: the cache says it was asked and "
@@ -1176,7 +1247,8 @@ def demo() -> int:
         print("\n--- a new day arrives ---")
         parts3 = parts + [dt.date(2026, 9, 4)]
         plan3 = plan(names, parts3, out, 2, cache)
-        stats3 = run(conn, plan3, markets, out, 200, False, cache, dlog)
+        stats3 = run(conn, plan3, markets, out, 200, False, cache, dlog,
+                     shift_of=shift_for(markets, DEMO_ZONE))
         log_plan(plan3, dlog)
         log_result(stats3, False, dlog)
 
@@ -1542,6 +1614,59 @@ def self_test() -> int:
     check("'wsfull and 'limit read as too big too",
           (too_big(Exception("wsfull")), too_big(Exception("limit")),
            too_big(Exception("type"))), (True, True, False))
+
+    print("\nkdb's clock is Hong Kong's; the file carries the market's")
+
+    class R0:
+        def __init__(self, bbg, market):
+            self.bbg, self.market = bbg, market
+
+    HK = "China Standard Time"
+    shift_of = shift_for(MK, HK)
+    tokyo, mumbai = N("7203 JT", "7203.JP"), N("RELIANCE IS", "RELIANCE.IN")
+    sydney, home = N("BHP AU", "BHP.AU"), N("5 HK", "5.HK")
+    tokyo.rows = (R0("7203 JT", "TYO-MAIN"),)
+    mumbai.rows = (R0("RELIANCE IS", "NSI-MAIN"),)
+    sydney.rows = (R0("BHP AU", "ASX-MAIN"),)
+    home.rows = (R0("5 HK", "HKG-MAIN"),)
+    check("Tokyo is an hour ahead of the plant",
+          shift_of(D(2026, 9, 3), tokyo), 3600)
+    check("Mumbai two and a half behind",
+          shift_of(D(2026, 9, 3), mumbai), -9000)
+    check("Hong Kong itself does not move at all",
+          shift_of(D(2026, 9, 3), home), 0)
+    check("SYDNEY FOLLOWS ITS DAYLIGHT SAVING, so the same market is +2 in "
+          "July and +3 in January - which is why the date decides and a "
+          "fixed offset per market would be wrong",
+          (shift_of(D(2026, 7, 15), sydney), shift_of(D(2026, 1, 15), sydney)),
+          (7200, 10800))
+
+    with tempfile.TemporaryDirectory() as d:
+        day = D(2026, 9, 3)
+
+        class AtNine:
+            """kdb answers 09:00 Hong Kong for every name."""
+
+            def __call__(self, q, date, syms):
+                return [{"sym": s, qattsource.TIME_FIELD:
+                         dt.timedelta(hours=9), "price": 1.5, "size": 100,
+                         "cond": "T", "ex": "T"} for s in syms]
+
+        run(AtNine(), plan([tokyo, mumbai, home], [day], d, 1, {}), MK, d,
+            10, False, {}, shift_of=shift_of)
+
+        def first(name):
+            return ticksfile.path(d, name.crosscode_bbg, name.bbg, day) \
+                .read_text(encoding="utf-8").splitlines()[1].split(",")[0]
+
+        check("one 09:00 print from kdb is 10:00 in Tokyo's file",
+              first(tokyo), "10:00:00")
+        check("06:30 in Mumbai's", first(mumbai), "06:30:00")
+        check("and 09:00 in Hong Kong's own", first(home), "09:00:00")
+        check("the header still names the zone the times are now in",
+              ticksfile.path(d, tokyo.crosscode_bbg, tokyo.bbg, day)
+              .read_text(encoding="utf-8").splitlines()[0].split(",")[-1],
+              "Tokyo Standard Time")
 
     print("\n--compress_venues, end to end")
 

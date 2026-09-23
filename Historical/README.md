@@ -160,6 +160,36 @@ filled in for all 21 markets - `TYO-MAIN` is `Tokyo Standard Time`. The values
 are **Windows timezone ids**, so the consumer can look them up; several are
 named after one city and cover its neighbours. See `marketcfg.py`.
 
+## The file is written in its market's clock
+
+kdb stamps every print in **one** zone — the plant's, Hong Kong — and each file
+is read as the exchange's own local time, which its seventh header cell names.
+So every time is converted on the way out:
+
+```
+09:00 in kdb   ->   10:00 Tokyo        +1h
+               ->   06:30 Mumbai       -2.5h
+               ->   09:00 Hong Kong     0
+```
+
+- **The source zone is `KDB_TIMEZONE`**, `China Standard Time` by default;
+  override it in `local_settings.py` if the plant clock ever moves.
+- **The target is the market's own `TimeZone`** from `config/markets.csv`. A
+  market with none is left in kdb's clock and says so once.
+- **Daylight saving is followed, not assumed.** Sydney is +3 from Hong Kong in
+  January and +2 in July, so the offset is taken per market **and per date**,
+  at midday in both zones. Transitions happen in the small hours of a Sunday,
+  when no session is running, so no trading day needs two offsets.
+- **The clock wraps at midnight**: the file carries a time of day, not an
+  instant, and keeps the partition's date in its name.
+- The run prints each market's offset for the newest date, so a wrong source
+  zone is visible in the log rather than only in the files.
+
+Every Windows id in `markets.csv` is paired with a tz database name in
+`marketcfg.IANA_OF`; a market added with an id that is not there is **refused
+by name** rather than written in the wrong clock. On Windows the tz database
+comes from the `tzdata` package — it is in `requirements.txt`.
+
 ## Running
 
 ```

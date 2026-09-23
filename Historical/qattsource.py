@@ -403,13 +403,32 @@ def to_time(value):
     return dt.time(h, m, s, ms * 1000)
 
 
-def clock(value) -> str:
+def clock(value, shift: int = 0) -> str:
     """A time as the CSV writes it: zero padded, to the second.
 
     Excel renders 09:31:33 and 9:31:33 identically, and the padded form is
-    the one that sorts as text, so it is the one written."""
+    the one that sorts as text, so it is the one written.
+
+    `shift` moves the reading into another zone - see marketcfg.shift_seconds
+    - and wraps at midnight, because the file carries a clock and not an
+    instant."""
     t = to_time(value)
-    return t.strftime("%H:%M:%S") if t else ""
+    if t is None:
+        return ""
+    return hms((t.hour * 3600 + t.minute * 60 + t.second + shift) % 86_400)
+
+
+def hms(secs: int) -> str:
+    return f"{secs // 3600:02d}:{secs // 60 % 60:02d}:{secs % 60:02d}"
+
+
+def clock_maker(shift: int = 0):
+    """secs-of-day (or None) -> the cell, remembering each distinct one.
+
+    One name's day has thousands of prints and at most 86,400 distinct
+    seconds, and the shift is the name's own - so the formatting is done
+    per name, after shape() has reduced the column to seconds."""
+    return _memo(lambda s: "" if s is None else hms((s + shift) % 86_400))
 
 
 # =============================================================================
@@ -583,7 +602,8 @@ def _master_row(row) -> dict:
     return {f: text(row.get(f)) for f in MASTER_FIELDS}
 
 
-def fetch_ticks(conn, date, syms, time_field: str = None, cols=None) -> dict:
+def fetch_ticks(conn, date, syms, time_field: str = None, cols=None,
+                shift: int = 0) -> dict:
     """Every print for these syms on this date, grouped by sym.
 
     One round trip for the whole chunk.  The caller decides the chunk size:
@@ -595,7 +615,7 @@ def fetch_ticks(conn, date, syms, time_field: str = None, cols=None) -> dict:
     field = time_field or TIME_FIELD
     for row in _rows(conn(ticks_q(field, cols), date, list(syms))):
         out.setdefault(text(row.get("sym")), []).append({
-            "time": clock(row.get(field)),
+            "time": clock(row.get(field), shift),
             "price": to_decimal(row.get("price")),
             "size": to_decimal(row.get("size")),
             "cond": text(row.get("cond")),
@@ -658,14 +678,18 @@ def _memo(fn):
     return f
 
 
-def _clock_column(src, field) -> list:
-    """The time column as the file writes it, "HH:MM:SS" or "".
+def _second_column(src, field) -> list:
+    """The time column as seconds of day, or None.
 
     THE ONE COLUMN THE MEMO CANNOT HELP.  Nearly every print has its own
     millisecond, so there is nothing to share - and boxing each one into a
     pandas Timedelta just to call clock() on it was most of the transform.
     A kdb time or timespan (timedelta64) or timestamp (datetime64) is cut to
     whole seconds in numpy instead, and there are at most 86,400 of those.
+
+    Seconds rather than text because the zone conversion is the NAME's, and
+    a chunk holds many names: clock_maker() stamps each name's rows with its
+    own shift, once per distinct second.
 
     The rules are clock()'s, reproduced: a duration is truncated to the
     millisecond and must fall inside one day; a timestamp is its time of
@@ -675,7 +699,7 @@ def _clock_column(src, field) -> list:
            else None)
     kind = col.dtype.kind if col is not None else ""
     if kind not in ("m", "M") or getattr(col.dt, "tz", None) is not None:
-        return list(map(_memo(clock), _columns_of(src, (field,))[field]))
+        return list(map(_memo(_seconds_of), _columns_of(src, (field,))[field]))
     import numpy as np
     #  TO NANOSECONDS EXPLICITLY.  pandas 2 keeps the unit the data arrived
     #  in - a kdb time column comes back as timedelta64[ms] - and reading
@@ -686,7 +710,7 @@ def _clock_column(src, field) -> list:
         ns = col.to_numpy(dtype=f"{'timedelta' if kind == 'm' else 'datetime'}"
                                 f"64[ns]").view("i8")
     except (ValueError, OverflowError):     # pandas' OutOfBounds is a ValueError
-        return list(map(_memo(clock), _columns_of(src, (field,))[field]))
+        return list(map(_memo(_seconds_of), _columns_of(src, (field,))[field]))
     null = col.isna().to_numpy()
     if kind == "m":
         #  int(total_seconds() * 1000) truncates toward zero.
@@ -696,30 +720,39 @@ def _clock_column(src, field) -> list:
     else:
         secs = (ns % 86_400_000_000_000) // 1_000_000_000
         bad = null
-    secs = np.where(bad, -1, secs)
-    hms = _memo(lambda s: "" if s < 0 else
-                f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}")
-    return list(map(hms, secs.tolist()))
+    return [None if b else int(v)
+            for b, v in zip(bad.tolist(), secs.tolist())]
+
+
+def _seconds_of(value):
+    """One value the fast path cannot take in bulk, as seconds of day."""
+    t = to_time(value)
+    return None if t is None else t.hour * 3600 + t.minute * 60 + t.second
 
 
 def shape(result, time_field: str = None) -> dict:
-    """TRANSFORM: {sym: [(time, price, size, cond, ex), ...]}, as text.
+    """TRANSFORM: {sym: [(seconds of day, price, size, cond, ex), ...]}.
+
+    Everything but the time is the cell the file carries.  The time stays a
+    number until the load stage, which knows which name - and so which
+    zone - each row belongs to; clock_maker() turns it into the cell.
 
     Byte for byte what fetch_ticks + ticksfile.write produce - the same
-    clock, to_decimal and text, and the same number formatting - but a
-    column at a time and each distinct value once, instead of a dict and a
-    Decimal for every print.  The self-test holds the two paths together."""
+    to_decimal, text and number formatting, and the same clock once
+    clock_maker has stamped it - but a column at a time and each distinct
+    value once, instead of a dict and a Decimal for every print.  The
+    self-test holds the two paths together."""
     from ticksfile import _num, condition
     field = time_field or TIME_FIELD
     src = _frame(result)
     c = _columns_of(src, ("sym",) + TICK_FIELDS)
-    clocks = _clock_column(src, field)
+    seconds = _second_column(src, field)
     del src
     num = _memo(lambda v: _num(to_decimal(v)))
     txt = _memo(text)
     out = {}
     for sym, row in zip(map(txt, c["sym"]),
-                        zip(clocks,
+                        zip(seconds,
                             map(num, c["price"]), map(num, c["size"]),
                             map(_memo(lambda v: condition(text(v))),
                                 c["cond"]), map(txt, c["ex"]))):
@@ -727,7 +760,8 @@ def shape(result, time_field: str = None) -> dict:
     return out
 
 
-def fetch_live_ticks(conn, syms, time_field: str = None, cols=None) -> dict:
+def fetch_live_ticks(conn, syms, time_field: str = None, cols=None,
+                     shift: int = 0) -> dict:
     """Today's prints for these syms, from the RDB.  No date, either sent or
     returned - the table is today."""
     if not syms:
@@ -736,7 +770,7 @@ def fetch_live_ticks(conn, syms, time_field: str = None, cols=None) -> dict:
     field = time_field or TIME_FIELD
     for row in _rows(conn(live_ticks_q(field, cols), list(syms))):
         out.setdefault(text(row.get("sym")), []).append({
-            "time": clock(row.get(field)),
+            "time": clock(row.get(field), shift),
             "price": to_decimal(row.get("price")),
             "size": to_decimal(row.get("size")),
             "cond": text(row.get("cond")),
@@ -1154,16 +1188,21 @@ def self_test() -> int:
             import pandas
             return pandas.DataFrame(self.rows)
 
-    def both(raw, label):
+    def stamp(rows, shift=0):
+        """What the load stage makes of shape()'s rows."""
+        fmt = clock_maker(shift)
+        return [(fmt(r[0]),) + r[1:] + ("XTKS",) for r in rows]
+
+    def both(raw, label, shift=0):
         with tempfile.TemporaryDirectory() as d:
-            old = fetch_ticks(lambda q, *a: raw, None, ["x"])
+            old = fetch_ticks(lambda q, *a: raw, None, ["x"], shift=shift)
             new = shape(raw)
             check(f"{label}: the same syms", sorted(new), sorted(old))
             same = True
             for sym in old:
                 a, b = Path(d) / "old.csv", Path(d) / "new.csv"
                 ticksfile.write(a, old[sym], "XTKS", "Tokyo Standard Time")
-                ticksfile.write_rows(b, [r + ("XTKS",) for r in new[sym]],
+                ticksfile.write_rows(b, stamp(new[sym], shift),
                                      "Tokyo Standard Time")
                 same = same and a.read_bytes() == b.read_bytes()
             check(f"{label}: and every file byte for byte", same, True)
@@ -1212,8 +1251,9 @@ def self_test() -> int:
         stamps = pd.to_datetime(["2026-09-04 09:15:00", "2026-09-04 12:00:00",
                                  None]).values
 
-        def times(col):
-            return [r[0] for r in shape(Table(pd.DataFrame(
+        def times(col, shift=0):
+            fmt = clock_maker(shift)
+            return [fmt(r[0]) for r in shape(Table(pd.DataFrame(
                 {"sym": ["A"] * 3, F: col, "price": [1.0] * 3,
                  "size": [1] * 3, "cond": [""] * 3, "ex": [""] * 3})))["A"]]
 
@@ -1222,9 +1262,27 @@ def self_test() -> int:
                   times(base.astype(f"timedelta64[{unit}]")), want)
             check(f"a kdb timestamp as datetime64[{unit}]",
                   times(stamps.astype(f"datetime64[{unit}]")), want)
+        print("\nkdb's clock moved into the market's")
+        check("Hong Kong to Tokyo is an hour on", times(base, 3600),
+              ["10:15:00", "13:00:00", ""])
+        check("and to Mumbai, two and a half back",
+              times(base, -9000), ["06:45:00", "09:30:00", ""])
+        check("a print near midnight wraps rather than running off the "
+              "end of the day",
+              times(np.array([82_800_000_000_000, 3_600_000_000_000,
+                              0], dtype="timedelta64[ns]"), 7200),
+              ["01:00:00", "03:00:00", "02:00:00"])
+        both(Table(awkward), "a shifted file, both paths", shift=3600)
     except ImportError:
         pass
+
     check("an empty answer is no syms", shape([]), {})
+    check("a shift moves the slow path's clock the same way",
+          clock(dt.timedelta(hours=9), 3600), "10:00:00")
+    check("and wraps at midnight there too",
+          clock(dt.time(23, 30), 3600), "00:30:00")
+    check("nothing is still nothing, shifted or not",
+          (clock(None, 3600), clock_maker(3600)(None)), ("", ""))
     m = _memo(repr)
     check("the memo tells 1 from 1.0", (m(1), m(1.0), m(1)),
           ("1", "1.0", "1"))

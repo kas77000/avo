@@ -37,6 +37,9 @@ DEFAULTS = {
     "MISS_CACHE_PATH": "",
 
     "BACKFILL_DAYS": 60,     # how deep a name with no files goes
+    #  The zone kdb stamps its prints in - the plant's, Hong Kong.  Every
+    #  file is written in its own market's clock instead; see marketcfg.
+    "KDB_TIMEZONE": "China Standard Time",
     "SYM_CHUNK": 200,        # syms per qatt round trip
     "MASTER_CHUNK": 5000,    # codes per equity_master round trip
 }

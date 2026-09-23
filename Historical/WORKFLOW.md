@@ -183,6 +183,15 @@ formatted once, and the time column is cut to whole seconds in numpy.
 > right length, with the right prices and volumes, and **every timestamp
 > shifted by hours**.
 
+**The clock is converted on the way out.** kdb stamps every print in one zone
+— `KDB_TIMEZONE`, the plant's Hong Kong clock — and each file carries its own
+market's, the one its seventh header cell names. The offset is taken per
+market **and per date**, at midday in both zones, so Sydney's daylight saving
+is followed (+3 from Hong Kong in January, +2 in July) rather than assumed. A
+market with no `TimeZone` in `config/markets.csv` keeps kdb's clock and is
+said so once. Times wrap at midnight: the file carries a time of day, and its
+name keeps the partition's date.
+
 ---
 
 ## 6. Write

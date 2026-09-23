@@ -4,3 +4,4 @@
 # every module that is not qattsource.py - run on a machine with no kdb and
 # no q licence.
 pykx        # qattsource.py - the historical ticks out of qatt
+tzdata      # marketcfg.py - the tz database; windows python carries none
