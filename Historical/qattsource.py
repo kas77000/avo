@@ -677,7 +677,16 @@ def _clock_column(src, field) -> list:
     if kind not in ("m", "M") or getattr(col.dt, "tz", None) is not None:
         return list(map(_memo(clock), _columns_of(src, (field,))[field]))
     import numpy as np
-    ns = col.to_numpy().view("i8")
+    #  TO NANOSECONDS EXPLICITLY.  pandas 2 keeps the unit the data arrived
+    #  in - a kdb time column comes back as timedelta64[ms] - and reading
+    #  those counts as nanoseconds made every print 00:00:00.  A range no
+    #  nanosecond count can hold (a date past 2262, which no tick has) falls
+    #  back to clock() itself rather than guessing.
+    try:
+        ns = col.to_numpy(dtype=f"{'timedelta' if kind == 'm' else 'datetime'}"
+                                f"64[ns]").view("i8")
+    except (ValueError, OverflowError):     # pandas' OutOfBounds is a ValueError
+        return list(map(_memo(clock), _columns_of(src, (field,))[field]))
     null = col.isna().to_numpy()
     if kind == "m":
         #  int(total_seconds() * 1000) truncates toward zero.
@@ -1186,6 +1195,34 @@ def self_test() -> int:
              "a datetime64 column - a kdb timestamp - with a NaT")
     except ImportError:
         print("  (pandas not installed - the pykx path was not checked)")
+    try:
+        import numpy as np
+        import pandas as pd
+
+        print("\nthe time column, in every unit pandas may hand back")
+        #  THE BUG THIS EXISTS FOR.  pandas 2 keeps the unit the data came
+        #  in - pykx gives a kdb time column as timedelta64[ms] - and
+        #  _clock_column read those counts as nanoseconds.  Every print in
+        #  every file came out 00:00:00.
+        want = ["09:15:00", "12:00:00", ""]
+        base = (np.array([33_300_000, 43_200_000, 0], dtype="int64")
+                * 1_000_000).astype("timedelta64[ns]")
+        base[2] = np.timedelta64("NaT")
+        stamps = pd.to_datetime(["2026-09-04 09:15:00", "2026-09-04 12:00:00",
+                                 None]).values
+
+        def times(col):
+            return [r[0] for r in shape(Table(pd.DataFrame(
+                {"sym": ["A"] * 3, F: col, "price": [1.0] * 3,
+                 "size": [1] * 3, "cond": [""] * 3, "ex": [""] * 3})))["A"]]
+
+        for unit in ("ns", "us", "ms", "s"):
+            check(f"a kdb time as timedelta64[{unit}]",
+                  times(base.astype(f"timedelta64[{unit}]")), want)
+            check(f"a kdb timestamp as datetime64[{unit}]",
+                  times(stamps.astype(f"datetime64[{unit}]")), want)
+    except ImportError:
+        pass
     check("an empty answer is no syms", shape([]), {})
     m = _memo(repr)
     check("the memo tells 1 from 1.0", (m(1), m(1.0), m(1)),
