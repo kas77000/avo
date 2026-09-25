@@ -4,7 +4,8 @@ Standard library only, so it runs on a box where nothing is installed.
 
     python kdb_ping.py host1:5001 host2:5002
     python kdb_ping.py -f targets.txt            # one host:port per line, # comments
-    python kdb_ping.py -u user:pass host1:5001
+    python kdb_ping.py -u user host1:5001        # user, no password
+    python kdb_ping.py -u user -p secret host1:5001
 
 For each target it opens a TCP socket, then does the kdb handshake
 ("user:pass" + capability byte + NUL; kdb answers with one byte).
@@ -52,7 +53,8 @@ def main():
     ap.add_argument("targets", nargs="*", help="host:port")
     ap.add_argument("-f", "--file", help="file with one host:port per line")
     ap.add_argument("-u", "--user", default=getpass.getuser(),
-                    help="user or user:pass for the handshake (default: login name)")
+                    help="user for the handshake (default: login name)")
+    ap.add_argument("-p", "--password", help="password for the handshake (default: none)")
     ap.add_argument("-t", "--timeout", type=float, default=3.0, help="seconds (default 3)")
     args = ap.parse_args()
 
@@ -64,10 +66,14 @@ def main():
     if not targets:
         ap.error("no targets given")
 
-    print("from %s as %s" % (socket.gethostname(), args.user.split(":")[0]))
+    creds = args.user
+    if args.password:
+        creds += ":" + args.password
+
+    print("from %s as %s" % (socket.gethostname(), args.user))
     all_ok = True
     for host, port in targets:
-        status, detail = ping(host, port, args.user, args.timeout)
+        status, detail = ping(host, port, creds, args.timeout)
         all_ok &= status == "OK"
         print("%-9s %s:%d  %s" % (status, host, port, detail))
     sys.exit(0 if all_ok else 1)
