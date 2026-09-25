@@ -1,0 +1,38 @@
+# Copy to local_settings.py and fill in.  local_settings.py is gitignored.
+#
+# ONE PER MACHINE.  Fill in only what the script on this machine uses; the
+# rest can stay commented out.  An unknown name is a hard error.
+
+# -----------------------------------------------------------------------------
+# EXPORT MACHINE - qatt_export.py
+# -----------------------------------------------------------------------------
+
+# host:port.  equity_master on the order side (:5010); qatt must be the HDB.
+# EQUITY_MASTER_SERVER = "CHANGEME:5010"
+# QATT_SERVER = "CHANGEME:5011"
+
+# Where qatt-YYYYMMDD.zip is written.
+# EXPORT_DIR = r"CHANGEME\qatt_export"
+
+# -----------------------------------------------------------------------------
+# DISPATCH MACHINE - qatt_dispatch.py
+# -----------------------------------------------------------------------------
+
+# The tick store: one folder per name, raw-<code>-<YYYYMMDD>.csv inside.
+# OUTPUT_DIR = r"CHANGEME\ticks"
+
+# -----------------------------------------------------------------------------
+# BOTH - wherever NewCrosscode.csv lives on THIS machine
+# -----------------------------------------------------------------------------
+
+CROSSCODE_PATH = r"CHANGEME\NewCrosscode.csv"
+
+# -----------------------------------------------------------------------------
+# OPTIONAL, export only
+# -----------------------------------------------------------------------------
+
+# The zone kdb stamps prints in.  Written into the zip's manifest, so the
+# dispatch converts from what the export saw.
+# KDB_TIMEZONE = "China Standard Time"
+# SYM_CHUNK = 200
+# MASTER_CHUNK = 5000
