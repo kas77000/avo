@@ -5,6 +5,7 @@ Standard library only, so it runs on a box where nothing is installed.
     python kdb_ping.py host1:5001 host2:5002
     python kdb_ping.py -f targets.txt            # one host:port per line, # comments
     python kdb_ping.py -u user host1:5001        # user, no password
+    python kdb_ping.py -u user -P host1:5001     # asks for the password, not echoed
     python kdb_ping.py -u user -p secret host1:5001
 
 For each target it opens a TCP socket, then does the kdb handshake
@@ -55,6 +56,8 @@ def main():
     ap.add_argument("-u", "--user", default=getpass.getuser(),
                     help="user for the handshake (default: login name)")
     ap.add_argument("-p", "--password", help="password for the handshake (default: none)")
+    ap.add_argument("-P", "--ask-password", action="store_true",
+                    help="ask for the password without showing it")
     ap.add_argument("-t", "--timeout", type=float, default=3.0, help="seconds (default 3)")
     args = ap.parse_args()
 
@@ -67,6 +70,8 @@ def main():
         ap.error("no targets given")
 
     creds = args.user
+    if args.ask_password:
+        args.password = getpass.getpass("password for %s: " % args.user)
     if args.password:
         creds += ":" + args.password
 
