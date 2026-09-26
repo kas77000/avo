@@ -299,7 +299,7 @@ it finds.
 > `RIO AT` — is in a different folder from the one the old process wrote, so
 > every file of it reads as missing. `folder` and `code` are separate columns
 > in the report so that is visible at a glance. The design note is
-> `../docs/superpowers/specs/2026-09-16-historical-compare-design.md`.
+> `../../docs/superpowers/specs/2026-09-16-historical-compare-design.md`.
 
 ## One zip per venue
 

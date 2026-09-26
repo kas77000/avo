@@ -872,5 +872,5 @@ a missing entitlement both return nothing and only one of them is a finding.
 ## Documentation
 
 - why it is built this way, and what the R job does:
-  [`../docs/superpowers/specs/2026-09-01-limit-up-down-python-design.md`](../docs/superpowers/specs/2026-09-01-limit-up-down-python-design.md)
+  [`../../docs/superpowers/specs/2026-09-01-limit-up-down-python-design.md`](../../docs/superpowers/specs/2026-09-01-limit-up-down-python-design.md)
 - the R job itself: `no_git/LimitUpDown.r`, which is not published here

@@ -5,7 +5,7 @@ out/
 *.HEIC
 no_git/
 *.tsr
-!LimitUpDown/config/spol_JKT.tsr
+!AB/LimitUpDown/config/spol_JKT.tsr
 docs/
 .claude/
 logs/
