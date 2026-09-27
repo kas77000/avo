@@ -1,9 +1,10 @@
 # Extract from the zips in ZIP_DIR the stock folders listed in STOCKS_CSV
 # (the file written by RemoveEmptyFolder.r, header "Stock") into OUTPUT_DIR.
 #
-# A zip holds its stocks as folders: "<Stock>/raw-<Stock>-<date>.csv". Only the
-# zips' directories are read to find where each stock is, then each zip is
-# opened once and only the files of the listed stocks are extracted.
+# A file belongs to a stock when the folder it sits in, inside the zip, is
+# named after that stock: "<Stock>/raw-<Stock>-<date>.csv", or with more
+# folders in front, "data/<Stock>/...". It is extracted to OUTPUT_DIR/<Stock>/.
+# Only the zips' directories are read to find where each stock is.
 #
 # .part files (a write that never finished) are never extracted, so a stock
 # whose folder in the zip is empty or holds only .part files is not created.
@@ -15,8 +16,8 @@ OUTPUT_DIR <- "C:/path/to/folder"
 if (!dir.exists(ZIP_DIR)) stop("Folder not found: ", ZIP_DIR)
 if (!dir.exists(OUTPUT_DIR)) stop("Folder not found: ", OUTPUT_DIR)
 
-stocks <- read.csv(STOCKS_CSV, colClasses = "character")$Stock
-cat(length(stocks), "stock(s) to extract\n")
+stocks <- trimws(read.csv(STOCKS_CSV, colClasses = "character")$Stock)
+cat(length(stocks), "stock(s) to extract, e.g.", stocks[1], "\n")
 
 zips <- list.files(ZIP_DIR, pattern = "\\.zip$", ignore.case = TRUE,
                    full.names = TRUE)
@@ -27,20 +28,24 @@ found <- character(0)
 
 for (z in zips) {
   entries <- as.character(unzip(z, list = TRUE)$Name)
-  entries <- entries[sub("/.*", "", entries) %in% stocks]
-  seen    <- c(seen, sub("/.*", "", entries))
-  wanted  <- entries[!grepl("/$", entries) & !grepl("\\.part$", entries,
-                                                     ignore.case = TRUE)]
-  if (length(wanted) == 0) {
-    cat(basename(z), ": nothing to extract\n")
-    next
-  }
+  cat(basename(z), ":", length(entries), "entries, e.g.", entries[1], "\n")
 
-  folders <- unique(sub("/.*", "", wanted))
-  cat(basename(z), ":", length(folders), "stock(s),", length(wanted), "file(s)")
-  done <- unzip(z, files = wanted, exdir = OUTPUT_DIR)
-  cat(" -", length(done), "extracted\n")
-  found <- c(found, folders)
+  path   <- gsub("\\\\", "/", entries)
+  is_dir <- grepl("/$", path)
+  path   <- sub("/$", "", path)
+  stock  <- ifelse(is_dir, basename(path), basename(dirname(path)))
+
+  mine <- stock %in% stocks
+  seen <- c(seen, stock[mine])
+  keep <- mine & !is_dir & !grepl("\\.part$", path, ignore.case = TRUE)
+
+  for (s in unique(stock[keep])) {
+    files <- entries[keep & stock == s]
+    done  <- unzip(z, files = files, exdir = file.path(OUTPUT_DIR, s),
+                   junkpaths = TRUE)
+    cat("  ", s, ":", length(done), "of", length(files), "file(s) extracted\n")
+    found <- c(found, s)
+  }
 }
 
 found   <- unique(found)
