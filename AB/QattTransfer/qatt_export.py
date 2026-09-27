@@ -343,6 +343,10 @@ def self_test() -> int:
           [s for c in got for s in c], ["A", "B", "C", "D", "E"])
     check("a row is (seconds, price, size, cond, ex)",
           got[0]["A"], [(32401, "1.5", "100", "#N/A N.A.", "T")])
+    check("several condition codes leave joined with @, not a comma",
+          qattsource.shape([{"sym": "A", qattsource.TIME_FIELD:
+                             dt.time(9, 0, 1), "price": 1.5, "size": 100,
+                             "cond": "T,XT", "ex": "T"}])["A"][0][3], "T@XT")
 
     print("\nthe bundle")
     with tempfile.TemporaryDirectory() as tmp:

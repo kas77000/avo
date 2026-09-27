@@ -174,8 +174,11 @@ def dispatch(zip_path, rows, markets, composites, out_dir, log) -> dict:
             if not path.parent.exists():
                 stats["new folders"] += 1
             stamp = qattsource.clock_maker(shift(name))
+            #  condition() again: a zip exported before codes were joined
+            #  with "@" still carries "T,XT".
             stats["prints"] += ticksfile.write_rows(
-                path, [(stamp(seconds(t)), price, size, cond, ex, name.mic)
+                path, [(stamp(seconds(t)), price, size,
+                        ticksfile.condition(cond), ex, name.mic)
                        for t, price, size, cond, ex in prints],
                 tz_label(name, markets))
             stats["files written"] += 1
@@ -265,7 +268,7 @@ def self_test() -> int:
                           "COMPOSITE_EXCH_CODE": "HK",
                           "ID_MIC_PRIM_EXCH": "XHKG"}}
     chunks = [{"7203.JP": [(32400, "3833", "100", "#N/A N.A.", "T"),
-                           (32401, "3834", "200", "T", "T")],
+                           (32401, "3834", "200", "T,XT", "T")],
                "EAU.AU": [(28800, "0.105", "1000", "#N/A N.A.", "T")],
                "NOTOURS.XX": [(30000, "1", "1", "#N/A N.A.", "T")]}]
 
@@ -282,12 +285,13 @@ def self_test() -> int:
         sydney = out / "EAU AU" / "raw-EAU AU-20260922.csv"
         check("three venue rows make one file, under the composite",
               sorted(p.name for p in out.iterdir()), ["7203 JP", "EAU AU"])
-        check("Tokyo: its own header, +1h from kdb, the MIC on every row",
+        check("Tokyo: its own header, +1h from kdb, the MIC on every row, "
+              "and a zip's old comma-joined codes written with @",
               tokyo.read_text().splitlines(),
               ["#Time,Last,Volume,Condition,Exchange,MicCode,"
                "Tokyo Standard Time",
                "10:00:00,3833,100,#N/A N.A.,T,XTKS",
-               "10:00:01,3834,200,T,T,XTKS"])
+               "10:00:01,3834,200,T@XT,T,XTKS"])
         check("Sydney in September is +2h from kdb",
               sydney.read_text().splitlines()[1],
               "10:00:00,0.105,1000,#N/A N.A.,T,XASX")

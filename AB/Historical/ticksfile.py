@@ -381,9 +381,14 @@ def write(path, rows, mic: str, tz_label: str = "") -> int:
 #  against them.  qatt leaves the column empty instead.
 NO_CONDITION = "#N/A N.A."
 
+#  SEVERAL CODES ARE JOINED WITH "@", NOT ",".  qatt sends "T,XT"; written
+#  as it came, csv quotes the cell ("T,XT") and a reader that splits lines
+#  on commas sees one column too many.
+CONDITION_SEP = "@"
+
 
 def condition(cond) -> str:
-    return (cond or "").strip() or NO_CONDITION
+    return (cond or "").strip().replace(",", CONDITION_SEP) or NO_CONDITION
 
 
 def write_rows(path, rows, tz_label: str = "") -> int:
@@ -693,6 +698,10 @@ def self_test() -> int:
     check("nothing at all is too", condition(None), "#N/A N.A.")
     check("a code the exchange did send is untouched", condition("T"), "T")
     check("with its surrounding space trimmed", condition(" XT "), "XT")
+    check("several codes are joined with @, not a comma",
+          condition("T,XT"), "T@XT")
+    check("and a lone comma is still a code, not an absence",
+          condition(","), "@")
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "c.csv"
         write(p, [{"time": "09:00:00", "price": Decimal("1"),
@@ -700,6 +709,11 @@ def self_test() -> int:
         check("so the cell is never empty in the file",
               p.read_text(encoding="utf-8").splitlines()[1],
               "09:00:00,1,100,#N/A N.A.,,XBKK")
+        write(p, [{"time": "09:00:00", "price": Decimal("1"),
+                   "size": Decimal("100"), "cond": "T,XT", "ex": "T"}], "XBKK")
+        check("so a multi-code print is six plain cells, nothing quoted",
+              p.read_text(encoding="utf-8").splitlines()[1],
+              "09:00:00,1,100,T@XT,T,XBKK")
 
     print("\n--compress_venues: one zip per venue")
     import zipfile as zf_
