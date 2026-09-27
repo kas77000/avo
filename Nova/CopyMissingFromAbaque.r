@@ -13,6 +13,10 @@
 # of that date. A .gz is decompressed on the way, so BCORE_DIR only ever gets
 # plain .csv files.
 # Each file is written as <file>.part and renamed once complete.
+#
+# WORKERS R processes copy different stock folders at the same time. The time
+# goes on waiting for the network drives, so several at once is faster; past
+# what the drives can serve, more workers stop helping.
 
 ABAQUE_DIR     <- "C:/path/to/Abaque/data"
 BCORE_DIR      <- "C:/path/to/AbaqueBcore/data"
@@ -20,8 +24,9 @@ CROSSCODE_CSV  <- "C:/path/to/CrossCode.csv"
 COMPOSITES_CSV <- "C:/path/to/Historical/config/composites.csv"
 FROM_DATE      <- "2026-08-01"
 TO_DATE        <- "2026-08-31"
+WORKERS        <- 8
 
-NAME_RE <- "^raw-(.+)-([0-9]{8})\\.csv(\\.gz)?$"
+library(parallel)
 
 for (d in c(ABAQUE_DIR, BCORE_DIR))
   if (!dir.exists(d)) stop("Folder not found: ", d)
@@ -106,93 +111,117 @@ say("  crosscode folders:", num(sum(in_abaque & in_bcore)), "in both,",
 
 # --- copy --------------------------------------------------------------------
 
-day_files <- function(dir) {
-  f <- list.files(dir, pattern = NAME_RE)
-  f[sub(NAME_RE, "\\2", f) >= from & sub(NAME_RE, "\\2", f) <= to]
-}
+# One stock folder, run by a worker: everything it needs is passed in or
+# defined here, since a worker is a separate R process.
+copy_folder <- function(f, abaque, bcore, from, to) {
+  name_re <- "^raw-(.+)-([0-9]{8})\\.csv(\\.gz)?$"
+  out <- list(folder = f, missing = 0, copied = 0, from_gz = 0,
+              new_folder = FALSE, failed = character(0))
 
-gunzip_to <- function(src, dest) {
-  input  <- gzfile(src, "rb")
-  on.exit(close(input))
-  output <- file(dest, "wb")
-  on.exit(close(output), add = TRUE)
-  repeat {
-    chunk <- readBin(input, "raw", 1e7)
-    if (length(chunk) == 0) break
-    writeBin(chunk, output)
-  }
-  TRUE
-}
-
-copied <- 0; from_gz <- 0; failed <- 0; created <- 0; up_to_date <- 0
-copy_start <- Sys.time()
-last_note  <- copy_start
-
-progress <- function(i) {
-  done  <- as.numeric(difftime(Sys.time(), copy_start, units = "secs"))
-  left  <- if (i > 0 && i < length(common)) done / i * (length(common) - i) else NA
-  say(sprintf("  %s of %s folders (%d%%), %s file(s) copied, %s up to date",
-              num(i), num(length(common)), floor(100 * i / length(common)),
-              num(copied), num(up_to_date)),
-      "- elapsed", took(done), if (!is.na(left)) paste("- about", took(left),
-                                                         "left"))
-}
-
-say("Step 3/3  comparing", num(length(common)), "folder(s)")
-
-for (i in seq_along(common)) {
-  f <- common[i]
-  if (as.numeric(difftime(Sys.time(), last_note, units = "secs")) >= 10) {
-    progress(i - 1)
-    last_note <- Sys.time()
+  day_files <- function(dir) {
+    x <- list.files(dir, pattern = name_re)
+    x[sub(name_re, "\\2", x) >= from & sub(name_re, "\\2", x) <= to]
   }
 
-  src <- day_files(file.path(ABAQUE_DIR, f))
-  if (length(src) == 0) next
-  src <- src[order(grepl("\\.gz$", src))]          # .csv before .csv.gz
-  src <- src[!duplicated(sub(NAME_RE, "\\2", src))]  # one file per day
-
-  have <- sub(NAME_RE, "\\2", day_files(file.path(BCORE_DIR, f)))
-  src  <- src[!sub(NAME_RE, "\\2", src) %in% have]
-  if (length(src) == 0) {
-    up_to_date <- up_to_date + 1
-    next
-  }
-
-  new_folder <- !dir.exists(file.path(BCORE_DIR, f))
-  say(sprintf("  [%s/%s] %s: %d day(s) to copy%s", num(i), num(length(common)),
-              f, length(src), if (new_folder) ", new folder" else ""))
-  if (new_folder) {
-    if (!dir.create(file.path(BCORE_DIR, f))) {
-      failed <- failed + length(src)
-      say("    could not create folder:", f)
-      next
+  gunzip_to <- function(src, dest) {
+    input  <- gzfile(src, "rb")
+    on.exit(close(input))
+    output <- file(dest, "wb")
+    on.exit(close(output), add = TRUE)
+    repeat {
+      chunk <- readBin(input, "raw", 1e7)
+      if (length(chunk) == 0) break
+      writeBin(chunk, output)
     }
-    created <- created + 1
+    TRUE
   }
 
-  n <- 0
+  src <- day_files(file.path(abaque, f))
+  if (length(src) == 0) return(out)
+  src <- src[order(grepl("\\.gz$", src))]            # .csv before .csv.gz
+  src <- src[!duplicated(sub(name_re, "\\2", src))]  # one file per day
+
+  have <- sub(name_re, "\\2", day_files(file.path(bcore, f)))
+  src  <- src[!sub(name_re, "\\2", src) %in% have]
+  out$missing <- length(src)
+  if (length(src) == 0) return(out)
+
+  if (!dir.exists(file.path(bcore, f))) {
+    out$new_folder <- TRUE
+    if (!dir.create(file.path(bcore, f))) {
+      out$failed <- paste("could not create folder", f)
+      return(out)
+    }
+  }
+
   for (s in src) {
-    dest <- file.path(BCORE_DIR, f, sub("\\.gz$", "", s))
+    dest <- file.path(bcore, f, sub("\\.gz$", "", s))
     part <- paste0(dest, ".part")
     ok <- tryCatch({
-      if (grepl("\\.gz$", s)) gunzip_to(file.path(ABAQUE_DIR, f, s), part)
-      else file.copy(file.path(ABAQUE_DIR, f, s), part, overwrite = TRUE)
+      if (grepl("\\.gz$", s)) gunzip_to(file.path(abaque, f, s), part)
+      else file.copy(file.path(abaque, f, s), part, overwrite = TRUE)
       file.rename(part, dest)
     }, error = function(e) FALSE)
     if (isTRUE(ok)) {
-      n <- n + 1
-      from_gz <- from_gz + grepl("\\.gz$", s)
+      out$copied  <- out$copied + 1
+      out$from_gz <- out$from_gz + grepl("\\.gz$", s)
     } else {
-      failed <- failed + 1
       unlink(part)
-      say("    could not copy:", file.path(f, s))
+      out$failed <- c(out$failed, paste("could not copy", file.path(f, s)))
     }
   }
-  copied <- copied + n
-  if (n < length(src)) say("    ", n, "of", length(src), "copied")
+  out
 }
-if (length(common) > 0) progress(length(common))
+
+say("Step 3/3  comparing", num(length(common)), "folder(s) on", WORKERS,
+    "worker(s)")
+if (length(common) == 0) {
+  say("Nothing to do")
+  quit(save = "no")
+}
+cl <- makeCluster(WORKERS)
+
+copied <- 0; from_gz <- 0; failed <- 0; created <- 0; up_to_date <- 0
+copy_start <- Sys.time()
+
+# Handed out in batches so the terminal hears back after each one; within a
+# batch, a worker that finishes a folder takes the next (load balanced).
+batch <- WORKERS * 25
+for (first in seq(1, length(common), by = batch)) {
+  idx <- first:min(first + batch - 1, length(common))
+  res <- clusterMap(cl, copy_folder, common[idx],
+                    MoreArgs = list(abaque = ABAQUE_DIR, bcore = BCORE_DIR,
+                                    from = from, to = to),
+                    .scheduling = "dynamic")
+
+  for (k in seq_along(res)) {
+    r <- res[[k]]
+    if (r$missing == 0) {
+      up_to_date <- up_to_date + 1
+      next
+    }
+    say(sprintf("  [%s/%s] %s: %d day(s) missing, %d copied%s",
+                num(idx[k]), num(length(common)), r$folder, r$missing,
+                r$copied, if (r$new_folder) ", new folder" else ""))
+    for (m in r$failed) say("    ", m)
+    copied  <- copied + r$copied
+    from_gz <- from_gz + r$from_gz
+    failed  <- failed + r$missing - r$copied
+    created <- created + (r$new_folder && dir.exists(file.path(BCORE_DIR,
+                                                               r$folder)))
+  }
+
+  i    <- max(idx)
+  done <- as.numeric(difftime(Sys.time(), copy_start, units = "secs"))
+  left <- if (i < length(common)) done / i * (length(common) - i) else NA
+  say(sprintf("  %s of %s folders (%d%%), %s file(s) copied, %s up to date",
+              num(i), num(length(common)), floor(100 * i / length(common)),
+              num(copied), num(up_to_date)),
+      "- elapsed", took(done),
+      if (!is.na(left)) paste("- about", took(left), "left"))
+}
+
+stopCluster(cl)
 
 say("Done in", took(difftime(Sys.time(), started, units = "secs")), ":",
     num(copied), "file(s) copied,", num(from_gz),
