@@ -4,8 +4,9 @@
 # WHICH FOLDERS. Every crosscode row names a folder the way Historical names
 # it: the BloombergCode, with the exchange code replaced by its composite when
 # composites.csv says Convert2Composite (RIO AT -> RIO AU, 7203 JT -> 7203 JP),
-# and the characters Windows refuses dropped (LPN/F TB -> LPN_F TB). Only the
-# folders that exist in BOTH stores are compared.
+# and the characters Windows refuses dropped (LPN/F TB -> LPN_F TB). Every such
+# folder that exists in ABAQUE_DIR is compared; one that BCORE_DIR lacks is
+# created there, but only when Abaque has a day of the period to put in it.
 #
 # WHICH FILES. raw-<code>-<YYYYMMDD>.csv, or .csv.gz once the old process has
 # compressed it. A day is missing from BCORE_DIR when neither its folder nor a
@@ -61,9 +62,9 @@ folders <- unique(safe(code))
 
 in_abaque <- folders %in% basename(list.dirs(ABAQUE_DIR, recursive = FALSE))
 in_bcore  <- folders %in% basename(list.dirs(BCORE_DIR, recursive = FALSE))
-common    <- folders[in_abaque & in_bcore]
+common    <- folders[in_abaque]
 cat(length(bbg), "crosscode code(s) ->", length(folders), "folder(s):",
-    length(common), "in both,", sum(in_abaque & !in_bcore),
+    sum(in_abaque & in_bcore), "in both,", sum(in_abaque & !in_bcore),
     "only in Abaque,", sum(!in_abaque & in_bcore), "only in AbaqueBcore,",
     sum(!in_abaque & !in_bcore), "in neither\n")
 cat("Days", from, "to", to, "\n")
@@ -100,7 +101,7 @@ gunzip_to <- function(src, dest) {
   close(output)
 }
 
-copied <- 0; from_gz <- 0; failed <- 0
+copied <- 0; from_gz <- 0; failed <- 0; created <- 0
 
 for (i in seq_along(common)) {
   f <- common[i]
@@ -115,6 +116,16 @@ for (i in seq_along(common)) {
             zip_day[zip_folder == f])
   src  <- src[!sub(NAME_RE, "\\2", src) %in% have]
   if (length(src) == 0) next
+
+  new_folder <- !dir.exists(file.path(BCORE_DIR, f))
+  if (new_folder) {
+    if (!dir.create(file.path(BCORE_DIR, f))) {
+      failed <- failed + length(src)
+      cat("  could not create folder:", f, "\n")
+      next
+    }
+    created <- created + 1
+  }
 
   n <- 0
   for (s in src) {
@@ -135,8 +146,9 @@ for (i in seq_along(common)) {
     }
   }
   copied <- copied + n
-  cat(f, ":", length(src), "day(s) missing,", n, "copied\n")
+  cat(f, ":", length(src), "day(s) missing,", n, "copied",
+      if (new_folder) "(new folder)", "\n")
 }
 
 cat(copied, "file(s) copied,", from_gz, "of them decompressed from .gz,",
-    failed, "failed\n")
+    failed, "failed,", created, "new folder(s) in AbaqueBcore\n")
