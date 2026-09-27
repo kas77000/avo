@@ -14,14 +14,19 @@
 # faster; past what the drive can serve, more workers stop helping.
 #
 # A RUN AGAIN ONLY LOOKS AT WHAT CHANGED. DONE_CSV records, per folder, the
-# newest modification time (the file server's clock) seen once the folder was
-# fully checked. Next time a folder whose own time is no newer is skipped
-# without being listed, and in any other folder only the files newer than the
-# record are read. Adding, copying or renaming a file changes its folder's
-# time, so new files are always found. The record is written after every
-# batch, so a stopped run keeps what it had done. Delete DONE_CSV to check
-# everything again. A new file inside a SUB folder of a stock folder does not
-# change the stock folder's time; the stock folders have none.
+# folder's modification time (the file server's clock) taken BEFORE it was
+# listed. Next time a folder whose own time is no newer is skipped without
+# being listed, and in any other folder only the files created or modified
+# after the record (less a minute's margin) are read. Adding, copying or renaming
+# a file changes its folder's time, and a copy - even one that keeps the old
+# modified date, as Explorer's does - gets a new creation time, so new files
+# are always found. Taking the time before listing is what makes it safe to
+# run beside CopyMissingFromAbaque.r: a file that lands in a folder while it
+# is being checked is newer than the record, so the next run reads it. The
+# record is written after every batch, so a stopped run keeps what it had
+# done. Delete DONE_CSV to check everything again. A new file inside a SUB
+# folder of a stock folder does not change the stock folder's time; the stock
+# folders have none.
 
 DATA_DIR <- "C:/path/to/folder"
 DONE_CSV <- "C:/path/to/FixConditionCommas_done.csv"
@@ -49,15 +54,21 @@ took <- function(secs) {
 
 # One folder, run by a worker. `deep` is FALSE for DATA_DIR itself, which
 # only has its own files checked; every other folder is checked at any depth.
-# Only files modified after `since` are read. Returns the folder's new stamp,
-# or NA when a file failed, so the folder is tried again next run.
+# Only files created or modified after `since` are read. Returns the folder's
+# new stamp, or NA when a file failed, so the folder is tried again next run.
 fix_folder <- function(d, deep, since) {
   out <- list(folder = d, checked = 0, fixed = character(0),
               failed = character(0), stamp = NA)
+  # The folder's time BEFORE listing: a file landing from here on moves it
+  # past what gets recorded, so the next run looks at this folder again.
+  before <- as.numeric(file.info(d)$mtime)
   files <- list.files(d, pattern = "\\.csv$", ignore.case = TRUE,
                       recursive = deep, full.names = TRUE)
   info  <- file.info(files)
-  todo  <- which(is.na(info$mtime) | as.numeric(info$mtime) > since)
+  # ctime is the creation time on Windows. A minute's margin: a file being
+  # copied as the record was taken was created a little before it.
+  newest <- pmax(as.numeric(info$mtime), as.numeric(info$ctime))
+  todo   <- which(is.na(newest) | newest > since - 60)
 
   for (k in todo) {
     f <- files[k]
@@ -84,8 +95,7 @@ fix_folder <- function(d, deep, since) {
     else if (!identical(res, "ok")) out$failed <- c(out$failed, res)
   }
 
-  if (length(out$failed) == 0)        # after the fixes: they moved the times
-    out$stamp <- max(as.numeric(file.info(c(d, files))$mtime), na.rm = TRUE)
+  if (length(out$failed) == 0) out$stamp <- before
   out
 }
 
