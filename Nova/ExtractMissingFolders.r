@@ -4,6 +4,9 @@
 # A zip holds its stocks as folders: "<Stock>/raw-<Stock>-<date>.csv". Only the
 # zips' directories are read to find where each stock is, then each zip is
 # opened once and only the files of the listed stocks are extracted.
+#
+# .part files (a write that never finished) are never extracted, so a stock
+# whose folder in the zip is empty or holds only .part files is not created.
 
 ZIP_DIR    <- "C:/path/to/zips"
 STOCKS_CSV <- "C:/path/to/RemovedFolders.csv"
@@ -19,12 +22,15 @@ zips <- list.files(ZIP_DIR, pattern = "\\.zip$", ignore.case = TRUE,
                    full.names = TRUE)
 cat("Looking in", length(zips), "zip(s) of", ZIP_DIR, "\n")
 
+seen  <- character(0)
 found <- character(0)
 
 for (z in zips) {
   entries <- as.character(unzip(z, list = TRUE)$Name)
-  entries <- entries[!grepl("/$", entries)]
-  wanted  <- entries[sub("/.*", "", entries) %in% stocks]
+  entries <- entries[sub("/.*", "", entries) %in% stocks]
+  seen    <- c(seen, sub("/.*", "", entries))
+  wanted  <- entries[!grepl("/$", entries) & !grepl("\\.part$", entries,
+                                                     ignore.case = TRUE)]
   if (length(wanted) == 0) {
     cat(basename(z), ": nothing to extract\n")
     next
@@ -37,7 +43,12 @@ for (z in zips) {
   found <- c(found, folders)
 }
 
-missing <- setdiff(stocks, found)
-cat(length(unique(found)), "stock(s) extracted,", length(missing),
+found   <- unique(found)
+nothing <- setdiff(unique(seen), found)
+missing <- setdiff(stocks, c(found, nothing))
+
+cat(length(found), "stock(s) extracted,", length(nothing),
+    "in a zip but empty or only .part,", length(missing),
     "not found in any zip\n")
+for (s in nothing) cat("  empty or only .part:", s, "\n")
 for (s in missing) cat("  not found:", s, "\n")
