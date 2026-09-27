@@ -12,8 +12,19 @@
 # WORKERS R processes fix different stock folders at the same time. The time
 # goes on waiting for the network drive, file by file, so several at once is
 # faster; past what the drive can serve, more workers stop helping.
+#
+# A RUN AGAIN ONLY LOOKS AT WHAT CHANGED. DONE_CSV records, per folder, the
+# newest modification time (the file server's clock) seen once the folder was
+# fully checked. Next time a folder whose own time is no newer is skipped
+# without being listed, and in any other folder only the files newer than the
+# record are read. Adding, copying or renaming a file changes its folder's
+# time, so new files are always found. The record is written after every
+# batch, so a stopped run keeps what it had done. Delete DONE_CSV to check
+# everything again. A new file inside a SUB folder of a stock folder does not
+# change the stock folder's time; the stock folders have none.
 
 DATA_DIR <- "C:/path/to/folder"
+DONE_CSV <- "C:/path/to/FixConditionCommas_done.csv"
 WORKERS  <- 8
 
 library(parallel)
@@ -38,19 +49,22 @@ took <- function(secs) {
 
 # One folder, run by a worker. `deep` is FALSE for DATA_DIR itself, which
 # only has its own files checked; every other folder is checked at any depth.
-fix_folder <- function(d, deep) {
-  out <- list(checked = 0, fixed = character(0), failed = character(0))
+# Only files modified after `since` are read. Returns the folder's new stamp,
+# or NA when a file failed, so the folder is tried again next run.
+fix_folder <- function(d, deep, since) {
+  out <- list(folder = d, checked = 0, fixed = character(0),
+              failed = character(0), stamp = NA)
   files <- list.files(d, pattern = "\\.csv$", ignore.case = TRUE,
                       recursive = deep, full.names = TRUE)
-  if (length(files) == 0) return(out)
-  sizes <- file.info(files)$size
+  info  <- file.info(files)
+  todo  <- which(is.na(info$mtime) | as.numeric(info$mtime) > since)
 
-  for (k in seq_along(files)) {
+  for (k in todo) {
     f <- files[k]
     out$checked <- out$checked + 1
-    if (is.na(sizes[k]) || sizes[k] == 0) next
+    if (is.na(info$size[k]) || info$size[k] == 0) next
     res <- tryCatch({
-      text <- readChar(f, sizes[k], useBytes = TRUE)
+      text <- readChar(f, info$size[k], useBytes = TRUE)
       if (grepl("\"", text, fixed = TRUE, useBytes = TRUE)) {
         m <- gregexpr("\"[^\"\r\n]*\"", text, useBytes = TRUE)
         regmatches(text, m) <- list(gsub(",", "@",
@@ -69,15 +83,47 @@ fix_folder <- function(d, deep) {
     if (identical(res, "fixed")) out$fixed <- c(out$fixed, f)
     else if (!identical(res, "ok")) out$failed <- c(out$failed, res)
   }
+
+  if (length(out$failed) == 0)        # after the fixes: they moved the times
+    out$stamp <- max(as.numeric(file.info(c(d, files))$mtime), na.rm = TRUE)
   out
 }
 
 say("Fix the Condition column of the csv files under", DATA_DIR)
+
 say("Listing the folders of", DATA_DIR, "...")
 folders <- c(DATA_DIR, list.dirs(DATA_DIR, full.names = TRUE,
                                  recursive = FALSE))
 deep    <- c(FALSE, rep(TRUE, length(folders) - 1))
 say("  ", num(length(folders) - 1), "folder(s)")
+
+since <- rep(-Inf, length(folders))
+if (file.exists(DONE_CSV)) {
+  done_rows <- read.csv(DONE_CSV, colClasses = c("character", "numeric"))
+  last  <- tapply(done_rows$Stamp, done_rows$Folder, max)
+  known <- folders %in% names(last)
+  since[known] <- last[folders[known]]
+  say("  ", num(sum(known)), "folder(s) checked by an earlier run, per",
+      DONE_CSV)
+} else {
+  say("  no", DONE_CSV, "yet: every folder is checked")
+  write.csv(data.frame(Folder = character(0), Stamp = numeric(0)), DONE_CSV,
+            row.names = FALSE)
+}
+
+say("Reading the folders' modification times ...")
+changed <- is.na(since) | as.numeric(file.info(folders)$mtime) > since
+changed[is.na(changed)] <- TRUE
+say("  ", num(sum(!changed)), "folder(s) unchanged since they were checked,",
+    "skipped;", num(sum(changed)), "to look at")
+
+folders <- folders[changed]
+deep    <- deep[changed]
+since   <- since[changed]
+if (length(folders) == 0) {
+  say("Nothing to do")
+  quit(save = "no")
+}
 
 say("Starting", WORKERS, "worker(s) ...")
 cl <- makeCluster(WORKERS)
@@ -89,7 +135,7 @@ checked <- 0; fixed <- 0; failed <- 0
 batch <- WORKERS * 25
 for (from in seq(1, length(folders), by = batch)) {
   idx <- from:min(from + batch - 1, length(folders))
-  res <- clusterMap(cl, fix_folder, folders[idx], deep[idx],
+  res <- clusterMap(cl, fix_folder, folders[idx], deep[idx], since[idx],
                     .scheduling = "dynamic")
   for (r in res) {
     checked <- checked + r$checked
@@ -98,6 +144,15 @@ for (from in seq(1, length(folders), by = batch)) {
     for (f in r$fixed)  say("  fixed:", f)
     for (f in r$failed) say("    could not fix:", f)
   }
+
+  # to the millisecond, rounded UP: a folder left as it was must compare as
+  # no newer than its record, and a real change is always later than that
+  stamp  <- sapply(res, `[[`, "stamp")
+  ok     <- !is.na(stamp)
+  write.table(data.frame(Folder = sapply(res, `[[`, "folder")[ok],
+                         Stamp = sprintf("%.3f", ceiling(stamp[ok] * 1000) / 1000)),
+              DONE_CSV, sep = ",", append = TRUE, col.names = FALSE,
+              row.names = FALSE, quote = c(1))
 
   i    <- max(idx)
   done <- as.numeric(difftime(Sys.time(), started, units = "secs"))
