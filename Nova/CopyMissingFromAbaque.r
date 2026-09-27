@@ -14,6 +14,12 @@
 # plain .csv files.
 # Each file is written as <file>.part and renamed once complete.
 #
+# A STOPPED RUN STARTS WHERE IT STOPPED. DONE_CSV records every folder finished
+# for a period (FROM_DATE, TO_DATE), after every batch; a run for the same
+# period skips those folders without listing them. A folder where a copy
+# failed is not recorded, so it is tried again. Delete DONE_CSV, or the rows
+# of a period, to compare those folders again.
+#
 # WORKERS R processes copy different stock folders at the same time. The time
 # goes on waiting for the network drives, so several at once is faster; past
 # what the drives can serve, more workers stop helping.
@@ -24,6 +30,7 @@ CROSSCODE_CSV  <- "C:/path/to/CrossCode.csv"
 COMPOSITES_CSV <- "C:/path/to/Historical/config/composites.csv"
 FROM_DATE      <- "2026-08-01"
 TO_DATE        <- "2026-08-31"
+DONE_CSV       <- "C:/path/to/CopyMissingFromAbaque_done.csv"
 WORKERS        <- 8
 
 library(parallel)
@@ -173,6 +180,17 @@ copy_folder <- function(f, abaque, bcore, from, to) {
   out
 }
 
+if (file.exists(DONE_CSV)) {
+  done_rows <- read.csv(DONE_CSV, colClasses = "character")
+  finished  <- done_rows$Folder[done_rows$From == from & done_rows$To == to]
+  say("  ", num(sum(common %in% finished)), "folder(s) already done for",
+      from, "to", to, "per", DONE_CSV, "- skipped")
+  common <- common[!common %in% finished]
+} else {
+  write.csv(data.frame(Folder = character(0), From = character(0),
+                       To = character(0)), DONE_CSV, row.names = FALSE)
+}
+
 say("Step 3/3  comparing", num(length(common)), "folder(s) on", WORKERS,
     "worker(s)")
 if (length(common) == 0) {
@@ -210,6 +228,14 @@ for (first in seq(1, length(common), by = batch)) {
     created <- created + (r$new_folder && dir.exists(file.path(BCORE_DIR,
                                                                r$folder)))
   }
+
+  # a folder is done once every missing day is in; one that failed is not
+  # recorded, so the next run tries it again
+  ok <- sapply(res, function(r) length(r$failed) == 0)
+  if (any(ok))
+    write.table(data.frame(Folder = common[idx][ok], From = from, To = to),
+                DONE_CSV, sep = ",", append = TRUE, col.names = FALSE,
+                row.names = FALSE)
 
   i    <- max(idx)
   done <- as.numeric(difftime(Sys.time(), copy_start, units = "secs"))
