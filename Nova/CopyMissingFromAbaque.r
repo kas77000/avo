@@ -9,9 +9,9 @@
 # created there, but only when Abaque has a day of the period to put in it.
 #
 # WHICH FILES. raw-<code>-<YYYYMMDD>.csv, or .csv.gz once the old process has
-# compressed it. A day is missing from BCORE_DIR when neither its folder nor a
-# venue zip at the root of BCORE_DIR (--compress_venues) holds that date. A
-# .gz is decompressed on the way, so BCORE_DIR only ever gets plain .csv files.
+# compressed it. A day is missing from BCORE_DIR when its folder holds no file
+# of that date. A .gz is decompressed on the way, so BCORE_DIR only ever gets
+# plain .csv files.
 # Each file is written as <file>.part and renamed once complete.
 
 ABAQUE_DIR     <- "C:/path/to/Abaque/data"
@@ -54,7 +54,7 @@ say("Days", from, "to", to)
 
 # --- the folders, from the crosscode -----------------------------------------
 
-say("Step 1/4  reading", COMPOSITES_CSV)
+say("Step 1/3  reading", COMPOSITES_CSV)
 comp <- read.csv(COMPOSITES_CSV, colClasses = "character",
                  fileEncoding = "UTF-8-BOM")
 convert <- toupper(trimws(comp$Convert2Composite)) %in% c("TRUE", "1", "YES")
@@ -63,7 +63,7 @@ to_comp <- setNames(trimws(comp$CompositeExchangeCode[convert]),
 say("  converted to a composite:",
     paste(names(to_comp), "->", to_comp, collapse = ", "))
 
-say("Step 1/4  reading", CROSSCODE_CSV)
+say("Step 1/3  reading", CROSSCODE_CSV)
 cc <- read.csv(CROSSCODE_CSV, colClasses = "character", check.names = FALSE,
                fileEncoding = "UTF-8-BOM")
 if (!"BloombergCode" %in% names(cc)) stop(CROSSCODE_CSV, " has no BloombergCode")
@@ -89,10 +89,10 @@ folders <- unique(safe(code))
 say("  ", num(length(folders)), "folder name(s),",
     num(sum(code != bbg)), "of them as their composite")
 
-say("Step 2/4  listing the folders of", ABAQUE_DIR)
+say("Step 2/3  listing the folders of", ABAQUE_DIR)
 abaque_dirs <- basename(list.dirs(ABAQUE_DIR, recursive = FALSE))
 say("  ", num(length(abaque_dirs)), "folder(s)")
-say("Step 2/4  listing the folders of", BCORE_DIR)
+say("Step 2/3  listing the folders of", BCORE_DIR)
 bcore_dirs <- basename(list.dirs(BCORE_DIR, recursive = FALSE))
 say("  ", num(length(bcore_dirs)), "folder(s)")
 
@@ -103,24 +103,6 @@ say("  crosscode folders:", num(sum(in_abaque & in_bcore)), "in both,",
     num(sum(in_abaque & !in_bcore)), "only in Abaque,",
     num(sum(!in_abaque & in_bcore)), "only in AbaqueBcore,",
     num(sum(!in_abaque & !in_bcore)), "in neither")
-
-# --- the days AbaqueBcore already holds in its venue zips --------------------
-
-zips <- list.files(BCORE_DIR, pattern = "\\.zip$", ignore.case = TRUE,
-                   full.names = TRUE)
-say("Step 3/4  reading", length(zips), "venue zip(s) in", BCORE_DIR)
-zip_folder <- character(0)
-zip_day    <- character(0)
-for (k in seq_along(zips)) {
-  z <- zips[k]
-  say("  ", k, "/", length(zips), basename(z), "...")
-  e <- gsub("\\\\", "/", as.character(unzip(z, list = TRUE)$Name))
-  e <- e[grepl(NAME_RE, basename(e))]
-  zip_folder <- c(zip_folder, basename(dirname(e)))
-  zip_day    <- c(zip_day, sub(NAME_RE, "\\2", basename(e)))
-  say("  ", k, "/", length(zips), basename(z), ":", num(length(e)),
-      "day file(s) already zipped")
-}
 
 # --- copy --------------------------------------------------------------------
 
@@ -156,7 +138,7 @@ progress <- function(i) {
                                                          "left"))
 }
 
-say("Step 4/4  comparing", num(length(common)), "folder(s)")
+say("Step 3/3  comparing", num(length(common)), "folder(s)")
 
 for (i in seq_along(common)) {
   f <- common[i]
@@ -170,8 +152,7 @@ for (i in seq_along(common)) {
   src <- src[order(grepl("\\.gz$", src))]          # .csv before .csv.gz
   src <- src[!duplicated(sub(NAME_RE, "\\2", src))]  # one file per day
 
-  have <- c(sub(NAME_RE, "\\2", day_files(file.path(BCORE_DIR, f))),
-            zip_day[zip_folder == f])
+  have <- sub(NAME_RE, "\\2", day_files(file.path(BCORE_DIR, f)))
   src  <- src[!sub(NAME_RE, "\\2", src) %in% have]
   if (length(src) == 0) {
     up_to_date <- up_to_date + 1
