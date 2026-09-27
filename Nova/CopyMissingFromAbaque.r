@@ -30,14 +30,40 @@ to   <- gsub("-", "", TO_DATE)
 if (!grepl("^[0-9]{8}$", from) || !grepl("^[0-9]{8}$", to) || from > to)
   stop("FROM_DATE and TO_DATE must be YYYY-MM-DD, FROM_DATE first")
 
+
+# --- progress on the terminal ------------------------------------------------
+
+started <- Sys.time()
+
+say <- function(...) {                # a timestamped line, shown at once
+  cat(format(Sys.time(), "[%H:%M:%S]"), ..., "\n")
+  flush.console()
+}
+
+num <- function(x) format(x, big.mark = ",", scientific = FALSE)
+
+took <- function(secs) {
+  secs <- round(as.numeric(secs))
+  if (secs < 60) return(paste0(secs, "s"))
+  if (secs < 3600) return(sprintf("%dm%02ds", secs %/% 60, secs %% 60))
+  sprintf("%dh%02dm", secs %/% 3600, (secs %% 3600) %/% 60)
+}
+
+say("Copy missing days from", ABAQUE_DIR, "to", BCORE_DIR)
+say("Days", from, "to", to)
+
 # --- the folders, from the crosscode -----------------------------------------
 
+say("Step 1/4  reading", COMPOSITES_CSV)
 comp <- read.csv(COMPOSITES_CSV, colClasses = "character",
                  fileEncoding = "UTF-8-BOM")
 convert <- toupper(trimws(comp$Convert2Composite)) %in% c("TRUE", "1", "YES")
 to_comp <- setNames(trimws(comp$CompositeExchangeCode[convert]),
                     trimws(comp$BBGCode[convert]))
+say("  converted to a composite:",
+    paste(names(to_comp), "->", to_comp, collapse = ", "))
 
+say("Step 1/4  reading", CROSSCODE_CSV)
 cc <- read.csv(CROSSCODE_CSV, colClasses = "character", check.names = FALSE,
                fileEncoding = "UTF-8-BOM")
 if (!"BloombergCode" %in% names(cc)) stop(CROSSCODE_CSV, " has no BloombergCode")
@@ -45,6 +71,7 @@ bbg <- trimws(cc$BloombergCode)
 keep <- bbg != ""
 if ("Type" %in% names(cc)) keep <- keep & tolower(trimws(cc$Type)) != "basket"
 bbg <- unique(bbg[keep])
+say("  ", num(nrow(cc)), "row(s),", num(length(bbg)), "code(s) kept")
 
 has_ext <- grepl(" ", bbg)
 ticker  <- ifelse(has_ext, sub(" [^ ]*$", "", bbg), bbg)
@@ -59,27 +86,40 @@ safe <- function(x) {                 # ticksfile.safe
   sub("[. ]+$", "", x)
 }
 folders <- unique(safe(code))
+say("  ", num(length(folders)), "folder name(s),",
+    num(sum(code != bbg)), "of them as their composite")
 
-in_abaque <- folders %in% basename(list.dirs(ABAQUE_DIR, recursive = FALSE))
-in_bcore  <- folders %in% basename(list.dirs(BCORE_DIR, recursive = FALSE))
+say("Step 2/4  listing the folders of", ABAQUE_DIR)
+abaque_dirs <- basename(list.dirs(ABAQUE_DIR, recursive = FALSE))
+say("  ", num(length(abaque_dirs)), "folder(s)")
+say("Step 2/4  listing the folders of", BCORE_DIR)
+bcore_dirs <- basename(list.dirs(BCORE_DIR, recursive = FALSE))
+say("  ", num(length(bcore_dirs)), "folder(s)")
+
+in_abaque <- folders %in% abaque_dirs
+in_bcore  <- folders %in% bcore_dirs
 common    <- folders[in_abaque]
-cat(length(bbg), "crosscode code(s) ->", length(folders), "folder(s):",
-    sum(in_abaque & in_bcore), "in both,", sum(in_abaque & !in_bcore),
-    "only in Abaque,", sum(!in_abaque & in_bcore), "only in AbaqueBcore,",
-    sum(!in_abaque & !in_bcore), "in neither\n")
-cat("Days", from, "to", to, "\n")
+say("  crosscode folders:", num(sum(in_abaque & in_bcore)), "in both,",
+    num(sum(in_abaque & !in_bcore)), "only in Abaque,",
+    num(sum(!in_abaque & in_bcore)), "only in AbaqueBcore,",
+    num(sum(!in_abaque & !in_bcore)), "in neither")
 
 # --- the days AbaqueBcore already holds in its venue zips --------------------
 
+zips <- list.files(BCORE_DIR, pattern = "\\.zip$", ignore.case = TRUE,
+                   full.names = TRUE)
+say("Step 3/4  reading", length(zips), "venue zip(s) in", BCORE_DIR)
 zip_folder <- character(0)
 zip_day    <- character(0)
-for (z in list.files(BCORE_DIR, pattern = "\\.zip$", ignore.case = TRUE,
-                     full.names = TRUE)) {
+for (k in seq_along(zips)) {
+  z <- zips[k]
+  say("  ", k, "/", length(zips), basename(z), "...")
   e <- gsub("\\\\", "/", as.character(unzip(z, list = TRUE)$Name))
   e <- e[grepl(NAME_RE, basename(e))]
   zip_folder <- c(zip_folder, basename(dirname(e)))
   zip_day    <- c(zip_day, sub(NAME_RE, "\\2", basename(e)))
-  cat(basename(z), ":", length(e), "day file(s) already zipped\n")
+  say("  ", k, "/", length(zips), basename(z), ":", num(length(e)),
+      "day file(s) already zipped")
 }
 
 # --- copy --------------------------------------------------------------------
@@ -91,21 +131,39 @@ day_files <- function(dir) {
 
 gunzip_to <- function(src, dest) {
   input  <- gzfile(src, "rb")
+  on.exit(close(input))
   output <- file(dest, "wb")
+  on.exit(close(output), add = TRUE)
   repeat {
     chunk <- readBin(input, "raw", 1e7)
     if (length(chunk) == 0) break
     writeBin(chunk, output)
   }
-  close(input)
-  close(output)
+  TRUE
 }
 
-copied <- 0; from_gz <- 0; failed <- 0; created <- 0
+copied <- 0; from_gz <- 0; failed <- 0; created <- 0; up_to_date <- 0
+copy_start <- Sys.time()
+last_note  <- copy_start
+
+progress <- function(i) {
+  done  <- as.numeric(difftime(Sys.time(), copy_start, units = "secs"))
+  left  <- if (i > 0 && i < length(common)) done / i * (length(common) - i) else NA
+  say(sprintf("  %s of %s folders (%d%%), %s file(s) copied, %s up to date",
+              num(i), num(length(common)), floor(100 * i / length(common)),
+              num(copied), num(up_to_date)),
+      "- elapsed", took(done), if (!is.na(left)) paste("- about", took(left),
+                                                         "left"))
+}
+
+say("Step 4/4  comparing", num(length(common)), "folder(s)")
 
 for (i in seq_along(common)) {
   f <- common[i]
-  if (i %% 1000 == 0) cat(i, "of", length(common), "folders checked\n")
+  if (as.numeric(difftime(Sys.time(), last_note, units = "secs")) >= 10) {
+    progress(i - 1)
+    last_note <- Sys.time()
+  }
 
   src <- day_files(file.path(ABAQUE_DIR, f))
   if (length(src) == 0) next
@@ -115,13 +173,18 @@ for (i in seq_along(common)) {
   have <- c(sub(NAME_RE, "\\2", day_files(file.path(BCORE_DIR, f))),
             zip_day[zip_folder == f])
   src  <- src[!sub(NAME_RE, "\\2", src) %in% have]
-  if (length(src) == 0) next
+  if (length(src) == 0) {
+    up_to_date <- up_to_date + 1
+    next
+  }
 
   new_folder <- !dir.exists(file.path(BCORE_DIR, f))
+  say(sprintf("  [%s/%s] %s: %d day(s) to copy%s", num(i), num(length(common)),
+              f, length(src), if (new_folder) ", new folder" else ""))
   if (new_folder) {
     if (!dir.create(file.path(BCORE_DIR, f))) {
       failed <- failed + length(src)
-      cat("  could not create folder:", f, "\n")
+      say("    could not create folder:", f)
       next
     }
     created <- created + 1
@@ -142,13 +205,15 @@ for (i in seq_along(common)) {
     } else {
       failed <- failed + 1
       unlink(part)
-      cat("  could not copy:", file.path(f, s), "\n")
+      say("    could not copy:", file.path(f, s))
     }
   }
   copied <- copied + n
-  cat(f, ":", length(src), "day(s) missing,", n, "copied",
-      if (new_folder) "(new folder)", "\n")
+  if (n < length(src)) say("    ", n, "of", length(src), "copied")
 }
+if (length(common) > 0) progress(length(common))
 
-cat(copied, "file(s) copied,", from_gz, "of them decompressed from .gz,",
-    failed, "failed,", created, "new folder(s) in AbaqueBcore\n")
+say("Done in", took(difftime(Sys.time(), started, units = "secs")), ":",
+    num(copied), "file(s) copied,", num(from_gz),
+    "of them decompressed from .gz,", num(failed), "failed,", num(created),
+    "new folder(s) in AbaqueBcore")
