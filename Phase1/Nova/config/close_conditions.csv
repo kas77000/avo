@@ -1,0 +1,19 @@
+BBGCode,Country,Venue,CloseCondCodes
+AT,Australia,ASX-MAIN,CA
+C1,China,SSC-MAIN,CA
+C2,China,SZC-MAIN,CA
+CG,China,SHA-MAIN,CA
+CS,China,SHZ-MAIN,CA
+HK,Hong Kong,HKG-MAIN,CA
+IB,India,BSE-MAIN,AUC|ACB
+IJ,Indonesia,JKT-MAIN,CA
+IS,India,NSI-MAIN,AUC|ACB
+JT,Japan,TYO-MAIN,e|ES
+KP,Korea,KSC-MAIN,GC
+KQ,Korea,KOE-MAIN,GC
+MK,Malaysia,KLS-MAIN,CA
+NZ,New Zealand,NZE-MAIN,CA
+PM,Philippines,PHS-MAIN,AUC|AC
+SP,Singapore,SES-MAIN,AC
+TB,Thailand,SET-MAIN,AC
+TT,Taiwan,TAI-MAIN,CA
