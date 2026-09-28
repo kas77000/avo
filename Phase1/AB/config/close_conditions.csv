@@ -1,0 +1,19 @@
+BBGCode,Country,Venue,UnixTimeZone,StartTime,EndTime,AbaqueTime,AbaqueEndTime,CondType,CloseCondCodes
+AT,Australia,ASX-MAIN,Australia/Sydney,16:02,16:12,16:05,16:15,Sum,CA
+C1,China,SSC-MAIN,Asia/Hong_Kong,14:57,15:01,14:57,15:00,Sum,CA
+C2,China,SZC-MAIN,Asia/Hong_Kong,14:57,15:01,14:57,15:00,Sum,#N/A N.A.|CA
+CG,China,SHA-MAIN,Asia/Hong_Kong,14:57,15:01,14:57,15:00,Sum,CA
+CS,China,SHZ-MAIN,Asia/Hong_Kong,14:57,15:01,14:57,15:00,Sum,#N/A N.A.|CA
+HK,Hong Kong,HKG-MAIN,Asia/Hong_Kong,16:00,16:10,16:00,16:10,Period,#N/A N.A.|CA
+IB,India,BSE-MAIN,Asia/Kolkata,15:28,15:30,15:30,15:30,Flag,AUC|ACB
+IJ,Indonesia,JKT-MAIN,Asia/Bangkok,15:50,16:01,15:50,16:00,ContinuousSum,D|F|TS|CA
+IS,India,NSI-MAIN,Asia/Kolkata,15:28,15:30,15:30,15:30,Flag,AUC|ACB
+JT,Japan,TYO-MAIN,Asia/Tokyo,15:25,15:30,15:20,15:30,Flag,e|ES
+KP,Korea,KSC-MAIN,Asia/Seoul,15:00,15:35,15:00,15:30,Flag,GC
+KQ,Korea,KOE-MAIN,Asia/Seoul,15:00,15:35,15:00,15:30,Flag,GC
+MK,Malaysia,KLS-MAIN,Asia/Singapore,16:50,17:00,,16:50,ContinuousSum,CA
+NZ,New Zealand,NZE-MAIN,Pacific/Auckland,16:50,17:01,16:50,17:00,Sum,CA|#N/A N.A.
+PM,Philippines,PHS-MAIN,Asia/Hong_Kong,14:45,15:00,14:50,15:00,Sum,AUC|AC
+SP,Singapore,SES-MAIN,Asia/Singapore,17:00,17:10,,17:05,ContinuousSum,#N/A N.A.|AC
+TB,Thailand,SET-MAIN,Asia/Bangkok,16:35,16:40,16:35,16:35,Flag,AC
+TT,Taiwan,TAI-MAIN,Asia/Taipei,13:30,13:31,13:30,13:30,Flag,#N/A N.A.|UL|DL|CA
