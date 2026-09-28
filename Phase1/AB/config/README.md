@@ -18,15 +18,19 @@ falls back to `equity_master`.
 |---|---|
 | `BBGCode` | the XML's `BBGName`, the Bloomberg exchange code |
 | `Country`, `Venue` | as in the XML |
-| `CloseCondCodes` | the phase's `CondCodes`, pipe-separated, verbatim |
+| `CloseCondCodes` | the codes that mark the close, pipe-separated |
 
 The condition code alone decides the close. The XML's phase times are not
 carried over.
 
-`#N/A N.A.` is kept as the XML spells it. It is Bloomberg's "no condition
-code", which is a trade with an empty condition in qatt. `C2`, `CS`, `HK`,
-`NZ`, `SP` and `TT` list it, and in those markets an empty condition also
-marks every continuous trade. So the close is the **last** trade of the day
-whose condition is in the list, not any matching trade.
+Only codes that mark the close are kept. A code that also appears in the
+same market's continuous phase is dropped:
 
-Japan's close code is a lowercase `e`.
+| Dropped | From | Why |
+|---|---|---|
+| `#N/A N.A.` | C2, CS, HK, NZ, SP, TT | Bloomberg's "no condition code", which every continuous trade has |
+| `UL`, `DL` | TT | limit up and limit down, also in continuous trading |
+| `D`, `F`, `TS` | IJ | also in continuous trading |
+
+Japan's `e` also marks the morning close (`AE|e`), so the close is the
+**last** trade of the day whose condition is in the list.
