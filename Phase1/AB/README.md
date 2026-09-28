@@ -73,13 +73,12 @@ for a bad argument or setting.
 ## The universe
 
 The universe is the CrossCode (`CROSSCODE_PATH`), **filtered to our
-markets**. A row is kept only when both are true:
-
-- its Bloomberg exchange code (the last word of `BloombergCode`, `JT` in
-  `7203 JT`) is a `BBGCode` of `config/close_conditions.csv`: the 18 codes
-  `AT C1 C2 CG CS HK IB IJ IS JT KP KQ MK NZ PM SP TB TT`;
-- its `Type` is exactly `Equity` or `ETF`, as in Phase0's LimitUpDown. A
-  blank Type, `Warrant`, `Basket` and so on are dropped.
+markets**. A row is kept when its Bloomberg exchange code (the last word
+of `BloombergCode`, `JT` in `7203 JT`) is a `BBGCode` of
+`config/close_conditions.csv`: the 18 codes
+`AT C1 C2 CG CS HK IB IJ IS JT KP KQ MK NZ PM SP TB TT`. Its `Type` does
+not matter: warrants, ETFs, a blank Type and the rest all stay in (only
+baskets are dropped, by the CrossCode reader).
 
 The filter runs straight after the CrossCode is read, so equity_master,
 the ladders, the ticks, the closes and the quotes all cover only these rows,
@@ -92,9 +91,8 @@ brings the market in with every close from equity_master
 Step 1 of the log says what was kept and why the rest was dropped:
 
 ```
-..  universe                21,304 rows   of 58,759, the exchange codes of close_conditions.csv, Type Equity or ETF
+..  universe                23,639 rows   of 58,759, the exchange codes of close_conditions.csv
 ..  dropped                 35,120 rows   exchange code not ours: US 12,480, LN 3,011, GR 2,654, ...
-..  dropped                 2,335 rows   Type not Equity/ETF: Warrant 1,904, (blank) 431
 ```
 
 (The numbers are made up.) The CrossCode fingerprint in `stage.csv`

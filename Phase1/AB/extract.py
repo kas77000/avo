@@ -22,8 +22,8 @@ the tick ladders always come from EQUITY_MASTER_SERVER, at the newest
 equity_master date on or before the day.
 
 THE UNIVERSE IS THE CROSSCODE, filtered to our markets: a row is kept when
-its Bloomberg exchange code is in config/close_conditions.csv and its Type
-is exactly Equity or ETF.  The kept rows are resolved to qatt syms exactly
+its Bloomberg exchange code is in config/close_conditions.csv, whatever its
+Type.  The kept rows are resolved to qatt syms exactly
 as qatt_export.py did (equity_master in three passes, config/markets.csv as
 the fallback).
 
@@ -184,29 +184,20 @@ def candidates(rows, markets) -> dict:
     return out
 
 
-#  The CrossCode Types the extract covers - exact match, as
-#  ../../Phase0/AB/LimitUpDown/crosscode.py's KEEP_TYPES.
-KEEP_TYPES = ("Equity", "ETF")
-
-
 def universe_rows(rows, conditions) -> tuple:
     """(kept, {reason: Counter}): the CrossCode rows this extract covers.
 
     A row is ours when its Bloomberg exchange code (the last word of its
-    BloombergCode) is a BBGCode of config/close_conditions.csv, and its Type
-    is exactly Equity or ETF.  The CrossCode is the whole firm's; without
-    this the day ran over some 400 exchange codes.  Dropped rows are counted
-    per exchange code or per Type, for the log."""
-    kept = []
-    dropped = {"exchange code not ours": collections.Counter(),
-               "Type not Equity/ETF": collections.Counter()}
+    BloombergCode) is a BBGCode of config/close_conditions.csv - whatever
+    its Type: warrants and the rest stay in.  The CrossCode is the whole
+    firm's; without this the day ran over some 400 exchange codes.
+    Dropped rows are counted per exchange code, for the log."""
+    kept, dropped = [], {"exchange code not ours": collections.Counter()}
     for r in rows:
-        if r.bbg_ext not in conditions:
-            dropped["exchange code not ours"][r.bbg_ext] += 1
-        elif r.sec_type not in KEEP_TYPES:
-            dropped["Type not Equity/ETF"][r.sec_type] += 1
-        else:
+        if r.bbg_ext in conditions:
             kept.append(r)
+        else:
+            dropped["exchange code not ours"][r.bbg_ext] += 1
     return kept, dropped
 
 
@@ -526,7 +517,7 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     rows, dropped = universe_rows(rows, conditions)
     log.kv("universe", logs.thousands(len(rows)) + " rows",
            f"of {logs.thousands(everything)}, the exchange codes of "
-           f"close_conditions.csv, Type Equity or ETF")
+           f"close_conditions.csv")
     for reason, counts in dropped.items():
         if counts:
             log.kv("dropped", logs.thousands(sum(counts.values())) + " rows",
@@ -536,8 +527,7 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                    + (" ..." if len(counts) > 10 else ""))
     if not rows:
         raise ExtractError("no CrossCode row is ours: none has an exchange "
-                           "code of close_conditions.csv and Type Equity "
-                           "or ETF")
+                           "code of close_conditions.csv")
 
     log.step(2, f"qatt, from the {source.upper()}")
     require_table(conns["qatt"], "qatt", names["qatt"],
@@ -949,15 +939,14 @@ def self_test() -> int:
          typed("7203W JT", "Warrant"), typed("AAA XX", "Equity"),
          typed("BBB XX", "Equity"), typed("5 HK", ""),
          typed("6 HK", "equity")], ours)
-    check("a JT Equity row and a JT ETF row are kept",
-          [r.bbg for r in kept], ["7203 JT", "1321 JT"])
+    check("every Type of an exchange code of ours is kept - Equity, ETF, "
+          "a Warrant, a blank Type",
+          [r.bbg for r in kept],
+          ["7203 JT", "1321 JT", "7203W JT", "5 HK", "6 HK"])
     check("an exchange code not in close_conditions.csv is dropped, "
-          "counted per code",
-          dict(dropped["exchange code not ours"]), {"XX": 2})
-    check("a Warrant, a blank Type and a lower-case equity are dropped, "
-          "counted per Type (exact match, as Phase0 LimitUpDown)",
-          dict(dropped["Type not Equity/ETF"]),
-          {"Warrant": 1, "": 1, "equity": 1})
+          "counted per code, and that is the only reason",
+          {k: dict(v) for k, v in dropped.items()},
+          {"exchange code not ours": {"XX": 2}})
 
     print("\nreading qatt")
     asked = []
@@ -1121,7 +1110,7 @@ def self_test() -> int:
                  "AIA NZ,NZE-MAIN,Equity\n8888 HK,HKG-MAIN,Equity\n"
                  "8889 HK,HKG-MAIN,ETF\nZZZ XX,XXX-MAIN,Equity\n"
                  "QQQ XX,XXX-MAIN,Equity\nBSKT HK,HKG-MAIN,Basket\n"
-                 "7203W JT,TYO-MAIN,Warrant\nAAA US,NYS-MAIN,Equity\n")
+                 "12345 HK,HKG-MAIN,Warrant\nAAA US,NYS-MAIN,Equity\n")
 
     def run(tmp, date, em=None, qatt=None, quote=None, log=None,
             fresh=False, cc_text=CROSSCODE, extra=None, conds=None,
@@ -1228,12 +1217,10 @@ def self_test() -> int:
         check("the universe: the kept rows, and each drop with its reason",
               [ln for ln in log.lines if ln.startswith("..  universe")
                or ln.startswith("..  dropped")],
-              ["..  universe                7 rows   of 9, the exchange codes "
-               "of close_conditions.csv, Type Equity or ETF",
+              ["..  universe                8 rows   of 9, the exchange codes "
+               "of close_conditions.csv",
                "..  dropped                 1 rows   exchange code not ours: "
-               "US 1",
-               "..  dropped                 1 rows   Type not Equity/ETF: "
-               "Warrant 1"])
+               "US 1"])
         check("one !! line per fallback, with the market and the price",
               [ln for ln in log.lines if ln.startswith("!!  close")],
               ["!!  close  8888.HK  HK  no-trades  -> equity_master 3.4",
@@ -1486,7 +1473,7 @@ def self_test() -> int:
         qatt, log = FakeQatt(), Caught()
         run(tmp, D(2026, 9, 25), qatt=qatt, log=log,
             cc_text=CROSSCODE + "BBB US,NYS-MAIN,Equity\n"
-                                "8890 HK,HKG-MAIN,Warrant\n")
+                                "CCC LN,LSE-MAIN,Warrant\n")
         check("the CrossCode fingerprint covers only the rows kept: rows "
               "outside the universe change nothing",
               (any(ln.startswith("!!  staged folder") for ln in log.lines),
