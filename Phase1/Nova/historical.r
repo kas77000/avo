@@ -136,9 +136,9 @@ h_universe <- function(cc, master, markets, composites) {
 
   # Code order as Python sorts it, by byte.
   old <- Sys.getlocale("LC_COLLATE")
+  on.exit(Sys.setlocale("LC_COLLATE", old), add = TRUE)
   Sys.setlocale("LC_COLLATE", "C")
   names_ <- names_[order(names_$code), ]
-  Sys.setlocale("LC_COLLATE", old)
 
   where <- h_safe(names_$code)
   dup <- duplicated(where)
@@ -275,7 +275,10 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
     }
     p1_shift_seconds(date, s$KDB_TIMEZONE, tz)
   }, numeric(1))
-  names_$shift <- unname(shift_of[names_$venue])
+  # By position: R never matches the name "", so a blank venue looked up
+  # by name is NA, not 0.
+  names_$shift <- unname(shift_of[match(names_$venue, venues)])
+  names_$shift[is.na(names_$shift)] <- 0
   names_$label <- tz_of(names_$label_market)
   names_$path <- h_path(s$OUTPUT_DIR, names_$code, date)
   header <- function(i) {
@@ -545,6 +548,22 @@ h_self_test <- function() {
             length(list.files(s3$NOTRADINGDAY_DIR)))
         }, c(TRUE, 0))
 
+  s4 <- s
+  s4$OUTPUT_DIR <- file.path(d, "out4")
+  s4$NOTRADINGDAY_DIR <- file.path(d, "ntd4")
+  s4$CROSSCODE_PATH <- file.path(d, "cc4.csv")
+  writeLines(c("#FidessaCode,BloombergCode,FidessaMarket,Type",
+               "7203.TYO,7203 JT,,"), s4$CROSSCODE_PATH)
+  log4 <- h_quiet_log()
+  tryCatch(h_run(z, s4, log4), error = function(e) NULL)
+  blank <- file.path(s4$OUTPUT_DIR, "7203 JP", "raw-7203 JP-20260925.csv")
+  check("a row with no FidessaMarket keeps kdb's clock, and says so",
+        list(tryCatch(read(blank)[1:2], error = function(e) "no file"),
+             any(grepl("no TimeZone", log4$warned()))),
+        list(c("#Time,Last,Volume,Condition,Exchange,MicCode",
+               "08:00:00,2850,412300,O,T,XTKS"), TRUE))
+
+  unlink(c(d, z$dir), recursive = TRUE)
   t$done()
 }
 
