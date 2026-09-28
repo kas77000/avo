@@ -71,7 +71,6 @@ VALID_KIND = ("pct", "abs")
 VALID_FALLBACK = ("bloomberg",)
 VALID_TICK_FROM = ("close", "coarser")
 VALID_NO_DATA = ("computed",)
-VALID_LEVERAGED = ("ordinary",)
 
 class ConfigError(Exception):
     pass
@@ -99,9 +98,6 @@ class Venue:
     #  The ATS strategy file listing names this venue must NOT publish a
     #  limit for.  India only; read by india.py, at its cutoff, not here.
     exclude_file: str = ""
-    #  "ordinary": a leveraged or inverse name takes the venue's band.
-    #  Blank: it is refused unless bands.csv has a row for it.
-    leveraged_band: str = ""
 
     @property
     def computed(self) -> bool:
@@ -253,17 +249,6 @@ def load(config_dir, tsr_dir=None) -> Config:
                 f"markets.csv {vid}: NoDataFallback {no_data!r} is not one "
                 f"of {VALID_NO_DATA} (blank means drop, as before)")
 
-        #  A LEVERAGED OR INVERSE NAME, where the exchange does not care.
-        #  Blank refuses one that bands.csv has no row for - Korea's rule,
-        #  where the band is the multiple times the ordinary one.  "ordinary"
-        #  gives it the venue's band like any other name: the TSE's limit
-        #  table has no leverage adjustment.
-        lev = (r.get("LeveragedBand") or "").strip().lower()
-        if lev and lev not in VALID_LEVERAGED:
-            raise ConfigError(
-                f"markets.csv {vid}: LeveragedBand {lev!r} is not one of "
-                f"{VALID_LEVERAGED} (blank means refuse without a row)")
-
         venues[vid] = Venue(
             country=(r.get("Country") or "").strip(),
             venue_id=vid, cutoff=cutoff, source=source,
@@ -275,8 +260,7 @@ def load(config_dir, tsr_dir=None) -> Config:
             no_close_fallback=fallback,
             tick_from=tick_from,
             no_data_fallback=no_data,
-            exclude_file=exclude_file,
-            leveraged_band=lev)
+            exclude_file=exclude_file)
 
     if not venues:
         raise ConfigError(f"{config_dir / 'markets.csv'} defines no venues")

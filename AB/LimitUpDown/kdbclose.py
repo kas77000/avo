@@ -49,7 +49,6 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
-import bands
 import ticks
 
 #  What we need, and nothing else.  equity_master carries a lot more; asking
@@ -371,7 +370,7 @@ def fetch(conn, date, syms, log=None) -> dict:
 
     A sym with no row, or a null close, is simply absent from the first; the
     caller reports it rather than guessing a price.  The names are a second,
-    independent fact - see LEVERAGE_MARKERS.
+    independent fact: the name is what bands.csv's NameMarker matches.
 
     THE SIMPLEST QUERY THAT WORKS, and it took three live runs to stop
     decorating it:
@@ -425,42 +424,8 @@ def fetch(conn, date, syms, log=None) -> dict:
         if name:
             names[sym] = name
     #  NAMES COME BACK EVEN FOR A SYM WITH NO CLOSE.  The two are separate
-    #  facts and a name is what says a product is leveraged - the caller
-    #  needs it to refuse a band, not only to compute one.
+    #  facts, and a name is what says a product is leveraged.
     return out, names
-
-
-#  A NAME THAT SAYS THE BAND IS NOT THE VENUE'S.  Korea prices a leveraged
-#  or inverse product at its multiple times the ordinary band, and nothing
-#  else we hold distinguishes one: the crosscode Type is ETF for both, and
-#  there is no ticker prefix the way China has 688 and 300.
-#
-#  WE DO NOT GUESS THE MULTIPLE.  0080Y0 KP is +/-60%, twice the ordinary
-#  30, but that one name does not establish what every leveraged or inverse
-#  product gets - an inverse tracking -1x need not be 60 at all.  So a name
-#  that matches is REFUSED a computed band rather than given one, which is
-#  the same call this codebase makes for a missing tick: a wrong limit is
-#  worse than no limit, because the wrong one is believed.
-#  "inver" catches a name the feed TRUNCATED - 230480 KP arrives as just
-#  "Inver" - so it is detected and refused rather than quietly handed the
-#  ordinary band.  A truncated name cannot say which multiple it is, and
-#  guessing 1x published that name at half its real width.
-LEVERAGE_MARKERS = ("leverage", "leveraged", "leverege", "inver", "inverse",
-                    "2x", "3x")
-
-
-def is_leveraged(name: str) -> bool:
-    """Does this exchange name mark a product whose band is not its
-    venue's?
-
-    CASE FOLDED FIRST, because the exchange name is whatever the feed
-    happened to store - "leverage", "Leverage" and "LEVERAGE" are one
-    product, and which of them a band is refused for must not depend on
-    that.
-
-    Then matched on word-ish boundaries, so a company that merely contains
-    the letters - Coverage Analytics - is not caught."""
-    return any(bands.marker_matches(m, name) for m in LEVERAGE_MARKERS)
 
 
 def _id_text(value) -> str:

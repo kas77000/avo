@@ -458,8 +458,8 @@ silently missing from a production feed.
   job runs pre-open and a real-time field may not have ticked yet. If
   `LAST_PRICE` turns out to be always populated at run time, tighten
   `bpipe.band_from`.
-- **A name under Rp 50 matches no tier**, and is reported rather than quietly
-  lost.
+- **A name under Rp 50 takes the lowest tier**, 35%, without the Rp 50 floor
+  that would put its down limit above its up one.
 - **Rights are excluded** by the `Type in {Equity, ETF}` filter on CrossCode.csv,
   for every market.
 - **Write to temp, validate, then copy.**
@@ -602,10 +602,10 @@ Only Indonesia still names a `TickSource`, and that is deliberate: its ladder
 the trading system actually rounds by. A venue that names one uses it; every
 other venue asks kdb.
 
-**A name kdb has no ladder for is reported, not published unrounded** — an
-unrounded limit is one the exchange rejects. The run prints the count and lists
-the first few, and `--kdb-check` fetches ladders for its sample so coverage can
-be checked in seconds rather than discovered by a live run.
+**A name kdb has no ladder for is published unrounded** — the raw band, rather
+than no limit. The run prints an `unrounded` line with the count and the first
+few names, and `--kdb-check` fetches ladders for its sample so coverage can be
+checked in seconds rather than discovered by a live run.
 
 ### A computed name with no close falls back to Bloomberg
 
@@ -641,15 +641,22 @@ As shipped, every venue with tiers asks **except Indonesia**. Thailand and
 India are `Source=bloomberg` and never reach the fallback at all, so their
 column is blank too.
 
-### Japan: a leveraged product DOES get the venue's band
+### A name with a close always gets a limit
 
-The TSE's limit table has no leverage adjustment, so `markets.csv` sets
-`LeveragedBand=ordinary` on the three Japanese venues: `1570 JT` (Nikkei 2x)
-is priced off the same table as `7203 JT`. Blank — every other venue — keeps
-the rule below, which is Korea's. The 2026-09-28 run excluded about fifty
-Japanese ETFs before this.
+A name is excluded only when **there is no close and every fallback failed**.
+Anything else takes a default rather than being dropped:
 
-### A leveraged product does not get the venue's band
+| what is missing | the default |
+|---|---|
+| a `bands.csv` row for its leverage | the venue's ordinary band |
+| a tick ladder in kdb | the band, unrounded |
+| a tier for its price | the lowest tier |
+| room for `MinPrice` under the up limit | the band without the floor |
+
+Japan has no leverage rows at all, so `1570 JT` (Nikkei 2x) is priced off the
+same TSE table as `7203 JT` — which is the TSE's own rule.
+
+### A leveraged product takes its own row, where Korea writes one
 
 `bands.csv` has a `NameMarker` column. A row carrying one applies only to
 securities whose **exchange name** contains that word, matched case
@@ -682,10 +689,9 @@ matches both `inverse` and `3x`, and on length alone the longer `inverse` would
 win and publish a 3x product at a third of its real width. The sign is dropped:
 a −2x and a 2x move the same distance, and a band is a width.
 
-**A multiple with no row is refused, never given the default.** `KODEX 4X
-Futures ETN` matches no marker at all, so without that guard it would fall
-through to the blank row and publish at a quarter of its width. It reports as
-`leveraged` instead, carrying the name.
+**A multiple with no row takes the default.** `KODEX 4X Futures ETN` matches no
+marker, so it is published at the ordinary 30% — a quarter of its real width,
+but a limit. Add a `4x` row to give it its own.
 
 **The exchange does not always leave spaces, or spell it the same way.** Real
 `LONG_COMP_NAME` values that a word-boundary match found nothing in:
@@ -703,7 +709,7 @@ to be precious about an issuer's typo. Word markers still match on boundaries, s
 
 `Inver` is a name the feed **truncated**, and a truncated name cannot say which
 multiple it is — that one is a 2x, so the ordinary band would have been half its
-real width. It is refused and reported rather than guessed.
+real width. It takes the ordinary band, as any name with no row does.
 
 **These names round to the NEAREST tick, not inward.** `bands.csv` has a
 `Rounding` column per tier; blank means the venue's mode, so an ordinary Korean
@@ -728,11 +734,8 @@ it: *"Shinhan SOL Shipbuilding TOP3 Plus leverage ETF"*. It rides on the query
 that already fetches the close, so both arrive together and describe the same
 listing.
 
-**A marker with no row is still refused.** 60% is Korea's answer for `leverage`;
-it is not established for an inverse, which may track −1x and get the ordinary
-band. Those report as `leveraged` in `excluded.csv`, carrying the name that
-caught them. What is written down is used; what is not is reported, never
-guessed.
+What `bands.csv` writes down is used; a name it does not cover takes the
+venue's ordinary band.
 
 ### And the other way: Bloomberg would not price it, so compute
 
@@ -844,16 +847,14 @@ input files (last modified):
 ```
 ReutersCode,BloombergCode,Venue,Missing,Reason,Detail
 A.KS,A KP,KSC-MAIN,close,no previous close in equity_master,
-B.KQ,B KQ,KOE-MAIN,ladder,no tick ladder for this name,close 5150
 C.JK,C IJ,JKT-MAIN,close-and-bloomberg,"no close ..., then no answer ...",
 ```
 
 **`Missing` names the input that was absent**, in one word, so the file filters
-by it — `close`, `ladder`, `band-tier`, `entitlement`, `no-answer` and so on.
+by it — `close`, `close-and-bloomberg`, `entitlement`, `no-answer` and so on.
 The `Reason` says the same thing in prose; `Missing` is what makes "how many
 names did we lose for want of a close" a filter rather than a reading exercise.
-`Detail` carries what we *did* have, so a name dropped for want of a ladder
-still shows the close it had. The run report totals the same tokens.
+The run report totals the same tokens.
 
 **Every** dropped name with its reason — the run report shows the first five per
 venue and then `(+N more)`, which is right for reading and useless for answering

@@ -271,7 +271,6 @@ EXCLUDED_HEADER = ["ReutersCode", "BloombergCode", "Venue", "Missing",
 #  empty cell that reads like "nothing was missing".
 MISSING_TOKENS = (
     ("no close in equity_master, then", "close-and-bloomberg"),
-    ("leveraged or inverse", "leveraged"),
     ("no previous close", "close"),
     ("no tick ladder", "ladder"),
     ("no tick tier", "tick-tier"),
@@ -835,35 +834,6 @@ def price_from_bloomberg(rows, values, refused=None):
     return out, _excluded(by_reason)
 
 
-def _uncovered(cfg, r, name: str) -> bool:
-    """Is this name something other than an ordinary share, with no band
-    written down for what it actually is?
-
-    THE MULTIPLE IS CHECKED FIRST AND ON ITS OWN.  A name carrying one is
-    priced by it, so a multiple nobody has written a row for must be
-    REFUSED - not quietly handed the default.  "KODEX 4X Futures ETN" would
-    otherwise match no marker at all, fall through to the blank row and
-    publish at a quarter of its real width, which is the failure this whole
-    rule exists to prevent.
-
-    Only when there is no multiple does the word matter: a plain inverse
-    tracks -1x and wants the `inverse` row.
-
-    Asked of the tiers rather than of a list kept here, so the answer is
-    whatever bands.csv says and the two cannot drift apart."""
-    #  A venue whose exchange gives these names the ordinary band - Japan.
-    if cfg.venues[r.venue_id].leveraged_band == "ordinary":
-        return False
-    markers = [t.name_marker for t in cfg.bands.get(r.venue_id, ())
-               if t.name_marker]
-    multiple = bands.multiple_in(name)
-    if multiple:
-        return not any(multiple in m for m in markers)
-    if kdbclose.is_leveraged(name):
-        return not any(bands.marker_matches(m, name) for m in markers)
-    return False
-
-
 def _whole_pct(fraction: Decimal) -> int:
     """0.29903 -> 30.  int() alone would truncate to 29 and split one band
     across two buckets."""
@@ -982,7 +952,7 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
     floor the down leg at MinPrice, and only THEN round to the tick.
     Rounding before flooring would move prices near a tier boundary.  The
     tick too is chosen from the close, not from the limit being rounded."""
-    out, by_reason = [], {}
+    out, by_reason, no_tick = [], {}, []
     ladders = ladders or {}
     names = names or {}
 
@@ -993,21 +963,11 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
 
     for r in rows:
         venue = cfg.venues[r.venue_id]
-        #  BEFORE THE CLOSE, because this is not about the price.  A
-        #  leveraged or inverse product does not get its venue's ordinary
-        #  band - 0080Y0 KP closed at 8,025 and the exchange published
-        #  12,835/3,215, which is +/-60% where the plain row says 30.
-        #
-        #  bands.csv answers it where someone has written the answer down:
-        #  a row carrying NameMarker=leverage gives Korea its 60.  What
-        #  is NOT written down is still refused rather than guessed - an
-        #  inverse tracking -1x need not be 60 at all, and a wrong limit is
-        #  worse than no limit because the wrong one is believed.
+        #  A LEVERAGED OR INVERSE PRODUCT takes the row bands.csv writes for
+        #  it - Korea's leverage is 2x the 30% - and one with no row takes
+        #  the venue's ordinary band.  Every name with a close gets a limit;
+        #  select_tier does the choosing.
         name = names.get(r.ric, "")
-        if _uncovered(cfg, r, name):
-            drop("leveraged or inverse product with no band of its own",
-                 r, name)
-            continue
 
         ref = closes.get(r.ric)
         if ref is None:
@@ -1015,6 +975,7 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
             continue
 
         tick = None
+        unrounded = False
         if venue.rounding != "none":
             #  THE VENUE'S OWN LADDER WINS, and only Indonesia has one: its
             #  .tsr IS the ATS's file, so a ladder from anywhere else could
@@ -1022,14 +983,13 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
             #  else takes the per-name ladder out of kdb's ticksizeids /
             #  ticksizetbl - the same two tables blp_lib.q rounds by.
             ladder = cfg.ticks.get(r.venue_id) or ladders.get(r.ric)
-            if not ladder:
-                drop("no tick ladder for this name", r, f"close {ref}")
-                continue
-            at_ref = ticks.tick_for(ladder, ref)
+            at_ref = ticks.tick_for(ladder, ref) if ladder else None
             if at_ref is None:
-                drop("no tick tier for the previous close", r, f"price {ref}")
-                continue
-
+                #  NO TICK TO ROUND ON: the raw band is published rather
+                #  than no band, and counted so the run says how many.
+                unrounded = True
+                no_tick.append(f"{r.ric} ({r.bbg})")
+        if venue.rounding != "none" and not unrounded:
             #  THE COARSER OF THE TWO TICKS: the one at the close, and the
             #  one where the leg being rounded actually lands.  A ladder is
             #  monotonic, so this is just "the tick at the higher of the
@@ -1077,12 +1037,17 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
         try:
             high, low = bands.compute(cfg.bands[r.venue_id], r.ticker, ref,
                                       tick, venue.min_price, venue.rounding,
-                                      name)
+                                      name, unrounded)
         except bands.BandError as e:
             drop(e.reason, r, e.detail)
             continue
         out.append(_out_row(r, low, high))
 
+    if no_tick:
+        more = (f" (+{len(no_tick) - SHOW_NAMES} more)"
+                if len(no_tick) > SHOW_NAMES else "")
+        print(f"  unrounded {len(no_tick):5d}  no tick ladder, published the "
+              f"raw band: {', '.join(no_tick[:SHOW_NAMES])}{more}")
     return out, _excluded(by_reason)
 
 
@@ -2351,7 +2316,7 @@ def self_test() -> int:
 
     check("the names with a previous close",
           [r["#ReutersCode"] for r in cout],
-          ["BBCA.JK", "TLKM.JK", "MIDS.JK"])
+          ["BBCA.JK", "TLKM.JK", "MIDS.JK", "TINY.JK"])
     check("8000 rupiah takes the 20% tier, and both legs land on the 25 "
           "tick exactly",
           (cout[0]["LimitUpPrice"], cout[0]["LimitDownPrice"]),
@@ -2363,14 +2328,11 @@ def self_test() -> int:
           (cout[2]["LimitUpPrice"], cout[2]["LimitDownPrice"]),
           ("135", "65"))
     creasons = {e.reason: e.rows for e in cexcl}
-    check("a name under Rp 50 matches no tier and is REPORTED rather than "
-          "quietly lost",
-          [d.ric for d in creasons["no band tier for the previous close"]],
-          ["TINY.JK"])
-    check("the PRICE rides along as per-name detail, so forty names under "
-          "Rp 50 are one reason with forty names, not forty reasons",
-          str(creasons["no band tier for the previous close"][0]),
-          "TINY.JK (TINY IJ) price 10")
+    check("A NAME UNDER Rp 50 STILL GETS A LIMIT: the lowest tier, 35%, "
+          "without the Rp 50 floor that would put the down leg over the up",
+          (cout[3]["LimitUpPrice"], cout[3]["LimitDownPrice"]), ("13", "7"))
+    check("so the only name excluded is the one with no close",
+          list(creasons), ["no previous close in equity_master"])
     check("a name equity_master had no close for",
           [d.ric for d in creasons["no previous close in equity_master"]],
           ["NOCL.JK"])
@@ -2455,13 +2417,13 @@ def self_test() -> int:
           sorted(v.venue_id for v in cfg.venues.values()
                  if v.country == "Japan" and v.rounding == "none"),
           ["CHJ-MAIN", "JNX-MAIN", "TYO-MAIN"])
-    check("A NAME KDB HAS NO LADDER FOR IS REPORTED, NOT PUBLISHED "
-          "UNROUNDED - an unrounded limit is one the exchange will reject",
-          [d.ric for d in
-           {e.reason: e.rows for e in kexcl}["no tick ladder for this name"]],
-          ["ZZZZ.KS"])
+    check("A NAME KDB HAS NO LADDER FOR IS PUBLISHED UNROUNDED - the raw "
+          "30% band, rather than no limit at all",
+          ([(r["#ReutersCode"], r["LimitUpPrice"], r["LimitDownPrice"])
+            for r in kout if r["#ReutersCode"] == "ZZZZ.KS"], kexcl),
+          ([("ZZZZ.KS", "6695", "3605")], []))
 
-    print("\na leveraged product is refused the venue's band")
+    print("\na leveraged product takes its own band, or the venue's")
     lev = [row("0080Y0.KS", "0080Y0 KP", "0080Y0.KR", "KSC-MAIN"),
            row("005930.KS", "005930 KP", "005930.KR", "KSC-MAIN")]
     lev_names = {"0080Y0.KS": "Shinhan SOL Shipbuilding TOP3 Plus leverage "
@@ -2498,26 +2460,17 @@ def self_test() -> int:
         {"1570.T": "NEXT FUNDS Nikkei 225 Leveraged Index Exchange Traded "
                    "Fund"})
     check("1570 JT, a 2x Nikkei ETF, is priced off the TSE table like any "
-          "name - LeveragedBand=ordinary, because the TSE has no leverage "
-          "adjustment",
+          "name - Japan has no leverage rows, so it takes the default",
           ([(r["LimitUpPrice"], r["LimitDownPrice"]) for r in jp_out],
            jp_exc), ([("3833", "2433")], []))
-    kr = row("X.KS", "X KP", "X.KR", "KSC-MAIN")
-    check("Korea still refuses a name it has no row for - 230480 KP's "
-          "truncated 'Inver' cannot say its multiple",
-          _uncovered(cfg, kr, "Kiwoom KOSEF USD Futures Inver"), True)
-    check("but 'Leveraged' is a row now, at 2x - 580047 KP",
-          (_uncovered(cfg, kr, "KB Securities KB Leveraged Hang Seng TECH "
-                               "Futures ETN H B 47"),
-           bands.select_tier(cfg.bands["KSC-MAIN"], "580047", Decimal(1000),
-                             "KB Leveraged Hang Seng").multiple),
-          (False, Decimal(2)))
-    check("and so is 1.5x, at 1.5 times the 30% - 520076 KP",
-          (_uncovered(cfg, kr, "MiraeAsset Securities Miraeasset 1.5X "
-                               "Natural Gas Futures ETN 91"),
-           bands.select_tier(cfg.bands["KSC-MAIN"], "520076", Decimal(1000),
-                             "Miraeasset -1.5X Natural Gas").multiple),
-          (False, Decimal("1.5")))
+    kor_t = cfg.bands["KSC-MAIN"]
+    check("'Leveraged' has a row, at 2x - 580047 KP",
+          bands.select_tier(kor_t, "580047", Decimal(1000),
+                            "KB Leveraged Hang Seng").multiple, Decimal(2))
+    check("and so has 1.5x, at 1.5 times the 30% - 520076 KP",
+          bands.select_tier(kor_t, "520076", Decimal(1000),
+                            "Miraeasset -1.5X Natural Gas").multiple,
+          Decimal("1.5"))
 
     #  THE MULTIPLE IS THE SIGNAL, NOT THE WORD "INVERSE".  Real names, as
     #  a run's excluded.csv listed them: a -1x product moves like any other
@@ -2558,14 +2511,13 @@ def self_test() -> int:
           "the 1x row and publish at a third of its real width.  0.5x "
           "takes the ORDINARY 30%: KRX widens only ABOVE 1x, so a half is "
           "not a half band",
-          [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in m_out],
+          [(r["LimitUpPrice"], r["LimitDownPrice"]) for r in m_out][:3],
           [("10430", "5620"), ("12835", "3215"), ("15240", "810")])
-    check("AND A MULTIPLE NOBODY HAS WRITTEN A ROW FOR IS REFUSED, not "
-          "quietly handed the default - 4X would otherwise match no marker "
-          "at all and publish at a quarter of its width",
-          [(e.reason, [d.detail for d in e.rows]) for e in m_exc],
-          [("leveraged or inverse product with no band of its own",
-            ["SOMEBODY KODEX 4X Futures ETN"])])
+    check("AND A MULTIPLE NOBODY HAS WRITTEN A ROW FOR TAKES THE DEFAULT - "
+          "4X has no row, so it is published at the ordinary 30% rather "
+          "than left without a limit",
+          ([(r["LimitUpPrice"], r["LimitDownPrice"]) for r in m_out][3:],
+           m_exc), ([("10430", "5620")], []))
     check("a company whose name merely contains 2XL is not a 2x product",
           bands.multiple_in("MATRIX 2XL Holdings"), None)
     check("an Inverse 2X takes twice it, because 'inverse 2x' is the "
@@ -2608,40 +2560,28 @@ def self_test() -> int:
           bands.multiple_in("MATRIX 2XL Holdings"), None)
 
     #  A TRUNCATED NAME CANNOT SAY WHICH MULTIPLE IT IS.  230480 KP arrives
-    #  as "Inver" and is a 2x; guessing 1x published it at half its width.
-    trunc_out, trunc_exc = price_computed(
-        cfg, [row("230480.KS", "230480 KP", "230480.KS", "KSC-MAIN")],
-        {"230480.KS": Decimal("4725")}, {"230480.KS": etf_ladder},
-        {"230480.KS": "Inver"})
-    check("a name the feed TRUNCATED is refused, not handed the ordinary "
-          "band - it is a 2x and 30% would be half its real width",
-          (trunc_out, [e.reason for e in trunc_exc]),
-          ([], ["leveraged or inverse product with no band of its own"]))
+    #  as "Inver"; with no row to match it takes the default band.
+    shipped_out, shipped_exc = price_computed(
+        cfg, [row("230480.KS", "230480 KP", "230480.KS", "KSC-MAIN"),
+              row("M3.KS", "M3 KP", "M3.KR", "KSC-MAIN")],
+        {"230480.KS": Decimal("4725"), "M3.KS": Decimal("8025")},
+        {"230480.KS": etf_ladder, "M3.KS": etf_ladder},
+        {"230480.KS": "Inver", "M3.KS": "SOMEBODY KODEX 4X Futures ETN"})
+    check("a TRUNCATED name and an unwritten multiple are both published at "
+          "the ordinary 30% rather than refused",
+          ([(r["BloombergCode"], r["LimitUpPrice"], r["LimitDownPrice"])
+            for r in shipped_out], shipped_exc),
+          ([("230480 KP", "6140", "3310"), ("M3 KP", "10430", "5620")], []))
 
-    inv_names = dict(lev_names)
-    inv_names["0080Y0.KS"] = "SOMEBODY KODEX 4X Futures ETN"
-    _, inv_exc = price_computed(
-        cfg, lev, {"0080Y0.KS": Decimal("8025"),
-                   "005930.KS": Decimal("8025")},
-        {"005930.KS": ladder, "0080Y0.KS": etf_ladder}, inv_names)
-    check("the refusal carries the name that caused it, so it can be "
-          "checked rather than taken on trust",
-          inv_exc[0].rows[0].detail, "SOMEBODY KODEX 4X Futures ETN")
-    check("and it has its own word in the excluded report",
-          missing_token("leveraged or inverse product with no band of its "
-                        "own"), "leveraged")
-    check("A COMPANY THAT MERELY CONTAINS THE LETTERS IS NOT CAUGHT",
-          (kdbclose.is_leveraged("Coverage Analytics Inc"),
-           kdbclose.is_leveraged("Leverage Shares PLC")), (False, True))
+    check("A COMPANY THAT MERELY CONTAINS THE LETTERS IS NOT MATCHED",
+          (bands.marker_matches("leverage", "Coverage Analytics Inc"),
+           bands.marker_matches("leverage", "Leverage Shares PLC")),
+          (False, True))
     check("HOWEVER THE EXCHANGE CAPITALISED IT - one feed writing Leverage "
-          "and another LEVERAGE must not be the difference between a band "
-          "refused and a band published",
-          [kdbclose.is_leveraged(n) for n in
+          "and another LEVERAGE must not change which row a name takes",
+          [bands.marker_matches("leverage", n) for n in
            ("KODEX leverage", "KODEX Leverage", "KODEX LEVERAGE",
-            "KODEX LeVeRaGe", "TIGER 200 LEVERAGED",
-            "KODEX 200 Futures Inverse 2X",
-            "KODEX 200 FUTURES INVERSE 2x")],
-          [True] * 7)
+            "KODEX LeVeRaGe")], [True] * 4)
 
     print("\nTaiwan, where the two legs sit either side of a tier")
     #  3593 TT, table 6207, close 9.9.  The up leg crosses 10 into the 0.05

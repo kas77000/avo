@@ -117,8 +117,7 @@ def marker_matches(marker: str, name: str) -> bool:
     separators.  Case folded, because the exchange name is whatever the
     feed stored - Leverage, leverage and LEVERAGE are one product.
 
-    Shared with kdbclose.is_leveraged so that "this name is special" and
-    "this is the row for it" can never disagree."""
+    What picks a leveraged product's row in bands.csv."""
     if not marker:
         return True
     #  A MARKER THAT IS ITSELF A MULTIPLE IS MATCHED AS ONE, not as a word.
@@ -172,7 +171,9 @@ def select_tier(tiers, ticker: str, ref: Decimal,
     matching = [t for t in matching if len(t.sym_prefix) == longest]
     eligible = [t for t in matching if t.floor_from <= ref]
     if not eligible:
-        return None
+        #  UNDER EVERY FLOOR TAKES THE LOWEST TIER.  A name is never left
+        #  without a limit for want of a tier - a default band beats none.
+        return min(matching, key=lambda t: t.floor_from)
     return max(eligible, key=lambda t: t.floor_from)
 
 
@@ -273,7 +274,11 @@ def _krx_band(tier: Tier, ref: Decimal, tick, min_price):
 
 
 def compute(tiers, ticker: str, ref: Decimal, tick,
-            min_price: Optional[Decimal], rounding: str, name: str = ""):
+            min_price: Optional[Decimal], rounding: str, name: str = "",
+            unrounded: bool = False):
+    """`unrounded` publishes the raw band whatever the venue or tier says -
+    the default for a name with no tick to round on, which is still given
+    a limit rather than left without one."""
     if ref is None or ref <= 0:
         raise BandError("reference price is not positive")
     tier = select_tier(tiers, ticker, ref, name)
@@ -283,7 +288,13 @@ def compute(tiers, ticker: str, ref: Decimal, tick,
     #  THE TIER MAY OVERRIDE THE VENUE.  Same precedence as everything else
     #  here: the more specific rule wins, and a blank means "as the venue
     #  does".
-    mode = tier.rounding or rounding
+    mode = "none" if unrounded else (tier.rounding or rounding)
+    #  A FLOOR ABOVE THE UP LEG IS NOT APPLIED: a close under Indonesia's
+    #  Rp 50 would otherwise give a down limit over the up one, and no
+    #  limit at all.  The band without the floor is the default.
+    up_raw = raw_band(tier, ref)[0]
+    if min_price is not None and min_price >= up_raw:
+        min_price = None
     if mode == "krx":
         up, down = _krx_band(tier, ref, tick, min_price)
     else:
@@ -342,9 +353,9 @@ def self_test() -> int:
     check("just under stays below", select_tier(IDN, "BBCA", D("199")), IDN[0])
     check("the top tier is open ended",
           select_tier(IDN, "BBCA", D("999999")), IDN[2])
-    check("below the lowest floor there is NO tier - Indonesia starts at 50 "
-          "and a rupiah name under that is not ours to price",
-          select_tier(IDN, "BBCA", D("49")), None)
+    check("below the lowest floor it takes the LOWEST tier - a default "
+          "band, never no band",
+          select_tier(IDN, "BBCA", D("49")), IDN[0])
 
     CN = [P("688", "0", "0.20", "0.20"), P("", "0", "0.10", "0.10")]
     print("\nsymbol prefixes - STAR and ChiNext")
@@ -506,9 +517,15 @@ def self_test() -> int:
     check("no minimum price configured, no floor",
           compute(IDN, "BBCA", D("60"), D("1"), None, "inward"),
           (D("81"), D("39")))
-    raises("a price under every tier is refused, not guessed",
-           lambda: compute(IDN, "BBCA", D("49"), D("1"), D("50"), "inward"),
-           "no band tier for the previous close")
+    check("a price under every tier takes the lowest, and a floor above "
+          "the up leg is dropped rather than inverting the band: Rp 10 "
+          "gives 13/7, not 13/50",
+          compute(IDN, "BBCA", D("10"), D("1"), D("50"), "inward"),
+          (D("13"), D("7")))
+    check("unrounded publishes the raw band even where the venue rounds - "
+          "the default for a name with no tick",
+          compute(IDN, "BBCA", D("100.5"), None, None, "inward",
+                  unrounded=True), (D("135.675"), D("65.325")))
     raises("a zero reference price is refused",
            lambda: compute(IDN, "BBCA", D("0"), D("1"), None, "inward"),
            "reference price is not positive")
