@@ -41,6 +41,8 @@ ours` line; `limit_up_down.r` covers only the first cutoff's venues anyway.
    | `NOTRADINGDAY_DIR` | Where the `NoTradingDay <Country>.csv` files are. |
    | `LOG_DIR` | Every job appends to `LOG_DIR/phase1-YYYYMMDD.log`. |
    | `KDB_TIMEZONE` | The Windows timezone id kdb stamps its prints in. Left out or `""`, it is `China Standard Time`. It must match the zip's manifest (`kdb timezone`); if they differ, `historical.r` stops with `XX` and writes nothing, since a tick file is never rewritten. |
+   | `WORKERS` | Optional. How many R processes `historical.r` writes the tick files with. Left out or `""`: one fewer than the PC's cores, at most 4. `1` writes from the job's own process. If the workers cannot start, the log says `!!` and the job writes from its own process. |
+   | `TICK_BLOCK` | Optional. How many rows of `ticks.csv` `historical.r` reads at a time; the file is never held whole. Left out or `""`: 500000. Lower it if the PC runs short of memory. |
    | `LULD_OUT_TEMP` | `limitUpDown.csv` is written here first, then copied to each environment. |
    | `LULD_OUT_TEST`, `LULD_OUT_PILOT`, `LULD_OUT_PROD` | Where each environment reads `limitUpDown.csv`. An environment the run asks for (all three by default) whose path is blank FAILS the job with `XX`; the others still get the file. Leave one blank only if you always name the environments, for example `"Test|Prod"`. |
    | `INDIA_NSE_STRA`, `INDIA_BSE_STRA` | Not read in Phase1 (India is not at the first cutoff). Leave them `""`. |
@@ -96,6 +98,15 @@ A job can be run on its own the same way:
 Running the same zip again is safe. `historical.r` leaves a tick file that
 already exists alone and does not repeat a NoTradingDay row;
 `limit_up_down.r` and `trading_data.r` overwrite their file.
+
+So a `historical.r` run that stopped part way (a closed window, a lost
+share) is finished by running the same zip again: it skips every file
+already there, before formatting any of its rows, logs `..  N files
+already there, skipped`, and writes the rest. A file is written as
+`<name>.csv.part` and renamed when complete, so a file under its real name
+is always whole; a `.part` left behind is overwritten. The log's step 2
+also gives the seconds spent reading and writing, the rows a second and
+the workers used.
 
 Each job unzips only the members it reads (`limit_up_down.r` and
 `trading_data.r` never extract `ticks.csv`) and checks them before
@@ -193,6 +204,7 @@ What stops a job with `XX` (or an R `Error`, before the log is open):
 |-----|-----|
 | all | The zip does not unzip cleanly, or a member's rows are not the manifest's count. Copy the zip again. |
 | historical | The manifest's `kdb timezone` is not `KDB_TIMEZONE`. Nothing is written. |
+| historical | `ticks.csv is not grouped by sym`: a sym's rows are split. AB never writes that; the zip is not one it wrote. |
 | limit_up_down | `<env>: LULD_OUT_<ENV> is blank`: an environment asked for has no path. The others still get the file. |
 | limit_up_down | The LimitDate is before today: an old zip. Nothing is published. |
 | limit_up_down | A row fails validation, or the output is empty. Nothing is published. |
@@ -209,6 +221,7 @@ What each `!!` means:
 | historical | `<code>: no TimeZone for <market> in hist_markets.csv; no file` | Set the market's `TimeZone` (or the name's `FidessaMarket`) and run the zip again. After 20 such lines, one more gives the count of the rest. |
 | historical | `<code> not in the extract, nothing written` | A name in Nova's CrossCode that AB did not ask kdb about: no file and no NoTradingDay row. The CrossCodes on AB and Nova differ. After 20 such lines, one more gives the count of the rest. |
 | historical | `N syms in ticks.csv are not in the universe` | The zip has prints for names not in this CrossCode. They are dropped. The CrossCodes on AB and Nova differ. |
+| historical | `could not start N workers (...); writing in one process` | The run goes on, slower. The reason is on the line. |
 | historical | `<code>: a quote with no bid or ask; no file` | A quote-only name with nothing to price. |
 | historical | `<code>: no Country for <ext> in close_conditions.csv` | No NoTradingDay row could be written for it. |
 | limit_up_down | `N excluded, <token>: <reason> (...)` | Names with no limit in the file. See the tokens below. |

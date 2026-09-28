@@ -170,8 +170,8 @@ h_cell <- function(x) {
 
 # ticksfile.write_rows: \r\n line ends, UTF-8 bytes untouched, written as
 # .part and renamed, so a file under its real name is a finished one.
-h_write <- function(path, lines) {
-  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+h_write <- function(path, lines, mkdir = TRUE) {
+  if (mkdir) dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   part <- paste0(path, ".part")
   con <- file(part, "wb")
   writeLines(enc2utf8(lines), con, sep = "\r\n", useBytes = TRUE)
@@ -182,6 +182,141 @@ h_write <- function(path, lines) {
 h_path <- function(out_dir, code, date) {
   file.path(out_dir, h_safe(code),
             paste0("raw-", h_safe(code), "-", format(date, "%Y%m%d"), ".csv"))
+}
+
+# The files for one lot of lines. cols holds time, price, size, cond and
+# ex, one entry per line, and idx each line's row in nm (the names, with
+# path, shift, mic and header). The caller has left out every name whose
+# file is already there; a leftover .part is overwritten. The lines are
+# formatted all at once, split once by name, and each file is one
+# writeLines. Returns the names written, their row counts and the new
+# folders; it never logs, as it may run in a worker.
+h_write_names <- function(cols, idx, nm) {
+  todo <- unique(idx)
+  out <- list(wrote = todo, rows = integer(0), new_folders = 0)
+  if (!length(todo)) return(out)
+  lines <- paste(h_cell(h_clock(cols$time, nm$shift[idx])),
+                 h_cell(cols$price), h_cell(cols$size), h_cell(cols$cond),
+                 h_cell(cols$ex), h_cell(nm$mic[idx]), sep = ",")
+  by_name <- split(lines, factor(idx, levels = todo))
+  dirs <- dirname(nm$path[todo])
+  fresh <- !file.exists(dirs)
+  for (j in seq_along(todo)) {
+    if (fresh[j]) dir.create(dirs[j], recursive = TRUE, showWarnings = FALSE)
+    h_write(nm$path[todo[j]], c(nm$header[todo[j]], by_name[[j]]),
+            mkdir = FALSE)
+  }
+  out$rows <- lengths(by_name, use.names = FALSE)
+  out$new_folders <- as.numeric(sum(fresh))
+  out
+}
+
+# What a worker runs: the names table is sent once, as H_NM.
+h_worker_init <- function(nm) {
+  assign("H_NM", nm, envir = globalenv())
+  NULL
+}
+h_worker_job <- function(job) h_write_names(job$cols, job$idx, H_NM)
+
+# A lot cut into at most n jobs, a name's lines all in one job, the jobs
+# about even in lines plus files.
+h_split_jobs <- function(cols, idx, n) {
+  u <- unique(idx)
+  at <- match(idx, u)
+  weight <- tabulate(at, length(u)) + 100
+  cum <- cumsum(weight)
+  grp <- pmin(n, floor((cum - weight) / cum[length(cum)] * n) + 1)[at]
+  lapply(split(seq_along(idx), grp), function(r) {
+    list(cols = lapply(cols, `[`, r), idx = idx[r])
+  })
+}
+
+# A count for the log, never as 3e+06.
+h_n <- function(x) sprintf("%.0f", x)
+
+# WORKERS and TICK_BLOCK: left out, NA or "" is the default.
+h_count_setting <- function(x, default, name) {
+  if (is.null(x) || length(x) != 1 || is.na(x) ||
+      !nzchar(trimws(as.character(x)))) return(as.integer(default))
+  n <- suppressWarnings(as.integer(x))
+  if (is.na(n) || n < 1 || n != suppressWarnings(as.numeric(x))) {
+    stop(name, " must be a whole number, 1 or more, not '", x, "'",
+         call. = FALSE)
+  }
+  n
+}
+
+h_default_workers <- function() {
+  n <- suppressWarnings(parallel::detectCores())
+  if (is.na(n)) n <- 1
+  as.integer(max(1, min(4, n - 1)))
+}
+
+# n R processes on this PC, each holding the names table.
+h_start_cluster <- function(n, nm) {
+  cl <- parallel::makePSOCKcluster(n, timeout = 600)
+  tryCatch({
+    parallel::clusterExport(cl, c("h_cell", "h_clock", "h_write",
+                                  "h_write_names", "h_worker_job"),
+                            envir = environment(h_write_names))
+    parallel::clusterCall(cl, h_worker_init, nm)
+  }, error = function(e) {
+    parallel::stopCluster(cl)
+    stop(e)
+  })
+  cl
+}
+
+# ticks.csv, `block` rows at a time, never the whole file. Each call of
+# each(b) gets whole syms: the rows of the sym a block ends on wait for the
+# next block. b is a list of sym, time, price, size, cond, ex. Parsed as
+# read.csv would (quotes, a line break inside a quoted cell), all text.
+# Returns the rows read and the seconds spent reading.
+h_tick_blocks <- function(path, block, each) {
+  con <- file(path, "r")
+  on.exit(close(con))
+  csv <- function(src, what, ...) {
+    scan(src, what = what, sep = ",", quote = "\"", quiet = TRUE,
+         na.strings = character(0), comment.char = "", strip.white = FALSE,
+         blank.lines.skip = TRUE, encoding = "UTF-8", ...)
+  }
+  head <- readLines(con, n = 1, encoding = "UTF-8")
+  have <- scan(text = sub("^﻿", "", head), what = "", sep = ",",
+               quote = "\"", quiet = TRUE, na.strings = character(0))
+  need <- c("sym", "time", "price", "size", "cond", "ex")
+  pos <- match(need, have)
+  if (!length(head) || anyNA(pos)) {
+    stop(path, " has no ", paste(need[is.na(pos)], collapse = ", "),
+         " column", call. = FALSE)
+  }
+  what <- rep(list(""), length(have))
+  carry <- NULL
+  rows <- 0
+  secs <- 0
+  repeat {
+    t0 <- proc.time()[["elapsed"]]
+    b <- csv(con, what, nmax = block, fill = TRUE, multi.line = FALSE)
+    b <- setNames(b[pos], need)
+    got <- length(b$sym)
+    rows <- rows + got
+    if (!is.null(carry)) b <- Map(c, carry, b)
+    secs <- secs + proc.time()[["elapsed"]] - t0
+    n <- length(b$sym)
+    if (!n) break
+    if (got < block) {
+      each(b)
+      break
+    }
+    last <- which(b$sym != b$sym[n])
+    if (!length(last)) {
+      carry <- b
+      next
+    }
+    cut <- max(last)
+    each(lapply(b, `[`, seq_len(cut)))
+    carry <- lapply(b, `[`, (cut + 1):n)
+  }
+  list(rows = rows, secs = secs)
 }
 
 # Append `code,YYYYMMDD` rows to one NoTradingDay file, creating it with
@@ -216,7 +351,8 @@ h_warn_each <- function(log, who, line, rest, cap = 20) {
 
 # -- the run ------------------------------------------------------------
 
-h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
+h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
+                  start_cluster = h_start_cluster) {
   date <- z$date
   ymd <- format(date, "%Y%m%d")
   markets <- p1_hist_markets(file.path(cfg, "hist_markets.csv"))
@@ -278,85 +414,176 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
   names_$shift <- unname(shift_of[match(names_$venue, venues)])
   names_$label <- tz_of(names_$label_market)
   names_$path <- h_path(s$OUTPUT_DIR, names_$code, date)
-  header <- function(i) {
+  names_$header <- vapply(seq_len(nrow(names_)), function(i) {
     paste(h_cell(c(H_COLUMNS, if (nzchar(names_$label[i])) names_$label[i])),
           collapse = ",")
-  }
+  }, character(1))
+  nm <- names_[, c("path", "shift", "mic", "header")]
 
   st <- list(written = 0, existing = 0, quote_only = 0, no_trading_day = 0,
              prints = 0, new_folders = 0, quote_skipped = 0,
              no_country = 0, no_timezone = 0, not_asked = 0,
              excluded = n_excluded)
   no_tz <- integer(0)
-  put <- function(i, lines) {
-    if (is.na(names_$shift[i])) {
-      no_tz <<- c(no_tz, i)
-      return(FALSE)
-    }
-    if (file.exists(names_$path[i])) {
-      st$existing <<- st$existing + 1
-      return(FALSE)
-    }
-    if (!file.exists(dirname(names_$path[i]))) {
-      st$new_folders <<- st$new_folders + 1
-    }
-    h_write(names_$path[i], c(header(i), lines))
-    TRUE
-  }
 
   log$step(2, "ticks")
-  tk <- p1_read(z$dir, "ticks.csv")
-  idx <- match(tk$sym, names_$sym)
-  log$kv("prints", nrow(tk))
-  unknown <- unique(tk$sym[is.na(idx)])
+  # p1_unzip has counted ticks.csv's lines against prints already; a zip
+  # that did not come through it is counted here, before anything is
+  # written.
+  if (!"ticks.csv" %in% z$checked) {
+    p1_check_counts(z$dir, z$manifest, "ticks.csv", say = log$info)
+  }
+  block <- h_count_setting(s$TICK_BLOCK, 500000, "TICK_BLOCK")
+  workers <- h_count_setting(s$WORKERS, h_default_workers(), "WORKERS")
+  cl <- NULL
+  on.exit(if (!is.null(cl)) parallel::stopCluster(cl), add = TRUE)
+  if (workers > 1) {
+    cl <- tryCatch(start_cluster(workers, nm), error = function(e) {
+      log$warn(paste0("could not start ", workers, " workers (",
+                      conditionMessage(e), "); writing in one process"))
+      NULL
+    })
+    if (is.null(cl)) workers <- 1L
+  }
+  log$kv("workers", workers, paste(block, "rows a block"))
+  t_write <- 0
+  rel <- file.path(h_safe(names_$code), basename(names_$path))
+  # Lines for names that have a clock, to their files, in the workers if
+  # there are any. A name whose file is already there is dropped here,
+  # before any of its lines is formatted or sent to a worker. Every file
+  # written or skipped gets its own line in the log file (not the console:
+  # there are tens of thousands). Adds the counts to st; returns them.
+  write_lot <- function(cols, idx, what = "") {
+    out <- c(written = 0, prints = 0, existing = 0)
+    if (!length(idx)) return(out)
+    t0 <- proc.time()[["elapsed"]]
+    u <- unique(idx)
+    have <- u[file.exists(nm$path[u])]
+    if (length(have)) {
+      keep <- !idx %in% have
+      cols <- lapply(cols, `[`, keep)
+      idx <- idx[keep]
+    }
+    r <- if (!length(idx)) list() else if (is.null(cl)) {
+      list(h_write_names(cols, idx, nm))
+    } else {
+      parallel::parLapply(cl, h_split_jobs(cols, idx, workers), h_worker_job)
+    }
+    wrote <- unlist(lapply(r, `[[`, "wrote"))
+    rows <- unlist(lapply(r, `[[`, "rows"))
+    t_write <<- t_write + proc.time()[["elapsed"]] - t0
+    log$file_only(c(sprintf("skip %s (exists)", rel[have]),
+                    sprintf("wrote %s  %d rows%s", rel[wrote], rows, what)))
+    st$existing <<- st$existing + length(have)
+    st$new_folders <<- st$new_folders +
+      sum(vapply(r, `[[`, numeric(1), "new_folders"))
+    c(written = length(wrote), prints = sum(rows), existing = length(have))
+  }
+
+  has_ticks <- rep(FALSE, nrow(names_))
+  unknown <- character(0)
+  ex_tabs <- list()
+  tick_cols <- c("time", "price", "size", "cond", "ex")
+  existing0 <- st$existing
+  want <- suppressWarnings(as.numeric(z$manifest["prints"]))
+  n_block <- 0
+  done_rows <- 0
+  t_start <- proc.time()[["elapsed"]]
+  got <- h_tick_blocks(file.path(z$dir, "ticks.csv"), block, function(b) {
+    idx <- match(b$sym, names_$sym)
+    if (anyNA(idx)) unknown <<- union(unknown, b$sym[is.na(idx)])
+    known <- !is.na(idx)
+    idx <- idx[known]
+    u <- unique(idx)
+    if (any(has_ticks[u])) {
+      stop("ticks.csv is not grouped by sym: ", names_$sym[u[has_ticks[u]][1]],
+           " comes back after other syms. AB writes each sym's rows ",
+           "together; this zip is not one it wrote", call. = FALSE)
+    }
+    has_ticks[u] <<- TRUE
+    ex <- b$ex[known]
+    if (any(nzchar(ex))) {
+      ex_tabs[[length(ex_tabs) + 1]] <<-
+        table(paste(names_$ext[idx], ex, sep = "\001")[nzchar(ex)])
+    }
+    no_tz <<- c(no_tz, u[is.na(names_$shift[u])])
+    clock <- !is.na(names_$shift[idx])
+    r <- write_lot(lapply(b[tick_cols], function(v) v[known][clock]),
+                   idx[clock])
+    st$written <<- st$written + r[["written"]]
+    st$prints <<- st$prints + r[["prints"]]
+    n_block <<- n_block + 1
+    done_rows <<- done_rows + length(b$sym)
+    secs <- proc.time()[["elapsed"]] - t_start
+    log$info(sprintf(
+      "block %d  rows %s/%s (%s%%)  files written %s  skipped %s  %.0fs  %s rows/s",
+      n_block, h_n(done_rows), if (is.na(want)) "?" else h_n(want),
+      if (is.na(want) || !want) "?" else sprintf("%.0f", 100 * done_rows / want),
+      h_n(st$written), h_n(st$existing - existing0), secs,
+      h_n(done_rows / max(secs, 0.001))))
+  })
+  no_tz <- sort(unique(no_tz))
+  log$kv("prints", h_n(got$rows))
   if (length(unknown)) {
     log$warn(paste(length(unknown), "syms in ticks.csv are not in the",
                    "universe; their prints are dropped"))
   }
-  tk <- tk[!is.na(idx), ]
-  idx <- idx[!is.na(idx)]
-  lines <- paste(h_cell(h_clock(tk$time, names_$shift[idx])),
-                 h_cell(tk$price), h_cell(tk$size), h_cell(tk$cond),
-                 h_cell(tk$ex), h_cell(names_$mic[idx]), sep = ",")
-  by_name <- split(lines, idx)
-  for (k in names(by_name)) {
-    i <- as.integer(k)
-    if (put(i, by_name[[k]])) {
-      st$written <- st$written + 1
-      st$prints <- st$prints + length(by_name[[k]])
-    }
+  if (st$existing > existing0) {
+    log$info(paste(h_n(st$existing - existing0),
+                   "files already there, skipped"))
   }
-  has_ticks <- seq_len(nrow(names_)) %in% idx
-  log$kv("files written", st$written, paste(st$prints, "prints"))
+  log$kv("files written", h_n(st$written), paste(h_n(st$prints), "prints"))
+  log$kv("read and parse", sprintf("%.1f s", got$secs))
+  log$kv("write", sprintf("%.1f s", t_write), paste(workers, "worker(s)"))
+  log$kv("rows a second",
+         round(got$rows / max(got$secs + t_write, 0.001)))
 
   # A market's Exchange letter, as its prints carry it: the commonest ex
-  # among the ticks of names with that exchange code.
-  ex_of <- tapply(tk$ex, names_$ext[idx], function(x) {
-    x <- x[nzchar(x)]
-    if (length(x)) names(sort(table(x), decreasing = TRUE))[1] else ""
-  })
+  # among the ticks of names with that exchange code; ties go to the first
+  # in sorted order, as table() and sort() have it.
+  ex_ext <- character(0)
+  ex_of <- character(0)
+  if (length(ex_tabs)) {
+    tot <- tapply(unlist(lapply(ex_tabs, as.vector)),
+                  unlist(lapply(ex_tabs, names)), sum)
+    tot_ext <- sub("\001.*$", "", names(tot))
+    tot_ex <- sub("^.*\001", "", names(tot))
+    for (e in unique(tot_ext)) {
+      x <- setNames(as.vector(tot[tot_ext == e]), tot_ex[tot_ext == e])
+      x <- x[sort(names(x))]
+      ex_ext <- c(ex_ext, e)
+      ex_of <- c(ex_of, names(sort(as.table(x), decreasing = TRUE))[1])
+    }
+  }
 
   log$step(3, "quote-only")
   qo <- p1_read(z$dir, "quote_only.csv")
   qi <- match(names_$sym, qo$sym)
-  for (i in which(!has_ticks & !is.na(qi))) {
-    q <- qo[qi[i], ]
-    bid <- suppressWarnings(as.numeric(q$bid))
-    ask <- suppressWarnings(as.numeric(q$ask))
-    bid[is.na(bid)] <- 0
-    ask[is.na(ask)] <- 0
-    price <- if (bid > 0 && ask > 0) (bid + ask) / 2 else
-      if (bid > 0) bid else if (ask > 0) ask else NA
-    if (is.na(price)) {
-      log$warn(paste0(names_$code[i], ": a quote with no bid or ask; ",
-                      "no file"))
-      st$quote_skipped <- st$quote_skipped + 1
-      next
-    }
-    ex <- if (names_$ext[i] %in% names(ex_of)) ex_of[[names_$ext[i]]] else ""
-    line <- paste(h_cell(c(h_clock(q$time, names_$shift[i]), p1_plain(price),
-                           "0", q$cond, ex, names_$mic[i])), collapse = ",")
-    if (put(i, line)) st$quote_only <- st$quote_only + 1
+  cand <- which(!has_ticks & !is.na(qi))
+  q <- qo[qi[cand], , drop = FALSE]
+  bid <- suppressWarnings(as.numeric(q$bid))
+  ask <- suppressWarnings(as.numeric(q$ask))
+  bid[is.na(bid)] <- 0
+  ask[is.na(ask)] <- 0
+  price <- ifelse(bid > 0 & ask > 0, (bid + ask) / 2,
+                  ifelse(bid > 0, bid, ifelse(ask > 0, ask, NA)))
+  for (i in cand[is.na(price)]) {
+    log$warn(paste0(names_$code[i], ": a quote with no bid or ask; no file"))
+  }
+  st$quote_skipped <- sum(is.na(price))
+  priced <- !is.na(price)
+  no_tz <- c(no_tz, cand[priced & is.na(names_$shift[cand])])
+  go <- priced & !is.na(names_$shift[cand])
+  m <- match(names_$ext[cand[go]], ex_ext)
+  existing0 <- st$existing
+  r <- write_lot(list(time = q$time[go], price = p1_plain(price[go]),
+                      size = rep("0", sum(go)), cond = q$cond[go],
+                      ex = ifelse(is.na(m), "", ex_of[m])), cand[go],
+                 what = " (quote-only)")
+  st$quote_only <- r[["written"]]
+  if (st$existing > existing0) {
+    log$info(paste(h_n(st$existing - existing0),
+                   "files already there, skipped"))
   }
   log$kv("quote-only files", st$quote_only)
   st$no_timezone <- length(no_tz)
@@ -398,10 +625,10 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
   }
 
   log$step(5, "result")
-  log$kv("files written", st$written)
-  log$kv("already there", st$existing, "left alone")
-  log$kv("new folders", st$new_folders)
-  log$kv("quote-only", st$quote_only)
+  log$kv("files written", h_n(st$written))
+  log$kv("already there", h_n(st$existing), "left alone")
+  log$kv("new folders", h_n(st$new_folders))
+  log$kv("quote-only", h_n(st$quote_only))
   if (st$quote_skipped) log$kv("quote, no price", st$quote_skipped)
   log$kv("NoTradingDay rows", st$no_trading_day)
   if (st$no_country) log$kv("no Country", st$no_country)
@@ -420,11 +647,14 @@ h_quiet_log <- function() {
   e <- new.env()
   e$warned <- character(0)
   e$said <- character(0)
+  e$noted <- character(0)
   nothing <- function(...) invisible(NULL)
   list(info = function(txt = "") e$said <- c(e$said, txt),
        ok = nothing, kv = nothing, step = nothing, fail = nothing,
+       file_only = function(txt) e$noted <- c(e$noted, txt),
        warn = function(txt) e$warned <- c(e$warned, txt),
-       warned = function() e$warned, said = function() e$said)
+       warned = function() e$warned, said = function() e$said,
+       noted = function() e$noted)
 }
 
 h_self_test <- function() {
@@ -512,7 +742,7 @@ h_self_test <- function() {
   s <- list(CROSSCODE_PATH = file.path(fx, "CrossCode.csv"),
             OUTPUT_DIR = file.path(d, "out"),
             NOTRADINGDAY_DIR = file.path(d, "ntd"),
-            KDB_TIMEZONE = "China Standard Time")
+            KDB_TIMEZONE = "China Standard Time", WORKERS = 1)
   log <- h_quiet_log()
   st <- tryCatch(h_run(z, s, log), error = function(e) {
     cat("  h_run failed: ", conditionMessage(e), "\n", sep = "")
@@ -559,6 +789,136 @@ h_self_test <- function() {
   check("and the NoTradingDay row is not written twice",
         read(ntd), c("stock,date", "8889 HK,20260925"))
 
+  # The fixture's day with a member edited, in a folder of its own.
+  zcopy <- function(edit) {
+    dz <- tempfile()
+    dir.create(dz)
+    file.copy(list.files(z$dir, full.names = TRUE), dz)
+    edit(dz)
+    z2 <- z
+    z2$dir <- dz
+    z2
+  }
+
+  cat("\nticks.csv read a block at a time, in workers, and run again\n")
+  check("WORKERS and TICK_BLOCK: blank is the default, a bad value stops",
+        list(h_count_setting(NULL, 4, "W"), h_count_setting("", 4, "W"),
+             h_count_setting(" 3 ", 4, "W"), h_count_setting(2, 4, "W"),
+             tryCatch(h_count_setting("0", 4, "W"),
+                      error = function(e) "stop"),
+             tryCatch(h_count_setting(2.5, 4, "W"),
+                      error = function(e) "stop")),
+        list(4L, 4L, 3L, 2L, "stop", "stop"))
+  tree <- function(root) {
+    f <- sort(list.files(root, recursive = TRUE, all.files = TRUE))
+    setNames(lapply(file.path(root, f), function(p) {
+      readBin(p, "raw", file.info(p)$size)
+    }), f)
+  }
+  run_into <- function(tag, zz, ..., start = h_start_cluster) {
+    s2 <- modifyList(s, list(OUTPUT_DIR = file.path(d, tag, "out"),
+                             NOTRADINGDAY_DIR = file.path(d, tag, "ntd")))
+    s2 <- modifyList(s2, list(...))
+    lg <- h_quiet_log()
+    st <- tryCatch(h_run(zz, s2, lg, start_cluster = start),
+                   error = function(e) conditionMessage(e))
+    list(st = st, log = lg, tree = tree(file.path(d, tag)))
+  }
+  # \r\n line ends, a quoted cell with a comma and quotes in it, and one
+  # with a line break in it, on the sym that spans blocks.
+  z9 <- zcopy(function(dz) {
+    tl <- readLines(file.path(dz, "ticks.csv"))
+    tl <- sub("R@S,T$", "\"R\nS\",T", tl)
+    tl <- sub("XT,N$", "\"X,\"\"T\"\"\",N", tl)
+    con <- file(file.path(dz, "ticks.csv"), "wb")
+    writeLines(tl, con, sep = "\r\n")
+    close(con)
+  })
+  w1 <- run_into("w1", z9, WORKERS = 1)
+  w3 <- run_into("w3", z9, WORKERS = 3)
+  b2 <- run_into("b2", z9, WORKERS = 1, TICK_BLOCK = 2)
+  b2w3 <- run_into("b2w3", z9, WORKERS = 3, TICK_BLOCK = 2)
+  jp9 <- "out/7203 JP/raw-7203 JP-20260925.csv"
+  check("one process writes every file, the quoted cells as they were",
+        list(sort(names(w1$tree))[1:3], w1$st$written,
+             grepl("15:29:59,2874,1500,\"R\nS\",T,XTKS\r\n",
+                   rawToChar(w1$tree[[jp9]]), fixed = TRUE),
+             grepl("16:44:58,6.14,800,\"X,\"\"T\"\"\",N,XNZE\r\n",
+                   rawToChar(w1$tree[["out/AIA NZ/raw-AIA NZ-20260925.csv"]]),
+                   fixed = TRUE)),
+        list(c("ntd/NoTradingDay Hong Kong.csv",
+               "out/005930 KP/raw-005930 KP-20260925.csv",
+               "out/123450 KQ/raw-123450 KQ-20260925.csv"), 5, TRUE, TRUE))
+  check("three workers write the same bytes",
+        identical(w3$tree, w1$tree) && length(w1$tree) == 7, TRUE)
+  check("and so does a block of 2 rows, a sym spread over four blocks",
+        list(identical(b2$tree, w1$tree), identical(b2w3$tree, w1$tree),
+             b2$st$prints), list(TRUE, TRUE, 17))
+  check("none of them has a !! line",
+        c(w1$log$warned(), w3$log$warned(), b2$log$warned()), character(0))
+
+  again <- run_into("w3", z9, WORKERS = 3)
+  check("a second run writes nothing and says what it skipped",
+        list(again$st[c("written", "quote_only", "existing")],
+             "5 files already there, skipped" %in% again$log$said(),
+             "1 files already there, skipped" %in% again$log$said(),
+             identical(again$tree, w1$tree)),
+        list(list(written = 0, quote_only = 0, existing = 6), TRUE, TRUE,
+             TRUE))
+  check("the log file names every file written, and every file skipped",
+        list("wrote 7203 JP/raw-7203 JP-20260925.csv  7 rows" %in%
+               w1$log$noted(),
+             "wrote 8888 HK/raw-8888 HK-20260925.csv  1 rows (quote-only)" %in%
+               w3$log$noted(),
+             length(w1$log$noted()),
+             sum(grepl("^skip .*-20260925[.]csv [(]exists[)]$",
+                       again$log$noted()))),
+        list(TRUE, TRUE, 6L, 6L))
+  blocks <- function(lg) {
+    sub("  [0-9]+s  [0-9]+ rows/s$", "",
+        grep("^block ", lg$said(), value = TRUE))
+  }
+  check("a progress line after each block, against the manifest's prints",
+        list(blocks(w1$log), tail(blocks(b2$log), 2), blocks(again$log)),
+        list("block 1  rows 17/17 (100%)  files written 5  skipped 0",
+             c("block 4  rows 14/17 (82%)  files written 4  skipped 0",
+               "block 5  rows 17/17 (100%)  files written 5  skipped 0"),
+             "block 1  rows 17/17 (100%)  files written 0  skipped 5"))
+  unlink(file.path(d, "w1", jp9))
+  writeBin(charToRaw("half a file"), file.path(d, "w1", paste0(jp9, ".part")))
+  resumed <- run_into("w1", z9, WORKERS = 1, TICK_BLOCK = 2)
+  check("a file missing, with a .part left over, is written again, whole",
+        list(resumed$st[c("written", "existing")],
+             identical(resumed$tree, w3$tree)),
+        list(list(written = 1, existing = 5), TRUE))
+
+  fell <- run_into("fell", z9, WORKERS = 3,
+                   start = function(n, nm) stop("no sockets"))
+  check("workers that cannot start: !!, then the same files from one process",
+        list(any(grepl("could not start 3 workers.*no sockets",
+                       fell$log$warned())),
+             identical(fell$tree, w1$tree)),
+        list(TRUE, TRUE))
+
+  z10 <- zcopy(function(dz) {
+    tl <- readLines(file.path(dz, "ticks.csv"))
+    writeLines(head(tl, -1), file.path(dz, "ticks.csv"))
+  })
+  z10$checked <- NULL
+  cut <- run_into("cut", z10, WORKERS = 3)
+  check("a ticks.csv shorter than prints stops the run, and nothing is written",
+        list(grepl("ticks.csv has 16 rows.*prints 17", cut$st),
+             file.exists(file.path(d, "cut"))),
+        list(TRUE, FALSE))
+
+  z11 <- zcopy(function(dz) {
+    tl <- readLines(file.path(dz, "ticks.csv"))
+    writeLines(c(tl[-2], tl[2]), file.path(dz, "ticks.csv"))
+  })
+  split_sym <- run_into("split", z11, WORKERS = 1, TICK_BLOCK = 2)
+  check("a sym whose rows are not together stops the run, naming it",
+        grepl("not grouped by sym: 7203.JP", split_sym$st), TRUE)
+
   check("a name whose exchange has no Country is logged, not written",
         {
           s3 <- s
@@ -576,16 +936,6 @@ h_self_test <- function() {
             length(list.files(s3$NOTRADINGDAY_DIR)))
         }, c(TRUE, 0))
 
-  # The fixture's day with a member edited, in a folder of its own.
-  zcopy <- function(edit) {
-    dz <- tempfile()
-    dir.create(dz)
-    file.copy(list.files(z$dir, full.names = TRUE), dz)
-    edit(dz)
-    z2 <- z
-    z2$dir <- dz
-    z2
-  }
   add_close <- function(sym) {
     zcopy(function(dz) {
       cat(paste0(sym, ",,,no-close\r\n"), file = file.path(dz, "closes.csv"),
@@ -712,9 +1062,18 @@ h_main <- function() {
   a <- p1_args()
   if (identical(a[1], "--self-test")) return(h_self_test())
   s <- p1_settings(required = H_REQUIRED)
-  z <- p1_unzip(a[1], H_MEMBERS)
+  # The log is dated by the zip, so it opens after the unzip and the count;
+  # until then the console says what is happening, and the log gets it
+  # after.
+  early <- character(0)
+  say <- function(txt) {
+    cat(format(Sys.time(), "%H:%M:%S"), " ..  ", txt, "\n", sep = "")
+    early <<- c(early, txt)
+  }
+  say(paste("historical.r", a[1]))
+  z <- p1_unzip(a[1], H_MEMBERS, say = say)
   log <- p1_log_open(s$LOG_DIR, z$date)
-  log$info(paste("historical.r", a[1]))
+  log$file_only(early)
   ok <- tryCatch({
     h_run(z, s, log)
     TRUE

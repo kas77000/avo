@@ -92,6 +92,12 @@ p1_log_open <- function(dir, date) {
   info <- function(txt = "") emit("..", txt)
   list(
     info = info,
+    # Many .. lines at once, to the log file only: one write for them all.
+    file_only = function(txt) {
+      if (is.null(path) || !length(txt)) return(invisible(NULL))
+      cat(paste0(format(Sys.time(), "%H:%M:%S"), "  ..  ", txt, "\n"),
+          sep = "", file = path, append = TRUE)
+    },
     ok = function(txt) emit("ok", txt),
     warn = function(txt) emit("!!", txt),
     fail = function(txt) emit("XX", txt),
@@ -147,14 +153,18 @@ p1_count_lines <- function(path) {
 
 # Each member the job reads that the manifest counts has that many rows,
 # or the zip is not the one AB wrote.
-p1_check_counts <- function(dir, manifest, members) {
+p1_check_counts <- function(dir, manifest, members,
+                            say = function(txt) invisible(NULL)) {
   for (member in intersect(members, names(P1_COUNTS))) {
     key <- P1_COUNTS[[member]]
     want <- if (key %in% names(manifest)) manifest[[key]] else NA
     if (is.na(want)) stop("the manifest has no '", key, "'", call. = FALSE)
     path <- file.path(dir, member)
+    say(paste0("counting ", member, "'s rows against the manifest's ", key,
+               " (", want, ")"))
     got <- if (member == "ticks.csv") p1_count_lines(path) - 1 else
       nrow(p1_csv(path))
+    say(paste(member, "has", got, "rows"))
     if (got != as.numeric(want)) {
       stop(member, " has ", got, " rows but the manifest says ", key, " ",
            want, ": the zip is incomplete; copy it from AB again",
@@ -166,7 +176,8 @@ p1_check_counts <- function(dir, manifest, members) {
 # The manifest and the `members` this job reads, one at a time, into a
 # folder of its own. unzip only warns about a damaged member, and leaves
 # it short, so here that warning stops the run.
-p1_unzip <- function(zip, members = P1_MEMBERS) {
+p1_unzip <- function(zip, members = P1_MEMBERS,
+                     say = function(txt) invisible(NULL)) {
   if (!file.exists(zip)) stop(zip, " does not exist", call. = FALSE)
   members <- union("manifest.csv", members)
   unzip_ <- function(member, ...) {
@@ -184,11 +195,15 @@ p1_unzip <- function(zip, members = P1_MEMBERS) {
     stop(zip, " is missing ", paste(missing, collapse = ", "), call. = FALSE)
   }
   dir <- tempfile("phase1-")
-  for (member in members) unzip_(member, files = member, exdir = dir)
+  for (member in members) {
+    say(paste("unzipping", member))
+    unzip_(member, files = member, exdir = dir)
+  }
   m <- p1_read(dir, "manifest.csv")
   manifest <- setNames(m$value, m$key)
-  p1_check_counts(dir, manifest, members)
-  list(dir = dir, manifest = manifest, date = as.Date(manifest[["date"]]))
+  p1_check_counts(dir, manifest, members, say)
+  list(dir = dir, manifest = manifest, date = as.Date(manifest[["date"]]),
+       checked = intersect(members, names(P1_COUNTS)))
 }
 
 # -- the crosscode ------------------------------------------------------

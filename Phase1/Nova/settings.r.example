@@ -7,6 +7,13 @@ CROSSCODE_PATH   <- "C:/path/to/CrossCode.csv"
 OUTPUT_DIR       <- "C:/path/to/Historical"
 NOTRADINGDAY_DIR <- "C:/path/to/NoTradingDay"
 
+# historical.r, optional; left out or "" is the default.
+# WORKERS: R processes writing the tick files. Default: one fewer than the
+# PC's cores, at most 4. 1 writes from the job's own process.
+# WORKERS          <- ""
+# TICK_BLOCK: rows of ticks.csv read at a time. Default 500000.
+# TICK_BLOCK       <- ""
+
 # Every job appends to LOG_DIR/phase1-YYYYMMDD.log.
 LOG_DIR          <- "C:/path/to/logs"
 
