@@ -515,12 +515,13 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
     n_block <<- n_block + 1
     done_rows <<- done_rows + length(b$sym)
     secs <- proc.time()[["elapsed"]] - t_start
-    log$info(sprintf(
-      "block %d  rows %s/%s (%s%%)  files written %s  skipped %s  %.0fs  %s rows/s",
-      n_block, h_n(done_rows), if (is.na(want)) "?" else h_n(want),
-      if (is.na(want) || !want) "?" else sprintf("%.0f", 100 * done_rows / want),
-      h_n(st$written), h_n(st$existing - existing0), secs,
-      h_n(done_rows / max(secs, 0.001))))
+    pct <- if (is.na(want) || !want) "?" else h_n(100 * done_rows / want)
+    log$info(sprintf(paste0("block %d  rows %s/%s (%s%%)  files written %s",
+                            "  skipped %s  %.0fs  %s rows/s"),
+                     n_block, h_n(done_rows),
+                     if (is.na(want)) "?" else h_n(want), pct,
+                     h_n(st$written), h_n(st$existing - existing0), secs,
+                     h_n(done_rows / max(secs, 0.001))))
   })
   no_tz <- sort(unique(no_tz))
   log$kv("prints", h_n(got$rows))

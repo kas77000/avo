@@ -104,9 +104,20 @@ share) is finished by running the same zip again: it skips every file
 already there, before formatting any of its rows, logs `..  N files
 already there, skipped`, and writes the rest. A file is written as
 `<name>.csv.part` and renamed when complete, so a file under its real name
-is always whole; a `.part` left behind is overwritten. The log's step 2
-also gives the seconds spent reading and writing, the rows a second and
-the workers used.
+is always whole; a `.part` left behind is overwritten.
+
+`historical.r` shows it is alive: the console says when it unzips and
+counts `ticks.csv` (a large file takes a while), then step 2 logs one line
+per block of `ticks.csv`:
+
+```
+..  block 3  rows 1500000/3000000 (50%)  files written 9870  skipped 0  41s  36585 rows/s
+```
+
+and ends with the seconds spent reading and writing, the rows a second and
+the workers used. The log FILE (not the console, there are tens of
+thousands) also has one line for every file: `..  wrote <code>/raw-<code>-YYYYMMDD.csv  N rows`
+(`(quote-only)` for a quote-only file), or `..  skip <code>/... (exists)`.
 
 Each job unzips only the members it reads (`limit_up_down.r` and
 `trading_data.r` never extract `ticks.csv`) and checks them before
