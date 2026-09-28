@@ -352,7 +352,7 @@ h_warn_each <- function(log, who, line, rest, cap = 20) {
 # -- the run ------------------------------------------------------------
 
 h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
-                  start_cluster = h_start_cluster) {
+                  start_cluster = h_start_cluster, only = NULL) {
   date <- z$date
   ymd <- format(date, "%Y%m%d")
   markets <- p1_hist_markets(file.path(cfg, "hist_markets.csv"))
@@ -378,6 +378,18 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
     if (f$dropped[[k]]) log$info(paste(f$dropped[[k]], "rows dropped:", k))
   }
   log$kv("kept", paste(nrow(cc), "rows"), "the extract's universe")
+  # --market=NZ|HK: redo those exchange codes only. Every other name is
+  # left out of this run entirely - no file, no NoTradingDay row.
+  if (length(only)) {
+    unknown <- setdiff(only, trimws(countries$BBGCode))
+    if (length(unknown)) {
+      stop("--market: ", paste(unknown, collapse = ", "), " not in ",
+           "close_conditions.csv", call. = FALSE)
+    }
+    cc <- cc[trimws(cc$ext) %in% only, , drop = FALSE]
+    log$kv("--market", paste(only, collapse = "|"),
+           paste(nrow(cc), "rows in this run"))
+  }
   u <- h_universe(cc, p1_read(z$dir, "master.csv"), markets, composites)
   for (k in names(u$dropped)) {
     if (u$dropped[[k]]) log$info(paste(u$dropped[[k]], "rows dropped:", k))
@@ -1053,11 +1065,51 @@ h_self_test <- function() {
         c("21", "5001 HK not in the extract, nothing written",
           "2 more not in the extract, nothing written"))
 
+  check("--market= reads one code or several, upper-cased",
+        list(h_market_arg(c("x.zip", "--market=nz")),
+             h_market_arg("--market=NZ|HK"), h_market_arg("x.zip")),
+        list("NZ", c("NZ", "HK"), NULL))
+  s8 <- s
+  s8$OUTPUT_DIR <- file.path(d, "out8")
+  s8$NOTRADINGDAY_DIR <- file.path(d, "ntd8")
+  tryCatch(h_run(z, s8, h_quiet_log(), only = "NZ"), error = function(e) {
+    cat("  h_run failed: ", conditionMessage(e), "\n", sep = "")
+  })
+  check("--market=NZ writes New Zealand only, and no NoTradingDay row elsewhere",
+        list(list.files(s8$OUTPUT_DIR), list.files(s8$NOTRADINGDAY_DIR)),
+        list("AIA NZ", character(0)))
+  check("--market= with a code we do not cover stops",
+        tryCatch({h_run(z, s8, h_quiet_log(), only = "XX"); "ran"},
+                 error = function(e) grepl("XX not in", conditionMessage(e))),
+        TRUE)
+  s9 <- s
+  s9$OUTPUT_DIR <- file.path(d, "out9")
+  s9$NOTRADINGDAY_DIR <- file.path(d, "ntd9")
+  s9$CROSSCODE_PATH <- file.path(d, "cc9.csv")
+  writeLines(c("#FidessaCode,BloombergCode,FidessaMarket,Type",
+               "AIA.NZX,AIA NZ,NZE-MAIN,Equity"), s9$CROSSCODE_PATH)
+  tryCatch(h_run(z, s9, h_quiet_log()), error = function(e) NULL)
+  nze <- file.path(s9$OUTPUT_DIR, "AIA NZ", "raw-AIA NZ-20260925.csv")
+  check("New Zealand as NZE-MAIN has its clock: the file is written, NZ header",
+        if (file.exists(nze)) sub(".*,", "", readLines(nze, 1)) else "no file",
+        "New Zealand Standard Time")
+
   unlink(c(d, z$dir), recursive = TRUE)
   t$done()
 }
 
 # -- main ---------------------------------------------------------------
+
+# "--market=NZ" or "--market=NZ|HK" -> c("NZ", "HK"); no such argument ->
+# NULL, the whole universe.
+h_market_arg <- function(args) {
+  m <- grep("^--market=", args, value = TRUE)
+  if (!length(m)) return(NULL)
+  codes <- trimws(strsplit(sub("^--market=", "", m[1]), "|", fixed = TRUE)[[1]])
+  codes <- toupper(codes[nzchar(codes)])
+  if (!length(codes)) stop("--market= names no exchange code", call. = FALSE)
+  codes
+}
 
 h_main <- function() {
   a <- p1_args()
@@ -1075,8 +1127,9 @@ h_main <- function() {
   z <- p1_unzip(a[1], H_MEMBERS, say = say)
   log <- p1_log_open(s$LOG_DIR, z$date)
   log$file_only(early)
+  only <- h_market_arg(a[-1])
   ok <- tryCatch({
-    h_run(z, s, log)
+    h_run(z, s, log, only = only)
     TRUE
   }, error = function(e) {
     log$fail(conditionMessage(e))

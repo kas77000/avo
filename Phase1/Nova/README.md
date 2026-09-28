@@ -142,6 +142,21 @@ Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip
 `run_phase1.cmd` on an old zip writes the tick files, then stops at
 `limit_up_down.r` with `XX`.
 
+### One market only
+
+`historical.r` takes `--market=` with one Bloomberg exchange code, or several
+joined by `|`, to redo just those markets, for example after fixing a venue's
+TimeZone in `config/hist_markets.csv`:
+
+```
+Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip --market=NZ
+Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip "--market=NZ|HK"
+```
+
+Every other name is left out of that run: no file, no NoTradingDay row.
+Files already there are still skipped. A code not in
+`config/close_conditions.csv` stops the run.
+
 ## What each job writes
 
 **`historical.r`**
