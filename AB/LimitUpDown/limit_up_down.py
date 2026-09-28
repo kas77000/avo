@@ -1811,8 +1811,14 @@ def demo(report_base=None) -> int:
     #  here decides which table a name is on.
     KR_10392 = ticks.from_kdb([(Decimal("2001"), Decimal(1)),
                                (Decimal("1000000005"), Decimal(5))])
+    #  7203 is TOPIX100, whose ladder is 1 yen between 3,000 and 10,000 -
+    #  so 3,833/2,433 are already on it and rounding up leaves them there.
+    JP_TOPIX100 = ticks.from_kdb([(Decimal("1000.05"), Decimal("0.1")),
+                                  (Decimal("3000.25"), Decimal("0.5")),
+                                  (Decimal("10000.5"), Decimal(1))])
     ladders = {"005930.KS": KR_6132, "000250.KQ": KR_6132,
-               "0080Y0.KS": KR_10392}
+               "0080Y0.KS": KR_10392,
+               "7203.T": JP_TOPIX100, "7203.JNX": JP_TOPIX100}
 
     #  What equity_master's LONG_COMP_NAME says.  0080Y0 KP is real: it
     #  closed at 8,025 and Bloomberg published 12,835/3,215, which is
@@ -2396,12 +2402,13 @@ def self_test() -> int:
           sorted(v.venue_id for v in cfg.venues.values()
                  if v.rounding == "krx"),
           ["KOE-MAIN", "KSC-MAIN", "TAI-MAIN"])
-    check("EVERY ROUNDING VENUE HAS ITS OWN VERIFIED NAME - KSC-MAIN is "
-          "KOSPI and 000020 KP, KOE-MAIN is KOSDAQ and 000250 KQ, TAI-MAIN "
-          "is 3593 TT, and Indonesia is the R script's",
+    check("THE ROUNDING VENUES - KSC-MAIN is KOSPI and 000020 KP, KOE-MAIN "
+          "is KOSDAQ and 000250 KQ, TAI-MAIN is 3593 TT, Indonesia is the R "
+          "script's, and Japan rounds both legs up",
           sorted(v.venue_id for v in cfg.venues.values()
                  if v.rounding != "none"),
-          ["JKT-MAIN", "KOE-MAIN", "KSC-MAIN", "TAI-MAIN"])
+          ["CHJ-MAIN", "JKT-MAIN", "JNX-MAIN", "KOE-MAIN", "KSC-MAIN",
+           "TAI-MAIN", "TYO-MAIN"])
     check("MALAYSIA, THE PHILIPPINES AND CHINA STILL PUBLISH THE RAW BAND, "
           "and would show the same symptom Taiwan just did if their "
           "exchanges round - nobody has checked one of their names",
@@ -2410,11 +2417,10 @@ def self_test() -> int:
                  and v.country != "Japan"),
           ["KLS-MAIN", "PHS-MAIN", "SHA-MAIN", "SHH-MAIN", "SHZ-MAIN",
            "SSC-MAIN", "SZA-MAIN", "SZC-MAIN"])
-    check("JAPAN DOES NOT ROUND, and that one IS checked - the TSE limit is "
-          "base +/- a yen width and is published off the tick: 7203 JT's "
-          "3,833 is not on its 5 yen tick and Bloomberg prints it",
+    check("JAPAN ROUNDS BOTH LEGS UP, on kdb's ladder per name",
           sorted(v.venue_id for v in cfg.venues.values()
-                 if v.country == "Japan" and v.rounding == "none"),
+                 if v.country == "Japan" and v.rounding == "up"
+                 and not v.tick_source),
           ["CHJ-MAIN", "JNX-MAIN", "TYO-MAIN"])
     check("A NAME KDB HAS NO LADDER FOR IS EXCLUDED - no ladder is not "
           "normal, and a limit off no tick is one the exchange rejects",
@@ -2454,14 +2460,20 @@ def self_test() -> int:
     #  Real names off the 2026-09-28 run's excluded.csv.
     print("\nJapan gives a leveraged ETF the ordinary band; Korea does not")
     jp_lev = row("1570.T", "1570 JT", "1570.JP", "TYO-MAIN")
+    #  The TSE's standard ladder: 1 yen to 3,000, 5 to 5,000, 10 beyond.
+    tse = ticks.from_kdb([(Decimal("3000.5"), Decimal(1)),
+                          (Decimal("5000.5"), Decimal(5)),
+                          (Decimal("30000.5"), Decimal(10))])
     jp_out, jp_exc = price_computed(
-        cfg, [jp_lev], {"1570.T": Decimal("3133")}, {},
+        cfg, [jp_lev], {"1570.T": Decimal("3133")}, {"1570.T": tse},
         {"1570.T": "NEXT FUNDS Nikkei 225 Leveraged Index Exchange Traded "
                    "Fund"})
     check("1570 JT, a 2x Nikkei ETF, is priced off the TSE table like any "
-          "name - Japan has no leverage rows, so it takes the default",
+          "name - Japan has no leverage rows, so it takes the default.  "
+          "3,133 +/- 700 is 3,833/2,433, both rounded UP on the close's 5 "
+          "yen tick: 3,835/2,435",
           ([(r["LimitUpPrice"], r["LimitDownPrice"]) for r in jp_out],
-           jp_exc), ([("3833", "2433")], []))
+           jp_exc), ([("3835", "2435")], []))
     kor_t = cfg.bands["KSC-MAIN"]
     check("'Leveraged' has a row, at 2x - 580047 KP",
           bands.select_tier(kor_t, "580047", Decimal(1000),

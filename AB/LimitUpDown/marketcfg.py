@@ -66,7 +66,7 @@ import bands
 import ticks
 
 VALID_SOURCE = ("bloomberg", "computed")
-VALID_ROUNDING = ("none", "inward", "outward", "nearest", "krx")
+VALID_ROUNDING = ("none", "inward", "outward", "nearest", "up", "krx")
 VALID_KIND = ("pct", "abs")
 VALID_FALLBACK = ("bloomberg",)
 VALID_TICK_FROM = ("close", "coarser")
@@ -544,11 +544,12 @@ def self_test() -> int:
           [(len(real.bands[v]), {t.kind for t in real.bands[v]})
            for v in ("TYO-MAIN", "JNX-MAIN", "CHJ-MAIN")],
           [(34, {"abs"})] * 3)
-    check("with the down limit floored at 1 yen, and no rounding - the TSE "
-          "publishes base +/- the width, off the tick",
-          {(real.venues[v].min_price, real.venues[v].rounding)
+    check("with the down limit floored at 1 yen, and both legs rounded UP "
+          "on the coarser of the close's tick and the leg's own",
+          {(real.venues[v].min_price, real.venues[v].rounding,
+            real.venues[v].tick_from)
            for v in ("TYO-MAIN", "JNX-MAIN", "CHJ-MAIN")},
-          {(Decimal("1"), "none")})
+          {(Decimal("1"), "up", "coarser")})
     check("and every computed venue has the tiers it needs, so the shipped "
           "config cannot fail at load",
           [v.venue_id for v in real.venues.values()

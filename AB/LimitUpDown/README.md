@@ -81,10 +81,15 @@ down cannot be computed.
 `bands.csv` carries the TSE daily price-limit table (制限値幅) as 34 `abs`
 tiers, the same on `TYO-MAIN`, `JNX-MAIN` and `CHJ-MAIN` — the PTS venues take
 the Tokyo base price. The limit is **base ± the yen width for the base's row**,
-not rounded to a tick, and the down limit stops at 1 yen (`MinPrice=1`):
+the down limit stops at 1 yen (`MinPrice=1`), and then **both legs round UP**
+to the tick (`Rounding=up`), on the coarser of the close's tick and the leg's
+own (`TickFrom=coarser`). The ladder is kdb's, per name, as Korea's is — a
+TOPIX100 name has finer ticks than the rest, and a name with no ladder is
+excluded:
 
 ```
-base 3,133  ->  row 3,000-5,000, +/-700  ->  3,833 / 2,433   (Bloomberg, 7203 JT)
+7203 JT  base 3,133  +/-700  3,833 / 2,433  on its 1 yen tick   3,833 / 2,433
+1570 JT  base 3,133  +/-700  3,833 / 2,433  on the 5 yen tick   3,835 / 2,435
 ```
 
 Two things the table cannot know, both worth watching in the first compares:
@@ -470,7 +475,7 @@ Nine countries, nineteen venues:
 
 | | venues | cutoff | source |
 |---|---|---|---|
-| Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | computed, TSE table, ±yen width, not rounded |
+| Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | computed, TSE table, ±yen width, both legs rounded up on kdb's ladder |
 | Korea | `KSC-MAIN` (KP, KOSPI) | 07:30 | computed, ±30%, rounded on kdb's ladder |
 | Korea | `KOE-MAIN` (KQ, KOSDAQ) | 07:30 | computed, ±30%, rounded on kdb's ladder |
 | Malaysia | `KLS-MAIN` | 07:59 | bloomberg, else ±30% |
@@ -529,9 +534,10 @@ mode that moves it one tick further in — one was briefly added on the strength
 of a single name and a whole-universe compare against Bloomberg then showed
 hundreds out by exactly one tick.
 
-A venue rounds only if its `Rounding` column says so. Today that is Korea's
-`KSC-MAIN` and Indonesia; the other nine computed venues publish the raw band,
-which is a config decision and a one-word edit.
+A venue rounds only if its `Rounding` column says so. Today that is Japan
+(`up`: both legs to the next tick at or above), Korea and Taiwan (`krx`) and
+Indonesia (`inward`); the rest publish the raw band, which is a config decision
+and a one-word edit.
 
 **Each leg rounds on the coarser of two ticks** — the one at the previous close
 and the one where that leg actually lands. A ladder is a function of price and
@@ -563,6 +569,7 @@ round have different verified answers:
 |---|---|---|
 | `close` (blank) | Indonesia | `LimitUpDown.r:315-324` — the tick comes from `PX_YEST_CLOSE` and both legs floor/ceil on it |
 | `coarser` | Korea `KSC-MAIN` and `KOE-MAIN` | Bloomberg, one verified name each |
+| `coarser` | Japan, all three venues | so a leg crossing into a coarser tick band still lands on a valid price |
 
 **Only a venue that rounds carries it**, because only a venue that rounds
 resolves a tick at all. The nine computed venues with `Rounding` blank publish

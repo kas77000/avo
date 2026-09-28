@@ -210,7 +210,7 @@ def round_band(up: Decimal, down: Decimal, tick, rounding: str):
     docstring.  'none' ignores the tick, which may be None."""
     if rounding == "none":
         return up, down
-    if rounding not in ("inward", "outward", "nearest"):
+    if rounding not in ("inward", "outward", "nearest", "up"):
         raise BandError(f"unknown rounding mode {rounding!r}")
     ut = _tick_at(tick, up, rounding)
     dt = _tick_at(tick, down, rounding)
@@ -237,6 +237,11 @@ def round_band(up: Decimal, down: Decimal, tick, rounding: str):
     if rounding == "outward":
         return ((up / ut).to_integral_value(ROUND_CEILING) * ut,
                 (down / dt).to_integral_value(ROUND_FLOOR) * dt)
+    if rounding == "up":
+        #  BOTH LEGS UP, Japan's: the up limit widens and the down limit
+        #  narrows, each to the next tick at or above it.
+        return ((up / ut).to_integral_value(ROUND_CEILING) * ut,
+                (down / dt).to_integral_value(ROUND_CEILING) * dt)
     return ((up / ut).to_integral_value(ROUND_HALF_UP) * ut,
             (down / dt).to_integral_value(ROUND_HALF_UP) * dt)
 
@@ -396,6 +401,12 @@ def self_test() -> int:
     check("outward pushes both out",
           round_band(D("1358.01"), D("1111.10"), D("1"), "outward"),
           (D("1359"), D("1111")))
+    check("up takes BOTH legs to the next tick at or above - Japan's",
+          round_band(D("3831"), D("2431"), D("5"), "up"),
+          (D("3835"), D("2435")))
+    check("and leaves a leg already on its tick where it is",
+          round_band(D("3835"), D("2430"), D("5"), "up"),
+          (D("3835"), D("2430")))
     check("nearest goes to the closest tick",
           round_band(D("1358.01"), D("1111.90"), D("1"), "nearest"),
           (D("1358"), D("1112")))
