@@ -301,6 +301,39 @@ def stage_dir(export_dir, day) -> Path:
     return Path(export_dir) / f"phase1-{day:%Y%m%d}"
 
 
+def set_aside(stage, log) -> None:
+    """Move an old staging folder out of the way, then try to delete it.
+
+    NEVER DELETE-THEN-CREATE THE SAME NAME.  On a network share (SMB) a
+    removed folder stays "delete pending" for a moment, and creating the
+    same name straight after fails with FileExistsError - the user's second
+    live run died exactly so.  A rename is immediate, so the folder is
+    renamed to <name>.stale-HHMMSS first (a numbered suffix if that is
+    taken or the rename fails), and only then removed, best effort.  What
+    cannot be removed is harmless: no run ever reads a .stale- folder."""
+    stamp = f"{stage.name}.stale-{dt.datetime.now():%H%M%S}"
+    aside, errors = None, []
+    for n in range(20):
+        name = stage.with_name(stamp + (f"-{n}" if n else ""))
+        if name.exists():
+            continue
+        try:
+            os.replace(stage, name)
+        except OSError as e:
+            errors.append(f"{name.name}: {e}")
+            continue
+        aside = name
+        break
+    if aside is None:
+        raise ExtractError(f"could not move the old staging folder {stage} "
+                           f"aside: {'; '.join(errors[-3:])}")
+    log.info(f"old staging folder moved to {aside.name}")
+    shutil.rmtree(aside, ignore_errors=True)
+    if aside.exists():
+        log.warn(f"{aside.name} could not be removed; it is harmless, "
+                 f"delete it by hand")
+
+
 def market_files(stage, mkt) -> tuple:
     """(ticks, closes, quote_only) of one market.  ticks is renamed into
     place LAST, so a market is done only when all three exist."""
@@ -578,8 +611,7 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                      f"day fresh")
             fresh = True
     if fresh and stage.exists():
-        shutil.rmtree(stage)
-        log.kv("fresh", "staging folder deleted", str(stage))
+        set_aside(stage, log)
     stage.mkdir(parents=True, exist_ok=True)
     if not (stage / STAGE).exists():
         write_csv(stage / STAGE, ["key", "value"], built.items())
@@ -1478,6 +1510,53 @@ def self_test() -> int:
               "outside the universe change nothing",
               (any(ln.startswith("!!  staged folder") for ln in log.lines),
                qatt.syms), (False, []))
+
+    print("\nstarting fresh on a network share: rename aside, never "
+          "delete-then-create")
+    with tempfile.TemporaryDirectory() as tmp:
+        outdir = Path(tmp) / "out"
+        run(tmp, D(2026, 9, 25))
+        saved_rmtree = shutil.rmtree
+        #  An SMB share: the old folder cannot be removed right away.
+        shutil.rmtree = lambda path, ignore_errors=False: None
+        try:
+            qatt, log = FakeQatt(), Caught()
+            err = attempt(lambda: run(tmp, D(2026, 9, 25), qatt=qatt, log=log,
+                                      em=FakeEm(date=D(2026, 9, 25))))
+        finally:
+            shutil.rmtree = saved_rmtree
+        stale = sorted(p for p in outdir.iterdir() if ".stale-" in p.name)
+        check("the auto-fresh goes through even when the old folder stays",
+              (repr(err), len(set(qatt.syms))), ("None", 6))
+        check("the old folder is renamed aside, not deleted",
+              [read_csv(p / STAGE)[1]["value"] for p in stale],
+              ["2026-09-24"])
+        check("and the new one is created afresh",
+              read_csv(outdir / "phase1-20260925" / STAGE)[1]["value"],
+              "2026-09-25")
+        check("the log says where it went, and that it is still there",
+              ([ln[:47] for ln in log.lines
+                if "old staging folder moved to" in ln],
+               any(ln.startswith("!!") and "could not be removed" in ln
+                   for ln in log.lines)),
+              (["..  old staging folder moved to phase1-20260925"], True))
+        qatt = FakeQatt()
+        run(tmp, D(2026, 9, 25), qatt=qatt, em=FakeEm(date=D(2026, 9, 25)))
+        check("a leftover .stale- folder is not taken for the staging "
+              "folder: the next run resumes, and leaves it alone",
+              (qatt.syms, sorted(p for p in outdir.iterdir()
+                                 if ".stale-" in p.name) == stale),
+              ([], True))
+
+        log = Caught()
+        run(tmp, D(2026, 9, 25), em=FakeEm(date=D(2026, 9, 25)), fresh=True,
+            log=log)
+        check("--fresh renames aside too, and removes the old folder when "
+              "it can",
+              (any("old staging folder moved to" in ln for ln in log.lines),
+               sorted(p for p in outdir.iterdir()
+                      if ".stale-" in p.name) == stale),
+              (True, True))
 
     print("\nthe halved read size, across markets")
     with tempfile.TemporaryDirectory() as tmp:

@@ -58,8 +58,8 @@ python extract.py --fresh                    the day again, from scratch
   date, from the HDB (`QATT_SERVER`). Use it to redo a past day.
 - **`--log FILE`:** also appends the log to FILE. Each run starts with a
   `=== YYYY-MM-DD HH:MM:SS ===` line.
-- **`--fresh`:** deletes the day's staging folder first, so everything is
-  read again (see below). Combine it with `--date` for a past day.
+- **`--fresh`:** moves the day's staging folder aside first, so everything
+  is read again (see below). Combine it with `--date` for a past day.
 - equity_master and the tick ladders always come from `EQUITY_MASTER_SERVER`,
   at the newest equity_master date on or before the trade date.
 
@@ -139,10 +139,22 @@ the same day, for example a failed no-argument run followed next morning by
 
 and the run starts the day from scratch, as with `--fresh`.
 
-**`--fresh`** deletes the day's folder and starts over. Use it after a
-no-argument run made too early: the RDB keeps filling during the day, and a
-rerun of today would otherwise keep the markets an earlier run already
-finished.
+**`--fresh`** starts the day over. Use it after a no-argument run made too
+early: the RDB keeps filling during the day, and a rerun of today would
+otherwise keep the markets an earlier run already finished.
+
+Starting fresh (by `--fresh` or by the check above) never deletes and
+recreates the folder under the same name: on a network share (SMB) a folder
+just deleted stays "delete pending" for a moment, and creating it again
+fails. The old folder is renamed to `phase1-YYYYMMDD.stale-HHMMSS`, a new
+one is created, and the old one is then removed if possible:
+
+```
+..  old staging folder moved to phase1-20260928.stale-190412
+!!  phase1-20260928.stale-190412 could not be removed; it is harmless, delete it by hand
+```
+
+A `.stale-` folder is never read by any run; delete it whenever you like.
 
 **Disk space:** the staging folder holds the day's ticks **uncompressed**,
 several times the zip's size. It is left in place so a rerun can resume;
