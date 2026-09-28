@@ -10,8 +10,9 @@ NOTRADINGDAY_DIR <- "C:/path/to/NoTradingDay"
 # Every job appends to LOG_DIR/phase1-YYYYMMDD.log.
 LOG_DIR          <- "C:/path/to/logs"
 
-# The Windows timezone id kdb stamps prints in. Must match the zip's
-# manifest "kdb timezone".
+# The Windows timezone id kdb stamps prints in; left out or "", China
+# Standard Time. Must match the zip's manifest "kdb timezone", or
+# historical.r stops.
 KDB_TIMEZONE     <- "China Standard Time"
 
 # limit_up_down.r: written to TEMP, then copied to each environment.

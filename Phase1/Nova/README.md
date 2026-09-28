@@ -1,8 +1,8 @@
 # Phase1 on Nova: the R jobs
 
-AB exports one zip a day, `phase1-YYYYMMDD.zip`, with everything kdb knows
-about that trading day. Nova has no kdb and no B-PIPE; these three R jobs
-turn the zip into the files B-PIPE used to feed:
+AB exports one zip a day, after 18:30 HKT, `phase1-YYYYMMDD.zip`, with
+everything kdb knows about that trading day. Nova has no kdb and no
+B-PIPE; these three R jobs turn the zip into the files B-PIPE used to feed:
 
 | Job | Writes |
 |-----|--------|
@@ -11,6 +11,12 @@ turn the zip into the files B-PIPE used to feed:
 | `trading_data.r` | `TradingData.csv` |
 
 `run_phase1.cmd` runs all three, in that order.
+
+All three cover the same universe as AB's extract: the CrossCode rows whose
+Bloomberg exchange code (`7203 JT` -> `JT`) is one of the 18 codes in
+`config/close_conditions.csv`, whatever their Type. `historical.r` and
+`trading_data.r` log the rest as one `..  N rows dropped: exchange code not
+ours` line; `limit_up_down.r` covers only the first cutoff's venues anyway.
 
 ## Install
 
@@ -34,9 +40,9 @@ turn the zip into the files B-PIPE used to feed:
    | `OUTPUT_DIR` | The Historical folder. Each name gets a folder here. |
    | `NOTRADINGDAY_DIR` | Where the `NoTradingDay <Country>.csv` files are. |
    | `LOG_DIR` | Every job appends to `LOG_DIR/phase1-YYYYMMDD.log`. |
-   | `KDB_TIMEZONE` | The Windows timezone id kdb stamps its prints in, `China Standard Time`. It must match the zip's manifest (`kdb timezone`); if they differ, `historical.r` says so with `!!` and uses this one. |
+   | `KDB_TIMEZONE` | The Windows timezone id kdb stamps its prints in. Left out or `""`, it is `China Standard Time`. It must match the zip's manifest (`kdb timezone`); if they differ, `historical.r` stops with `XX` and writes nothing, since a tick file is never rewritten. |
    | `LULD_OUT_TEMP` | `limitUpDown.csv` is written here first, then copied to each environment. |
-   | `LULD_OUT_TEST`, `LULD_OUT_PILOT`, `LULD_OUT_PROD` | Where each environment reads `limitUpDown.csv`. A blank one is skipped with `!!`. |
+   | `LULD_OUT_TEST`, `LULD_OUT_PILOT`, `LULD_OUT_PROD` | Where each environment reads `limitUpDown.csv`. An environment the run asks for (all three by default) whose path is blank FAILS the job with `XX`; the others still get the file. Leave one blank only if you always name the environments, for example `"Test|Prod"`. |
    | `INDIA_NSE_STRA`, `INDIA_BSE_STRA` | Not read in Phase1 (India is not at the first cutoff). Leave them `""`. |
    | `TD_OUTPUT_PATH` | The full path of `TradingData.csv`. |
    | `MSCI_MAPPING_PATH` | The MSCI mapping CSV. `""` leaves the four `Msci*` columns blank. |
@@ -65,7 +71,8 @@ turn the zip into the files B-PIPE used to feed:
 
 ## The daily run
 
-1. Copy the day's zip from AB (its `EXPORT_DIR`) to the Nova PC.
+1. After 18:30 HKT, once AB has exported the day, copy the zip from AB (its
+   `EXPORT_DIR`) to the Nova PC.
 2. Run, from a command prompt or by dragging the zip onto the `.cmd`:
 
    ```
@@ -90,6 +97,29 @@ Running the same zip again is safe. `historical.r` leaves a tick file that
 already exists alone and does not repeat a NoTradingDay row;
 `limit_up_down.r` and `trading_data.r` overwrite their file.
 
+Each job unzips only the members it reads (`limit_up_down.r` and
+`trading_data.r` never extract `ticks.csv`) and checks them before
+anything else: a member that does not unzip cleanly, or a `ticks.csv`,
+`closes.csv` or `quote_only.csv` whose row count is not the manifest's
+(`prints`, `syms asked`, `quote only`), stops the job with an error and
+nothing is written. The zip was cut short on the way; copy it again.
+
+### An old day
+
+`limit_up_down.r` refuses a zip whose LimitDate (the next weekday after
+its trade date) is before today, and `trading_data.r` one whose trade date
+is more than 4 calendar days before today; both fail with `XX` and write
+nothing. Their files are for the next trading day only.
+
+So a backfill of an old day only needs `historical.r`:
+
+```
+Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip
+```
+
+`run_phase1.cmd` on an old zip writes the tick files, then stops at
+`limit_up_down.r` with `XX`.
+
 ## What each job writes
 
 **`historical.r`**
@@ -109,7 +139,17 @@ already exists alone and does not repeat a NoTradingDay row;
   code as the condition.
 - `NOTRADINGDAY_DIR/NoTradingDay <Country>.csv`, a `stock,date` row for a
   name with neither prints nor a quote. The country comes from
-  `config/close_conditions.csv`.
+  `config/close_conditions.csv`. Only a name AB asked kdb about (its sym
+  has a row in the zip's `closes.csv`) gets one: a row there is permanent,
+  and a name only Nova's CrossCode has may well have traded.
+- Nothing for a name whose market has no `TimeZone` in
+  `config/hist_markets.csv`: its prints are not written in kdb's clock.
+  Once the market is set, running the zip again writes it.
+
+A name's kdb sym is the one `master.csv` gives its BloombergCode, else
+`<ticker>.<BBGComposite>` from `config/hist_markets.csv`, as AB resolves
+it. `limit_up_down.r` and `trading_data.r` find each name's close in
+`closes.csv` the same way.
 
 **`limit_up_down.r`** writes `LULD_OUT_TEMP` and copies it to each
 environment asked for:
@@ -125,9 +165,9 @@ the bands in `config/luld_bands.csv`. If any row fails validation, nothing
 is published.
 
 **`trading_data.r`** writes `TD_OUTPUT_PATH`: one row per CrossCode name
-with a BloombergCode, the reference columns from `equity.csv` and the
-`Close`, sorted by market then RicCode. It is not written if no row has a
-Close.
+in the extract's universe (above) with a BloombergCode, the reference
+columns from `equity.csv` and the `Close`, sorted by market then RicCode.
+It is not written if no row has a Close.
 
 ## Reading the log
 
@@ -147,20 +187,31 @@ then one line per event:
 | `!!` | Something was skipped or dropped. The run went on; look at it. |
 | `XX` | The job failed. Its output was not written (or not published). |
 
+What stops a job with `XX` (or an R `Error`, before the log is open):
+
+| Job | Why |
+|-----|-----|
+| all | The zip does not unzip cleanly, or a member's rows are not the manifest's count. Copy the zip again. |
+| historical | The manifest's `kdb timezone` is not `KDB_TIMEZONE`. Nothing is written. |
+| limit_up_down | `<env>: LULD_OUT_<ENV> is blank`: an environment asked for has no path. The others still get the file. |
+| limit_up_down | The LimitDate is before today: an old zip. Nothing is published. |
+| limit_up_down | A row fails validation, or the output is empty. Nothing is published. |
+| trading_data | The trade date is more than 4 days before today: an old zip. |
+| trading_data | Not one row has a Close. |
+
 What each `!!` means:
 
 | Job | `!!` line | Meaning |
 |-----|-----------|---------|
-| historical | `the manifest says kdb's clock is ...` | The zip's `kdb timezone` is not `KDB_TIMEZONE`. Times may be shifted wrongly. |
 | historical | `N excluded: no equity_master row and no configured composite` | Names AB could not resolve to a kdb sym. They get no file. |
 | historical | `N excluded: same file on disk as ...` | Two names map to one file name; the first in code order keeps it. |
 | historical | `N names had no master row and took hist_markets.csv's composite` | Written, but with a blank MicCode. |
-| historical | `<market>: no TimeZone to convert to` | Its files keep kdb's clock and carry no timezone in the header. |
+| historical | `<code>: no TimeZone for <market> in hist_markets.csv; no file` | Set the market's `TimeZone` (or the name's `FidessaMarket`) and run the zip again. After 20 such lines, one more gives the count of the rest. |
+| historical | `<code> not in the extract, nothing written` | A name in Nova's CrossCode that AB did not ask kdb about: no file and no NoTradingDay row. The CrossCodes on AB and Nova differ. After 20 such lines, one more gives the count of the rest. |
 | historical | `N syms in ticks.csv are not in the universe` | The zip has prints for names not in this CrossCode. They are dropped. The CrossCodes on AB and Nova differ. |
 | historical | `<code>: a quote with no bid or ask; no file` | A quote-only name with nothing to price. |
 | historical | `<code>: no Country for <ext> in close_conditions.csv` | No NoTradingDay row could be written for it. |
 | limit_up_down | `N excluded, <token>: <reason> (...)` | Names with no limit in the file. See the tokens below. |
-| limit_up_down | `<env>: LULD_OUT_<ENV> is blank; not published there` | That environment did not get the file. |
 | trading_data | `<KEY> <path> does not exist; ...` | An optional input is set but missing; its columns are blank. |
 | trading_data | `the HKEX list is EMPTY` | No Hong Kong row is marked `NO_CAS`. |
 | trading_data | `NOT ONE RicCode on the override matched the crosscode` | The open-auction override is probably the wrong file. |

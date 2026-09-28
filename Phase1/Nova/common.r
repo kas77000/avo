@@ -124,16 +124,70 @@ p1_csv <- function(path) {
 
 p1_read <- function(dir, member) p1_csv(file.path(dir, member))
 
-p1_unzip <- function(zip) {
+# The members whose rows the manifest counts, and the key it counts them
+# under.
+P1_COUNTS <- c("ticks.csv" = "prints", "closes.csv" = "syms asked",
+               "quote_only.csv" = "quote only")
+
+# Physical lines, as AB counts prints: a cell with a line break in it is
+# two. A last line with no line end still counts.
+p1_count_lines <- function(path) {
+  con <- file(path, "rb")
+  on.exit(close(con))
+  n <- 0
+  last <- as.raw(0x0a)
+  repeat {
+    b <- readBin(con, "raw", 4194304)
+    if (!length(b)) break
+    n <- n + sum(b == as.raw(0x0a))
+    last <- b[length(b)]
+  }
+  n + (last != as.raw(0x0a))
+}
+
+# Each member the job reads that the manifest counts has that many rows,
+# or the zip is not the one AB wrote.
+p1_check_counts <- function(dir, manifest, members) {
+  for (member in intersect(members, names(P1_COUNTS))) {
+    key <- P1_COUNTS[[member]]
+    want <- if (key %in% names(manifest)) manifest[[key]] else NA
+    if (is.na(want)) stop("the manifest has no '", key, "'", call. = FALSE)
+    path <- file.path(dir, member)
+    got <- if (member == "ticks.csv") p1_count_lines(path) - 1 else
+      nrow(p1_csv(path))
+    if (got != as.numeric(want)) {
+      stop(member, " has ", got, " rows but the manifest says ", key, " ",
+           want, ": the zip is incomplete; copy it from AB again",
+           call. = FALSE)
+    }
+  }
+}
+
+# The manifest and the `members` this job reads, one at a time, into a
+# folder of its own. unzip only warns about a damaged member, and leaves
+# it short, so here that warning stops the run.
+p1_unzip <- function(zip, members = P1_MEMBERS) {
   if (!file.exists(zip)) stop(zip, " does not exist", call. = FALSE)
-  dir <- tempfile("phase1-")
-  utils::unzip(zip, exdir = dir)
-  missing <- P1_MEMBERS[!file.exists(file.path(dir, P1_MEMBERS))]
+  members <- union("manifest.csv", members)
+  unzip_ <- function(member, ...) {
+    withCallingHandlers(utils::unzip(zip, ...), warning = function(w) {
+      stop(zip, " could not be unzipped", if (!is.null(member)) {
+        paste0(" (", member, ")")
+      }, ": ", conditionMessage(w), call. = FALSE)
+    })
+  }
+  listed <- tryCatch(unzip_(NULL, list = TRUE)$Name, error = function(e) {
+    stop(zip, " could not be unzipped: ", conditionMessage(e), call. = FALSE)
+  })
+  missing <- setdiff(members, listed)
   if (length(missing)) {
     stop(zip, " is missing ", paste(missing, collapse = ", "), call. = FALSE)
   }
+  dir <- tempfile("phase1-")
+  for (member in members) unzip_(member, files = member, exdir = dir)
   m <- p1_read(dir, "manifest.csv")
   manifest <- setNames(m$value, m$key)
+  p1_check_counts(dir, manifest, members)
   list(dir = dir, manifest = manifest, date = as.Date(manifest[["date"]]))
 }
 
@@ -159,6 +213,46 @@ p1_crosscode <- function(path) {
   cc$ext <- ifelse(spaced, sub("^.* ", "", bbg), "")
   cc$fidessa <- trimws(cc[[fcol[1]]])
   cc
+}
+
+# The rows the AB extract covers, and so the only ones a job can speak
+# for: an exchange code listed in close_conditions.csv, whatever the Type.
+# Returns the kept rows and the dropped count.
+p1_filter <- function(cc, close_conditions) {
+  ours <- trimws(p1_csv(close_conditions)$BBGCode)
+  bad_ext <- !trimws(cc$ext) %in% ours
+  list(cc = cc[!bad_ext, ],
+       dropped = c("exchange code not ours" = sum(bad_ext)))
+}
+
+# marketcfg.load: config/hist_markets.csv, one row per FidessaMarket, with
+# its BBGComposite and TimeZone.
+p1_hist_markets <- function(path) {
+  m <- p1_csv(path)
+  m$FidessaMarket <- trimws(m$FidessaMarket)
+  m <- m[nzchar(m$FidessaMarket), ]
+  data.frame(FidessaMarket = m$FidessaMarket,
+             BBGComposite = trimws(m$BBGComposite),
+             TimeZone = trimws(m$TimeZone), stringsAsFactors = FALSE)
+}
+
+# universe.resolve_sym: the kdb sym AB asked about for each crosscode row.
+# master.csv's sym, else ticker.composite, the composite being the
+# FidessaMarket's BBGComposite in hist_markets; "" when neither. Returns
+# sym and source ("equity_master", "markets.csv" or "").
+p1_sym <- function(bbg, ticker, market, master, markets) {
+  m <- match(trimws(bbg), trimws(master$BloombergCode))
+  msym <- ifelse(is.na(m), "", trimws(master$sym[m]))
+  comp <- markets$BBGComposite[match(trimws(market), markets$FidessaMarket)]
+  comp[is.na(comp)] <- ""
+  sym <- ifelse(nzchar(msym), msym,
+                ifelse(nzchar(ticker) & nzchar(comp),
+                       paste0(ticker, ".", comp), ""))
+  data.frame(sym = as.character(sym),
+             source = as.character(ifelse(nzchar(msym), "equity_master",
+                                          ifelse(nzchar(sym), "markets.csv",
+                                                 ""))),
+             stringsAsFactors = FALSE)
 }
 
 # -- small things -------------------------------------------------------
@@ -307,6 +401,88 @@ p1_common_self_test <- function() {
           "no error"
         }, error = function(e) grepl("ladders.csv", conditionMessage(e))),
         TRUE)
+  fixture_zip <- file.path(here, "tests", "fixture", "phase1-20260925.zip")
+  check("a job unzips only the members it names, and the manifest",
+        tryCatch(sort(list.files(p1_unzip(fixture_zip,
+                                          c("master.csv", "closes.csv"))$dir)),
+                 error = function(e) conditionMessage(e)),
+        c("closes.csv", "manifest.csv", "master.csv"))
+  refused <- function(expr, pattern) {
+    tryCatch({
+      expr
+      "no error"
+    }, error = function(e) grepl(pattern, conditionMessage(e)))
+  }
+  zb <- readBin(fixture_zip, "raw", file.info(fixture_zip)$size)
+  dz <- tempfile()
+  dir.create(dz)
+  cut <- file.path(dz, "cut.zip")
+  writeBin(zb[1:600], cut)
+  check("a zip cut short is refused, not read as far as it goes",
+        refused(p1_unzip(cut), "could not be unzipped"), TRUE)
+  # One byte of ticks.csv's compressed data flipped: unzip only warns, and
+  # leaves an empty ticks.csv behind.
+  at <- which(vapply(seq_len(length(zb) - 8), function(k) {
+    all(zb[k:(k + 8)] == charToRaw("ticks.csv"))
+  }, logical(1)))[1] + 9 + 60
+  bad <- zb
+  bad[at] <- as.raw(bitwXor(as.integer(bad[at]), 0x55))
+  writeBin(bad, file.path(dz, "bad.zip"))
+  check("a damaged member is refused, naming it",
+        refused(p1_unzip(file.path(dz, "bad.zip")),
+                "could not be unzipped.*ticks.csv"), TRUE)
+
+  cat("\nthe members agree with the manifest\n")
+  dc <- file.path(dz, "counts")
+  dir.create(dc)
+  writeLines(c("sym,time,price,size,cond,ex", "A.JP,08:00:00,1,1,O,T",
+               "A.JP,08:00:01,1,1,\"two", "lines\",T"),
+             file.path(dc, "ticks.csv"))
+  writeLines(c("sym,close,source,reason", "A.JP,1,qatt,", "B.JP,,,no-close"),
+             file.path(dc, "closes.csv"))
+  writeLines(c("sym,time,bid,ask,cond", "C.JP,15:00:00,1,2,CA"),
+             file.path(dc, "quote_only.csv"))
+  man <- c(prints = "3", "syms asked" = "2", "quote only" = "1")
+  all3 <- c("ticks.csv", "closes.csv", "quote_only.csv")
+  check("prints counts ticks.csv's lines, a cell with a line break in it too",
+        refused(p1_check_counts(dc, man, all3), "."), "no error")
+  check("a ticks.csv shorter than prints is refused, naming both",
+        refused(p1_check_counts(dc, replace(man, "prints", "4"), all3),
+                "ticks.csv.*prints"), TRUE)
+  check("closes.csv must have a row for every sym asked",
+        refused(p1_check_counts(dc, replace(man, "syms asked", "3"), all3),
+                "closes.csv.*syms asked"), TRUE)
+  check("and quote_only.csv as many rows as quote only",
+        refused(p1_check_counts(dc, replace(man, "quote only", "2"), all3),
+                "quote_only.csv.*quote only"), TRUE)
+  check("a member the job does not read is not checked",
+        refused(p1_check_counts(dc, replace(man, "prints", "99"),
+                                "closes.csv"), "."), "no error")
+  check("the fixture's members agree with its manifest",
+        refused(p1_unzip(fixture_zip), "."), "no error")
+
+  cat("\nthe extract's universe\n")
+  cfg <- file.path(here, "config")
+  f <- p1_filter(p1_crosscode(file.path(here, "tests", "fixture",
+                                        "CrossCode.csv")),
+                 file.path(cfg, "close_conditions.csv"))
+  check("an exchange code close_conditions.csv lists is kept, whatever the Type",
+        list(f$cc$BloombergCode, f$dropped),
+        list(c("7203 JT", "005930 KP", "299990 KP", "123450 KQ", "AIA NZ",
+               "8888 HK", "8889 HK", "BSKT HK"),
+             c("exchange code not ours" = 2)))
+
+  cat("\na BloombergCode to kdb's sym\n")
+  hm <- p1_hist_markets(file.path(cfg, "hist_markets.csv"))
+  ms <- data.frame(BloombergCode = c("7203 JT", " 8888 HK "),
+                   sym = c("7203.JP", "8888.HK"), stringsAsFactors = FALSE)
+  got <- p1_sym(c("7203 JT", "8888 HK", "7777 JT", "ZZZ QQ"),
+                c("7203", "8888", "7777", "ZZZ"),
+                c("TYO-MAIN", "HKG-MAIN", "TYO-MAIN", "NOWHERE-MAIN"), ms, hm)
+  check("master.csv's sym first, else ticker.composite from hist_markets.csv",
+        list(got$sym, got$source),
+        list(c("7203.JP", "8888.HK", "7777.JP", ""),
+             c("equity_master", "equity_master", "markets.csv", "")))
 
   cat("\ncodes read as text\n")
   d <- tempfile()

@@ -18,22 +18,12 @@ local({
 })
 
 H_REQUIRED <- c("CROSSCODE_PATH", "OUTPUT_DIR", "NOTRADINGDAY_DIR", "LOG_DIR")
+H_MEMBERS <- c("master.csv", "ticks.csv", "closes.csv", "quote_only.csv")
 
 H_COLUMNS <- c("#Time", "Last", "Volume", "Condition", "Exchange", "MicCode")
 H_UNRESOLVED <- "no equity_master row and no configured composite"
 
 # -- config -------------------------------------------------------------
-
-# marketcfg.load: one row per FidessaMarket, with its BBGComposite and
-# TimeZone.
-h_markets <- function(path) {
-  m <- p1_csv(path)
-  m$FidessaMarket <- trimws(m$FidessaMarket)
-  m <- m[nzchar(m$FidessaMarket), ]
-  data.frame(FidessaMarket = m$FidessaMarket,
-             BBGComposite = trimws(m$BBGComposite),
-             TimeZone = trimws(m$TimeZone), stringsAsFactors = FALSE)
-}
 
 # marketcfg.load_composites: c(code = composite) for the codes that convert
 # (TRUE, 1 or YES), and only those.
@@ -50,17 +40,6 @@ h_composites <- function(path) {
 }
 
 # -- the universe -------------------------------------------------------
-
-# The rows the AB extract covers, and so the only ones this job can speak
-# for: an exchange code listed in close_conditions.csv, whatever the Type
-# (baskets are left to h_universe, as in Phase0). Returns the kept rows and
-# the dropped count.
-h_filter <- function(cc, close_conditions) {
-  ours <- trimws(p1_csv(close_conditions)$BBGCode)
-  bad_ext <- !trimws(cc$ext) %in% ours
-  list(cc = cc[!bad_ext, ],
-       dropped = c("exchange code not ours" = sum(bad_ext)))
-}
 
 # ticksfile.safe: a code as it may be a path. A slash is _, what Windows
 # refuses is dropped, runs of spaces are one, and no trailing dot or space.
@@ -97,15 +76,11 @@ h_universe <- function(cc, master, markets, composites) {
                      market = trimws(cc$FidessaMarket[keep]),
                      stringsAsFactors = FALSE)
 
-  m <- match(rows$bbg, master$BloombergCode)
+  m <- match(rows$bbg, trimws(master$BloombergCode))
   from_master <- function(col) ifelse(is.na(m), "", master[[col]][m])
-  msym <- from_master("sym")
-  comp <- markets$BBGComposite[match(rows$market, markets$FidessaMarket)]
-  comp[is.na(comp)] <- ""
-  rows$sym <- ifelse(nzchar(msym), msym,
-                     ifelse(nzchar(rows$ticker) & nzchar(comp),
-                            paste0(rows$ticker, ".", comp), ""))
-  rows$source <- ifelse(nzchar(msym), "equity_master", "markets.csv")
+  sym <- p1_sym(rows$bbg, rows$ticker, rows$market, master, markets)
+  rows$sym <- sym$sym
+  rows$source <- sym$source
   rows$prim <- from_master("EQY_PRIM_EXCH_SHRT")
   rows$mic <- toupper(from_master("ID_MIC_PRIM_EXCH"))
   if (any(!nzchar(rows$sym))) drop(H_UNRESOLVED, rows$bbg[!nzchar(rows$sym)])
@@ -232,27 +207,36 @@ h_no_trading_day <- function(path, codes, ymd) {
   length(rows)
 }
 
+# One !! line for each of `who`, the first `cap` of them, then one for the
+# rest. `line(i)` is the line for who[i]; no one, no line.
+h_warn_each <- function(log, who, line, rest, cap = 20) {
+  for (i in head(seq_along(who), cap)) log$warn(line(i))
+  if (length(who) > cap) log$warn(paste(length(who) - cap, rest))
+}
+
 # -- the run ------------------------------------------------------------
 
 h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
   date <- z$date
   ymd <- format(date, "%Y%m%d")
-  markets <- h_markets(file.path(cfg, "hist_markets.csv"))
+  markets <- p1_hist_markets(file.path(cfg, "hist_markets.csv"))
   composites <- h_composites(file.path(cfg, "hist_composites.csv"))
   countries <- p1_csv(file.path(cfg, "close_conditions.csv"))
 
   log$step(1, "universe")
   log$kv("day", format(date), paste("exported",
                                     z$manifest["exported at"]))
+  # A tick file is never rewritten, so a wrong clock would stay wrong.
   kdb_tz <- z$manifest["kdb timezone"]
   if (!is.na(kdb_tz) && trimws(kdb_tz) != trimws(s$KDB_TIMEZONE)) {
-    log$warn(paste0("the manifest says kdb's clock is ", kdb_tz,
-                    "; KDB_TIMEZONE says ", s$KDB_TIMEZONE, ", which is used"))
+    stop("the manifest says kdb's clock is ", kdb_tz, "; KDB_TIMEZONE says ",
+         s$KDB_TIMEZONE, ". Nothing written: set KDB_TIMEZONE to what AB ",
+         "exported with and run again", call. = FALSE)
   }
   log$kv("kdb's clock", s$KDB_TIMEZONE)
   cc <- p1_crosscode(s$CROSSCODE_PATH)
   log$kv("crosscode", paste(nrow(cc), "rows"), s$CROSSCODE_PATH)
-  f <- h_filter(cc, file.path(cfg, "close_conditions.csv"))
+  f <- p1_filter(cc, file.path(cfg, "close_conditions.csv"))
   cc <- f$cc
   for (k in names(f$dropped)) {
     if (f$dropped[[k]]) log$info(paste(f$dropped[[k]], "rows dropped:", k))
@@ -277,7 +261,8 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
                    "took hist_markets.csv's composite; they carry no MIC"))
   }
 
-  # Each name's shift, one per market, and its header's seventh cell.
+  # Each name's shift, one per market, and its header's seventh cell. A
+  # market with no TimeZone has no shift (NA): its names get no file.
   tz_of <- function(market) {
     tz <- markets$TimeZone[match(market, markets$FidessaMarket)]
     ifelse(is.na(tz), "", tz)
@@ -285,17 +270,12 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
   venues <- unique(names_$venue)
   shift_of <- vapply(venues, function(v) {
     tz <- tz_of(v)
-    if (!nzchar(tz)) {
-      log$warn(paste0(if (nzchar(v)) v else "(no market)", ": no TimeZone ",
-                      "to convert to; its files keep kdb's clock"))
-      return(0)
-    }
+    if (!nzchar(tz)) return(NA_real_)
     p1_shift_seconds(date, s$KDB_TIMEZONE, tz)
   }, numeric(1))
   # By position: R never matches the name "", so a blank venue looked up
-  # by name is NA, not 0.
+  # by name is NA.
   names_$shift <- unname(shift_of[match(names_$venue, venues)])
-  names_$shift[is.na(names_$shift)] <- 0
   names_$label <- tz_of(names_$label_market)
   names_$path <- h_path(s$OUTPUT_DIR, names_$code, date)
   header <- function(i) {
@@ -305,8 +285,14 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
 
   st <- list(written = 0, existing = 0, quote_only = 0, no_trading_day = 0,
              prints = 0, new_folders = 0, quote_skipped = 0,
-             no_country = 0, excluded = n_excluded)
+             no_country = 0, no_timezone = 0, not_asked = 0,
+             excluded = n_excluded)
+  no_tz <- integer(0)
   put <- function(i, lines) {
+    if (is.na(names_$shift[i])) {
+      no_tz <<- c(no_tz, i)
+      return(FALSE)
+    }
     if (file.exists(names_$path[i])) {
       st$existing <<- st$existing + 1
       return(FALSE)
@@ -373,9 +359,25 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
     if (put(i, line)) st$quote_only <- st$quote_only + 1
   }
   log$kv("quote-only files", st$quote_only)
+  st$no_timezone <- length(no_tz)
+  h_warn_each(log, no_tz, function(k) {
+    v <- names_$venue[no_tz[k]]
+    paste0(names_$code[no_tz[k]], ": no TimeZone for ",
+           if (nzchar(v)) v else "(no market)", " in hist_markets.csv; ",
+           "no file, a rerun once it is set writes it")
+  }, "more with no TimeZone; no file")
 
   log$step(4, "NoTradingDay")
+  # Only a name AB asked kdb about (closes.csv has a row for every sym it
+  # asked) can be said not to have traded; a NoTradingDay row is for good.
   none <- which(!has_ticks & is.na(qi))
+  asked <- names_$sym[none] %in% p1_read(z$dir, "closes.csv")$sym
+  st$not_asked <- sum(!asked)
+  gone <- none[!asked]
+  h_warn_each(log, gone, function(k) {
+    paste(names_$code[gone[k]], "not in the extract, nothing written")
+  }, "more not in the extract, nothing written")
+  none <- none[asked]
   country <- countries$Country[match(names_$ext[none], trimws(countries$BBGCode))]
   country[is.na(country)] <- ""
   for (i in none[!nzchar(country)]) {
@@ -403,6 +405,9 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
   if (st$quote_skipped) log$kv("quote, no price", st$quote_skipped)
   log$kv("NoTradingDay rows", st$no_trading_day)
   if (st$no_country) log$kv("no Country", st$no_country)
+  if (st$no_timezone) log$kv("no TimeZone", st$no_timezone, "no file")
+  if (st$not_asked) log$kv("not in the extract", st$not_asked,
+                           "nothing written")
   log$kv("excluded", st$excluded)
   log$ok(paste("into", s$OUTPUT_DIR))
   st
@@ -448,7 +453,7 @@ h_self_test <- function() {
         c("AT", "IB", "IS", "JT"))
 
   cat("\nthe universe\n")
-  markets <- h_markets(file.path(cfg, "hist_markets.csv"))
+  markets <- p1_hist_markets(file.path(cfg, "hist_markets.csv"))
   comps <- h_composites(file.path(cfg, "hist_composites.csv"))
   z <- p1_unzip(file.path(fx, "phase1-20260925.zip"))
   u <- h_universe(p1_crosscode(file.path(fx, "CrossCode.csv")),
@@ -541,6 +546,8 @@ h_self_test <- function() {
   check("the counts",
         st[c("written", "existing", "quote_only", "no_trading_day")],
         list(written = 5, existing = 0, quote_only = 1, no_trading_day = 1))
+  check("a clean day has no !! line at all",
+        log$warned(), character(0))
 
   Sys.setFileTime(jp, as.POSIXct("2020-01-02 03:04:05"))
   before <- file.info(jp)$mtime
@@ -569,9 +576,26 @@ h_self_test <- function() {
             length(list.files(s3$NOTRADINGDAY_DIR)))
         }, c(TRUE, 0))
 
+  # The fixture's day with a member edited, in a folder of its own.
+  zcopy <- function(edit) {
+    dz <- tempfile()
+    dir.create(dz)
+    file.copy(list.files(z$dir, full.names = TRUE), dz)
+    edit(dz)
+    z2 <- z
+    z2$dir <- dz
+    z2
+  }
+  add_close <- function(sym) {
+    zcopy(function(dz) {
+      cat(paste0(sym, ",,,no-close\r\n"), file = file.path(dz, "closes.csv"),
+          append = TRUE)
+    })
+  }
+
   cat("\nthe extract's universe\n")
-  f <- h_filter(p1_crosscode(file.path(fx, "CrossCode.csv")),
-                file.path(cfg, "close_conditions.csv"))
+  f <- p1_filter(p1_crosscode(file.path(fx, "CrossCode.csv")),
+                 file.path(cfg, "close_conditions.csv"))
   check("the fixture drops JE and the blank code, and keeps the basket for the universe to drop",
         list(f$cc$BloombergCode, f$dropped),
         list(c("7203 JT", "005930 KP", "299990 KP", "123450 KQ", "AIA NZ",
@@ -586,7 +610,8 @@ h_self_test <- function() {
                "9999.TYO,9999 JT,TYO-MAIN,Warrant",
                "QQQ.HKG,QQQ XX,HKG-MAIN,Equity"), s5$CROSSCODE_PATH)
   log5 <- h_quiet_log()
-  tryCatch(h_run(z, s5, log5), error = function(e) NULL)
+  # AB asked kdb about the Warrant: closes.csv has its row, with no close.
+  tryCatch(h_run(add_close("9999.JP"), s5, log5), error = function(e) NULL)
   check("a JT Warrant is kept: with nothing that day, a NoTradingDay row",
         tryCatch(read(file.path(s5$NOTRADINGDAY_DIR,
                                 "NoTradingDay Japan.csv")),
@@ -613,13 +638,69 @@ h_self_test <- function() {
   writeLines(c("#FidessaCode,BloombergCode,FidessaMarket,Type",
                "7203.TYO,7203 JT,,Equity"), s4$CROSSCODE_PATH)
   log4 <- h_quiet_log()
-  tryCatch(h_run(z, s4, log4), error = function(e) NULL)
+  st4 <- tryCatch(h_run(z, s4, log4), error = function(e) list())
   blank <- file.path(s4$OUTPUT_DIR, "7203 JP", "raw-7203 JP-20260925.csv")
-  check("a row with no FidessaMarket keeps kdb's clock, and says so",
-        list(tryCatch(read(blank)[1:2], error = function(e) "no file"),
-             any(grepl("no TimeZone", log4$warned()))),
-        list(c("#Time,Last,Volume,Condition,Exchange,MicCode",
-               "08:00:00,2850,412300,O,T,XTKS"), TRUE))
+  check("a name with no TimeZone is not written in kdb's clock: no file, and !! naming it",
+        list(file.exists(blank),
+             any(grepl("7203 JP", log4$warned()) &
+                   grepl("no TimeZone", log4$warned())),
+             st4$written),
+        list(FALSE, TRUE, 0))
+  s4$CROSSCODE_PATH <- file.path(d, "cc4b.csv")
+  writeLines(c("#FidessaCode,BloombergCode,FidessaMarket,Type",
+               "7203.TYO,7203 JT,TYO-MAIN,Equity"), s4$CROSSCODE_PATH)
+  tryCatch(h_run(z, s4, h_quiet_log()), error = function(e) NULL)
+  check("and a rerun once the market is set writes it, in Tokyo's clock",
+        tryCatch(read(blank)[2], error = function(e) "no file"),
+        "09:00:00,2850,412300,O,T,XTKS")
+
+  cat("\nkdb's clock\n")
+  s6 <- s
+  s6$OUTPUT_DIR <- file.path(d, "out6")
+  s6$NOTRADINGDAY_DIR <- file.path(d, "ntd6")
+  z6 <- zcopy(function(dz) {
+    m <- readLines(file.path(dz, "manifest.csv"))
+    writeLines(sub("^kdb timezone,.*$", "kdb timezone,Tokyo Standard Time", m),
+               file.path(dz, "manifest.csv"))
+  })
+  z6$manifest[["kdb timezone"]] <- "Tokyo Standard Time"
+  check("a manifest whose kdb timezone is not KDB_TIMEZONE stops the run, naming both",
+        tryCatch({
+          h_run(z6, s6, h_quiet_log())
+          "no error"
+        }, error = function(e) {
+          grepl("Tokyo Standard Time", conditionMessage(e)) &&
+            grepl("China Standard Time", conditionMessage(e))
+        }), TRUE)
+  check("and nothing is written",
+        c(file.exists(s6$OUTPUT_DIR), file.exists(s6$NOTRADINGDAY_DIR)),
+        c(FALSE, FALSE))
+
+  cat("\na name AB did not ask about\n")
+  s7 <- s
+  s7$OUTPUT_DIR <- file.path(d, "out7")
+  s7$NOTRADINGDAY_DIR <- file.path(d, "ntd7")
+  s7$CROSSCODE_PATH <- file.path(d, "cc7.csv")
+  extra <- sprintf("%d HK", 5001:5022)
+  writeLines(c("#FidessaCode,BloombergCode,FidessaMarket,Type",
+               "8889.HKG,8889 HK,HKG-MAIN,Equity",
+               paste0(sub(" HK", ".HKG", extra), ",", extra, ",HKG-MAIN,Equity")),
+             s7$CROSSCODE_PATH)
+  log7 <- h_quiet_log()
+  tryCatch(h_run(z, s7, log7), error = function(e) {
+    cat("  h_run failed: ", conditionMessage(e), "\n", sep = "")
+  })
+  check("a name not in closes.csv gets no NoTradingDay row; one AB asked about still does",
+        tryCatch(read(file.path(s7$NOTRADINGDAY_DIR,
+                                "NoTradingDay Hong Kong.csv")),
+                 error = function(e) "no file"),
+        c("stock,date", "8889 HK,20260925"))
+  check("nor a file", list.files(s7$OUTPUT_DIR), character(0))
+  nie <- log7$warned()[grepl("not in the extract", log7$warned())]
+  check("one !! line a name, twenty at most, then the count of the rest",
+        c(length(nie), nie[1], nie[21]),
+        c("21", "5001 HK not in the extract, nothing written",
+          "2 more not in the extract, nothing written"))
 
   unlink(c(d, z$dir), recursive = TRUE)
   t$done()
@@ -631,7 +712,7 @@ h_main <- function() {
   a <- p1_args()
   if (identical(a[1], "--self-test")) return(h_self_test())
   s <- p1_settings(required = H_REQUIRED)
-  z <- p1_unzip(a[1])
+  z <- p1_unzip(a[1], H_MEMBERS)
   log <- p1_log_open(s$LOG_DIR, z$date)
   log$info(paste("historical.r", a[1]))
   ok <- tryCatch({
@@ -641,6 +722,7 @@ h_main <- function() {
     log$fail(conditionMessage(e))
     FALSE
   })
+  unlink(z$dir, recursive = TRUE)
   quit(save = "no", status = if (ok) 0 else 1)
 }
 
