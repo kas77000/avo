@@ -51,6 +51,20 @@ h_composites <- function(path) {
 
 # -- the universe -------------------------------------------------------
 
+# The rows the AB extract covers, and so the only ones this job can speak
+# for: an exchange code listed in close_conditions.csv and a Type of
+# exactly Equity or ETF (LimitUpDown's KEEP_TYPES). Returns the kept rows
+# and the dropped counts by reason.
+h_filter <- function(cc, close_conditions) {
+  ours <- trimws(p1_csv(close_conditions)$BBGCode)
+  type <- if ("Type" %in% names(cc)) trimws(cc$Type) else rep("", nrow(cc))
+  bad_ext <- !trimws(cc$ext) %in% ours
+  bad_type <- !bad_ext & !type %in% c("Equity", "ETF")
+  list(cc = cc[!bad_ext & !bad_type, ],
+       dropped = c("exchange code not ours" = sum(bad_ext),
+                   "Type not Equity/ETF" = sum(bad_type)))
+}
+
 # ticksfile.safe: a code as it may be a path. A slash is _, what Windows
 # refuses is dropped, runs of spaces are one, and no trailing dot or space.
 h_safe <- function(code) {
@@ -241,6 +255,12 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
   log$kv("kdb's clock", s$KDB_TIMEZONE)
   cc <- p1_crosscode(s$CROSSCODE_PATH)
   log$kv("crosscode", paste(nrow(cc), "rows"), s$CROSSCODE_PATH)
+  f <- h_filter(cc, file.path(cfg, "close_conditions.csv"))
+  cc <- f$cc
+  for (k in names(f$dropped)) {
+    if (f$dropped[[k]]) log$info(paste(f$dropped[[k]], "rows dropped:", k))
+  }
+  log$kv("kept", paste(nrow(cc), "rows"), "the extract's universe")
   u <- h_universe(cc, p1_read(z$dir, "master.csv"), markets, composites)
   for (k in names(u$dropped)) {
     if (u$dropped[[k]]) log$info(paste(u$dropped[[k]], "rows dropped:", k))
@@ -397,11 +417,12 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
 h_quiet_log <- function() {
   e <- new.env()
   e$warned <- character(0)
+  e$said <- character(0)
   nothing <- function(...) invisible(NULL)
-  list(info = nothing, ok = nothing, kv = nothing, step = nothing,
-       fail = nothing,
+  list(info = function(txt = "") e$said <- c(e$said, txt),
+       ok = nothing, kv = nothing, step = nothing, fail = nothing,
        warn = function(txt) e$warned <- c(e$warned, txt),
-       warned = function() e$warned)
+       warned = function() e$warned, said = function() e$said)
 }
 
 h_self_test <- function() {
@@ -539,21 +560,56 @@ h_self_test <- function() {
           s3 <- s
           s3$OUTPUT_DIR <- file.path(d, "out3")
           s3$NOTRADINGDAY_DIR <- file.path(d, "ntd3")
-          s3$CROSSCODE_PATH <- file.path(d, "cc3.csv")
-          writeLines(c("#FidessaCode,BloombergCode,FidessaMarket,Type",
-                       "Q.X,QQQ QX,HKG-MAIN,"), s3$CROSSCODE_PATH)
+          cfg3 <- file.path(d, "cfg3")
+          dir.create(cfg3)
+          file.copy(list.files(cfg, full.names = TRUE), cfg3)
+          cn <- readLines(file.path(cfg3, "close_conditions.csv"))
+          writeLines(sub("^HK,Hong Kong,", "HK,,", cn),
+                     file.path(cfg3, "close_conditions.csv"))
           log3 <- h_quiet_log()
-          h_run(z, s3, log3)
-          c(any(grepl("QQQ QX", log3$warned())),
+          h_run(z, s3, log3, cfg = cfg3)
+          c(any(grepl("8889 HK", log3$warned())),
             length(list.files(s3$NOTRADINGDAY_DIR)))
         }, c(TRUE, 0))
+
+  cat("\nthe extract's universe\n")
+  f <- h_filter(p1_crosscode(file.path(fx, "CrossCode.csv")),
+                file.path(cfg, "close_conditions.csv"))
+  check("the fixture keeps seven rows, and drops JE, the blank and the basket",
+        list(f$cc$BloombergCode, f$dropped),
+        list(c("7203 JT", "005930 KP", "299990 KP", "123450 KQ", "AIA NZ",
+               "8888 HK", "8889 HK"),
+             c("exchange code not ours" = 2, "Type not Equity/ETF" = 1)))
+  s5 <- s
+  s5$OUTPUT_DIR <- file.path(d, "out5")
+  s5$NOTRADINGDAY_DIR <- file.path(d, "ntd5")
+  s5$CROSSCODE_PATH <- file.path(d, "cc5.csv")
+  writeLines(c("#FidessaCode,BloombergCode,FidessaMarket,Type",
+               "7203.TYO,7203 JT,TYO-MAIN,Equity",
+               "9999.TYO,9999 JT,TYO-MAIN,Warrant",
+               "QQQ.HKG,QQQ XX,HKG-MAIN,Equity"), s5$CROSSCODE_PATH)
+  log5 <- h_quiet_log()
+  tryCatch(h_run(z, s5, log5), error = function(e) NULL)
+  check("a JT Warrant and an XX Equity get no file and no NoTradingDay row",
+        list(list.files(s5$OUTPUT_DIR), list.files(s5$NOTRADINGDAY_DIR)),
+        list("7203 JP", character(0)))
+  check("the JT Equity is written as before",
+        read(file.path(s5$OUTPUT_DIR, "7203 JP",
+                       "raw-7203 JP-20260925.csv"))[2],
+        "09:00:00,2850,412300,O,T,XTKS")
+  check("the drops are counted as .. lines, not warnings",
+        list(any(grepl("1 rows dropped: exchange code not ours",
+                       log5$said())),
+             any(grepl("1 rows dropped: Type not Equity/ETF", log5$said())),
+             any(grepl("rows dropped", log5$warned()))),
+        list(TRUE, TRUE, FALSE))
 
   s4 <- s
   s4$OUTPUT_DIR <- file.path(d, "out4")
   s4$NOTRADINGDAY_DIR <- file.path(d, "ntd4")
   s4$CROSSCODE_PATH <- file.path(d, "cc4.csv")
   writeLines(c("#FidessaCode,BloombergCode,FidessaMarket,Type",
-               "7203.TYO,7203 JT,,"), s4$CROSSCODE_PATH)
+               "7203.TYO,7203 JT,,Equity"), s4$CROSSCODE_PATH)
   log4 <- h_quiet_log()
   tryCatch(h_run(z, s4, log4), error = function(e) NULL)
   blank <- file.path(s4$OUTPUT_DIR, "7203 JP", "raw-7203 JP-20260925.csv")
