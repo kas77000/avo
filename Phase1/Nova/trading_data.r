@@ -6,6 +6,10 @@
 # msci.py, auction.py, caslist.py and marketcfg.py, which are the reference
 # for every rule here.
 #
+# Beta, Close, Volatility10D and MarketCap are written at 15 significant
+# digits (common.r p1_plain), as the legacy R job's write.csv did; Phase0's
+# Python wrote full Decimal precision, so the two differ past 15 digits.
+#
 #     Rscript trading_data.r phase1-YYYYMMDD.zip
 #     Rscript trading_data.r --self-test
 
@@ -63,8 +67,10 @@ t_key <- function(...) paste(..., sep = "\001")
 
 # equitymaster._to_decimal: text to a number, NA when it is not a finite one.
 t_num <- function(x) {
-  v <- suppressWarnings(as.numeric(trimws(x)))
-  v[!is.finite(v)] <- NA
+  x <- trimws(x)
+  v <- suppressWarnings(as.numeric(x))
+  # as.numeric reads hex; Decimal does not.
+  v[!is.finite(v) | grepl("^[+-]?0[xX]", x)] <- NA
   v
 }
 
@@ -268,7 +274,7 @@ t_auction_load <- function(path, warn) {
 
 t_read_lines <- function(path) {
   x <- readLines(path, encoding = "UTF-8", warn = FALSE)
-  if (length(x)) x[1] <- sub("^﻿", "", x[1])
+  if (length(x)) x[1] <- sub(paste0("^", intToUtf8(0xFEFF)), "", x[1])
   x
 }
 
@@ -768,6 +774,19 @@ t_self_test <- function() {
         t_cas_load(nse), "INE002A01018")
   check("no file is empty, not a failure",
         t_cas_load(file.path(d, "absent.txt")), character(0))
+  bom <- function(name, text) {
+    p <- file.path(d, name)
+    con <- file(p, "wb")
+    writeBin(c(as.raw(c(0xef, 0xbb, 0xbf)), charToRaw(text)), con)
+    close(con)
+    p
+  }
+  check("a BOM before the header does not hide it",
+        t_cas_load(bom("nse-bom.txt",
+                       "isin eligible_in_closing_auction
+INE002A01018 1
+")),
+        "INE002A01018")
   n1 <- put("n1.txt", c("isin eligible_in_closing_auction", "INE1 1"))
   b1 <- put("b1.txt", c("isin eligible_in_closing_auction", "INE2 1"))
   check("each exchange keeps its own", kv(t_cas_load_india(n1, b1)),
@@ -794,6 +813,10 @@ t_self_test <- function() {
   put("hkex.txt", c("StockCodes", "700"))
   check("the file is headerless, so a stray header is not a stock",
         t_hkex_load(hkp), "700 HK")
+  check("a BOM is not part of the first stock code",
+        t_hkex_load(bom("hk-bom.txt", "700
+5
+")), c("700 HK", "5 HK"))
   codes <- c("700 HK", "5 HK")
   check("ON the list keeps its segment; NOT on it is NO_CAS; GEM too",
         t_segment_hkex(codes, c("HKG-MAIN", "HKG-MAIN", "HKG-GEM"),
@@ -862,6 +885,8 @@ t_self_test <- function() {
         c(r$MarketCap, r$Capi), c("0", "MICRO"))
   check("a real negative beta is still a value",
         build(bhp, eq = eqrow("BHP AU", EQY_BETA = "-0.4"))$Beta, "-0.4")
+  check("hex is not a number, as Decimal has it",
+        t_num(c("0x1A", "-0X1", " 12 ")), c(NA, NA, 12))
   check("a big cap is written plain, with no exponent",
         build(bhp, eq = eqrow("BHP AU", CUR_MKT_CAP = "46500000",
                               fx_last = "0.0068"))$MarketCap, "316200000000")
