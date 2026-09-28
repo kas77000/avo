@@ -62,6 +62,7 @@ import datetime as dt
 import hashlib
 import io
 import os
+import re
 import shutil
 import sys
 import time
@@ -113,6 +114,40 @@ def qatt_server(date):
     """(setting, source) for qatt and quote: the RDB for today, the HDB for
     a --date."""
     return ("QATT_SERVER", "hdb") if date else ("QATT_RDB_SERVER", "rdb")
+
+
+def quote_server(date) -> str:
+    """The setting for the quote table's own process, for the same mode as
+    qatt_server.  Blank in local_settings.py means qatt's server."""
+    return "QUOTE_SERVER" if date else "QUOTE_RDB_SERVER"
+
+
+#  One cheap question, asked once per connection before any market: is the
+#  table this job reads there at all?  A plain expression, not a lambda.
+TABLES_Q = "tables[]"
+
+
+def require_table(conn, table, where, hint, log) -> None:
+    """Stop, before anything is staged, when `table` is not on `conn`.  A
+    server that will not list its tables is only a warning - the reads
+    themselves will say more."""
+    try:
+        have = {qattsource.text(t) for t in
+                qattsource._iter(qattsource._py(conn(TABLES_Q)))}
+    except Exception as e:                                  # noqa: BLE001
+        log.warn(f"could not list the tables on {where} "
+                 f"({type(e).__name__}: {str(e)[:80]}); going on")
+        return
+    if table not in have:
+        raise ExtractError(f"the {table} table is not on {where}; set "
+                           f"{hint} to the process that has it")
+    log.kv(f"{table} table", "found", where)
+
+
+def safe_code(code) -> str:
+    """A market code as a file name: only [A-Za-z0-9_-], anything else
+    becomes _, and no code at all is NONE."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", code or "") or "NONE"
 
 
 def px_or_none(value):
@@ -406,6 +441,22 @@ def assemble(stage, out, mkts, head) -> tuple:
     return manifest, table
 
 
+def read_quotes(conns, qday, syms, log) -> dict:
+    """fetch_quotes on the quote connection (qatt's when none is set).  A
+    read that drops is asked once more on a fresh connection."""
+    conn = conns.get("quote") or conns["qatt"]
+    try:
+        return refdata.fetch_quotes(conn, qday, syms)
+    except Exception as e:                                  # noqa: BLE001
+        again = conns.get("quote_reconnect")
+        if not (too_big(e) and again):
+            raise
+        log.warn(f"quote read of {len(syms)} syms dropped "
+                 f"({type(e).__name__}); reconnecting and asking again")
+        conns["quote"] = again()
+        return refdata.fetch_quotes(conns["quote"], qday, syms)
+
+
 def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
           fresh=False):
     """Stage the day market by market, then write
@@ -414,7 +465,8 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     `date` None is today from the RDB; a date is the HDB.  `conns` holds
     the open connections - "em" for equity_master and the ladders, "qatt"
     for the prints, "quote" for the quotes (qatt's when absent) - and
-    "reconnect", which opens a fresh qatt one.  `markets` and `conditions`
+    "reconnect" / "quote_reconnect", which open fresh ones, and "names",
+    how the qatt and quote connections are named in an error.  `markets` and `conditions`
     default to config/.
 
     RESUMABLE.  Every file goes to EXPORT_DIR/phase1-YYYYMMDD/ as soon as it
@@ -428,8 +480,11 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     if conditions is None:
         conditions = closes.load_conditions(
             HERE / "config" / "close_conditions.csv")
-    _name, source = qatt_server(date)
+    q_name, source = qatt_server(date)
     em = conns["em"]
+    #  How each connection is named in an error: the setting, and in a real
+    #  run its host:port.  Quote is qatt's unless a quote server is set.
+    names = {"qatt": q_name, "quote": q_name, **conns.get("names", {})}
 
     log.step(1, "crosscode")
     rows, dropped = crosscode.load(cfg["CROSSCODE_PATH"])
@@ -440,6 +495,10 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
             log.warn(f"{logs.thousands(len(e.rows))} rows dropped: {e.reason}")
 
     log.step(2, f"qatt, from the {source.upper()}")
+    require_table(conns["qatt"], "qatt", names["qatt"],
+                  "QATT_RDB_SERVER / QATT_SERVER", log)
+    require_table(conns.get("quote") or conns["qatt"], "quote",
+                  names["quote"], "QUOTE_RDB_SERVER / QUOTE_SERVER", log)
     if source == "rdb":
         day = today
         log.kv("day", str(day), "today")
@@ -518,12 +577,19 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     syms = sorted(groups)
     codes = {s: closes.codes_for_sym(exts_of(g), conditions)
              for s, g in groups.items()}
-    by_market = {}
+    by_market, odd = {}, {}
     for s in syms:
-        by_market.setdefault(market_of(groups[s], master) or "NONE",
-                             []).append(s)
+        code = market_of(groups[s], master)
+        if not re.fullmatch(r"[A-Z0-9]{2,4}", code):
+            odd.setdefault(code, groups[s][0].bbg)
+        by_market.setdefault(safe_code(code), []).append(s)
     log.kv("syms to export", logs.thousands(len(syms)),
            f"in {len(by_market)} markets")
+    if odd:
+        log.warn(f"{len(odd)} odd exchange codes, filed under a safe name: "
+                 + ", ".join(f"{c!r} ({b})" for c, b in
+                             sorted(odd.items())[:15])
+                 + (" ..." if len(odd) > 15 else ""))
 
     log.step(4, "reference data")
     #  One candidate list per BloombergCode, the first crosscode row's.
@@ -620,18 +686,28 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         settled = {}
         parts = [_part(f) for f in files]
         try:
-            with parts[0].open("w", encoding="utf-8", newline="") as fh:
-                stats = write_ticks(fh, fetch_chunks(
-                    conns["qatt"], qday, msyms, cols, size, reconnect,
-                    log), settle)
+            try:
+                with parts[0].open("w", encoding="utf-8",
+                                   newline="") as fh:
+                    stats = write_ticks(fh, fetch_chunks(
+                        conns["qatt"], qday, msyms, cols, size, reconnect,
+                        log), settle)
+            except Exception as e:                          # noqa: BLE001
+                raise ExtractError(f"market {mkt}, qatt read on "
+                                   f"{names['qatt']}: "
+                                   f"{type(e).__name__}: {e}") from e
             ticked = set(settled)
 
             quiet = [s for s in msyms if s not in ticked]
-            qconn = conns.get("quote") or conns["qatt"]
             quotes = {}
             for k in range(0, len(quiet), n):
-                quotes.update(refdata.fetch_quotes(qconn, qday,
-                                                   quiet[k:k + n]))
+                try:
+                    quotes.update(read_quotes(conns, qday, quiet[k:k + n],
+                                              log))
+                except Exception as e:                      # noqa: BLE001
+                    raise ExtractError(f"market {mkt}, quote read on "
+                                       f"{names['quote']}: "
+                                       f"{type(e).__name__}: {e}") from e
             log.kv("no print", logs.thousands(len(quiet)),
                    f"{logs.thousands(len(quotes))} with a quote")
             quote_rows = []
@@ -720,22 +796,40 @@ def main(argv=None) -> int:
         print(f"FAIL  --date {a.date!r} is not YYYY-MM-DD", file=sys.stderr)
         return 2
     q_name, source = qatt_server(date)
+    u_name = quote_server(date)
     try:
         cfg = settings.load()
         settings.require(cfg, "CROSSCODE_PATH", "EXPORT_DIR")
         em_host, em_port = settings.server(cfg, "EQUITY_MASTER_SERVER")
         q_host, q_port = settings.server(cfg, q_name)
+        #  Blank: the quote table is on qatt's own process.
+        own_quote = bool(str(cfg.get(u_name, "")).strip())
+        if own_quote:
+            u_host, u_port = settings.server(cfg, u_name)
     except settings.SettingError as e:
         print(f"FAIL  {e}", file=sys.stderr)
         return 2
 
+    names = {"qatt": f"{q_name} ({q_host}:{q_port})"}
+    names["quote"] = (f"{u_name} ({u_host}:{u_port})" if own_quote
+                      else names["qatt"])
     log = logs.Log(path=a.log or None)
-    log.kv("qatt and quote", source, f"{q_name}")
+    log.kv("qatt", source, names["qatt"])
+    log.kv("quote", source, names["quote"])
     try:
         conns = {"em": qattsource.connect(em_host, em_port),
                  "qatt": qattsource.connect(q_host, q_port),
-                 "reconnect": lambda: connect_again(q_host, q_port, log)}
+                 "reconnect": lambda: connect_again(q_host, q_port, log),
+                 "names": names}
+        if own_quote:
+            conns["quote"] = qattsource.connect(u_host, u_port)
+            conns["quote_reconnect"] = lambda: connect_again(
+                u_host, u_port, log)
         build(cfg, date, conns, log, fresh=a.fresh)
+    except ExtractError as e:
+        log.fail(str(e))
+        log.fail("no zip written")
+        return 1
     except SystemExit as e:             # qattsource's explained failures
         log.fail(str(e))
         log.fail("no zip written")
@@ -782,6 +876,10 @@ def self_test() -> int:
           ("QATT_RDB_SERVER", "rdb"))
     check("--date reads the HDB",
           qatt_server(D(2026, 9, 25)), ("QATT_SERVER", "hdb"))
+
+    check("a market code is a safe file name",
+          [safe_code(c) for c in ("JT", ".", "", "A/B", "u-1_x")],
+          ["JT", "_", "NONE", "A_B", "u-1_x"])
 
     print("\nthe universe")
     R = crosscode.Row
@@ -899,13 +997,16 @@ def self_test() -> int:
 
     class FakeQatt:
         def __init__(self, fail=False, fail_on=(), parts=None,
-                     max_syms=None):
+                     max_syms=None, tables=("qatt",)):
             self.asked, self.fail, self.fail_on = [], fail, set(fail_on)
+            self.tables = list(tables)
             self.syms, self.sizes, self.max_syms = [], [], max_syms
             self.parts = parts or [D(2026, 9, 24), D(2026, 9, 25)]
 
         def __call__(self, q, *args):
             self.asked.append(q)
+            if q == TABLES_Q:
+                return self.tables
             if q == qattsource.PARTITIONS_Q:
                 return self.parts
             if q == qattsource.COLUMNS_Q:
@@ -924,11 +1025,15 @@ def self_test() -> int:
             raise AssertionError(f"qatt was asked {q}")
 
     class FakeQuote:
-        def __init__(self):
-            self.asked = []
+        def __init__(self, tables=("quote",), fail=False):
+            self.asked, self.tables, self.fail = [], list(tables), fail
 
         def __call__(self, q, *args):
+            if q == TABLES_Q:
+                return self.tables
             self.asked.append((q, args))
+            if self.fail:
+                raise RuntimeError("'quote")
             have = {"8888.HK": dt.time(16, 8, 2), "QQQ.XX": dt.time(9, 0)}
             return [{"sym": s, "time": have[s], "bid": 3.41, "ask": 3.43}
                     for s in args[-1] if s in have]
@@ -1109,14 +1214,80 @@ def self_test() -> int:
               sorted(p.name for p in outdir.glob("*.zip*")), [])
         err = attempt(lambda: run(tmp, D(2026, 9, 25),
                                   qatt=FakeQatt(fail=True)))
-        check("a qatt failure mid-stream stops the run",
-              type(err).__name__, "RuntimeError")
+        check("a qatt failure mid-stream stops the run, naming the market, "
+              "the step and the setting",
+              (type(err).__name__, str(err)),
+              ("ExtractError", "market HK, qatt read on QATT_SERVER: "
+                               "RuntimeError: 'type"))
         check("and leaves no zip and no .part",
               sorted(p.name for p in outdir.glob("*.zip*"))
               + sorted(p.name for p in outdir.rglob("*.part")), [])
         err = attempt(lambda: run(tmp, D(2026, 9, 1)))
         check("a --date before every partition stops the run",
               type(err).__name__, "ExtractError")
+        err = attempt(lambda: run(tmp, D(2026, 9, 25),
+                                  quote=FakeQuote(fail=True)))
+        check("so does a quote failure, named as one",
+              str(err), "market HK, quote read on QATT_SERVER: "
+                        "RuntimeError: 'quote")
+
+    print("\nthe quote and qatt tables, checked before any market")
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp) / "out" / "phase1-20260925"
+        err = attempt(lambda: run(tmp, D(2026, 9, 25),
+                                  quote=FakeQuote(tables=("trade",))))
+        check("no quote table on the quote connection stops the run",
+              str(err), "the quote table is not on QATT_SERVER; set "
+                        "QUOTE_RDB_SERVER / QUOTE_SERVER to the process "
+                        "that has it")
+        check("before anything is staged", stage.exists(), False)
+        err = attempt(lambda: run(tmp, D(2026, 9, 25),
+                                  qatt=FakeQatt(tables=("quote",))))
+        check("and no qatt table on the qatt connection",
+              str(err), "the qatt table is not on QATT_SERVER; set "
+                        "QATT_RDB_SERVER / QATT_SERVER to the process "
+                        "that has it")
+
+    print("\nmain: the quote server's own connection")
+    with tempfile.TemporaryDirectory() as tmp:
+        import contextlib
+        cc = Path(tmp) / "CrossCode.csv"
+        cc.write_text(CROSSCODE, encoding="utf-8")
+        fakes = {("em-host", 1): FakeEm(), ("qatt-host", 2): FakeQatt(),
+                 ("quote-host", 3): FakeQuote()}
+        saved = qattsource.connect, settings.load
+
+        def main_with(quote_rdb):
+            cfg = dict(settings.DEFAULTS, CROSSCODE_PATH=str(cc),
+                       EXPORT_DIR=str(Path(tmp) / "out"),
+                       EQUITY_MASTER_SERVER="em-host:1",
+                       QATT_RDB_SERVER="qatt-host:2",
+                       QUOTE_RDB_SERVER=quote_rdb)
+            settings.load = lambda: cfg
+            qattsource.connect = lambda h, p: fakes[(h, int(p))]
+            logfile = Path(tmp) / f"run{len(quote_rdb)}.log"
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    rc = main(["--log", str(logfile)])
+            finally:
+                qattsource.connect, settings.load = saved
+            return rc, logfile.read_text("utf-8")
+
+        rc, text = main_with("")
+        check("QUOTE_RDB_SERVER blank: the qatt RDB is asked, has no quote "
+              "table, and the run stops before any market",
+              (rc, "XX  the quote table is not on QATT_RDB_SERVER "
+                   "(qatt-host:2); set QUOTE_RDB_SERVER / QUOTE_SERVER to "
+                   "the process that has it" in text, "--- 5.1" in text),
+              (1, True, False))
+        rc, text = main_with("quote-host:3")
+        check("QUOTE_RDB_SERVER set: the run goes through", rc, 0)
+        check("the quotes go to that connection",
+              {q for q, _a in fakes[("quote-host", 3)].asked},
+              {refdata.QUOTE_RDB_Q})
+        check("and never to qatt's",
+              [q for q in fakes[("qatt-host", 2)].asked if "quote" in q], [])
 
     print("\nthe equity_master date, when the client-date query fails")
     with tempfile.TemporaryDirectory() as tmp:
@@ -1142,7 +1313,7 @@ def self_test() -> int:
         err = attempt(lambda: run(tmp, D(2026, 9, 25),
                                   qatt=FakeQatt(fail_on={"7203.JP"})))
         check("a qatt failure on the second market (JT) stops the run",
-              type(err).__name__, "RuntimeError")
+              type(err).__name__, "ExtractError")
         check("the first market's three files are staged, the second's "
               "nothing, and no zip",
               (sorted(p.name for p in stage.iterdir()),

@@ -27,6 +27,8 @@ extract.py -> phase1-YYYYMMDD.zip  ---------------------->  run_phase1.cmd <zip>
    | `EQUITY_MASTER_SERVER` | `host:port` of equity_master (and the tick ladders) |
    | `QATT_SERVER` | `host:port` of the qatt **HDB**, read with `--date` |
    | `QATT_RDB_SERVER` | `host:port` of the qatt **RDB**, read for today |
+   | `QUOTE_SERVER` | optional, `host:port` of the process with the `quote` table, used with `--date`; blank means `QATT_SERVER` |
+   | `QUOTE_RDB_SERVER` | optional, the same for today's run; blank means `QATT_RDB_SERVER` |
    | `EXPORT_DIR` | where the zip is written, e.g. `C:\path\to\phase1_export` |
    | `CROSSCODE_PATH` | `NewCrosscode.csv` on this machine |
    | `KDB_TIMEZONE` | optional, default `China Standard Time`; the zone kdb stamps prints in, copied to the manifest |
@@ -232,6 +234,29 @@ under a code that is not in `close_conditions.csv`.
 The run stops with `XX` and writes no zip when kdb fails, when qatt has no
 partition on or before `--date`, or when equity_master returns no row at all
 for the reference fetch.
+
+Before any market, step 2 checks that the `qatt` table is on the qatt
+connection and the `quote` table on the quote connection (`tables[]`). If
+one is missing, the run stops before staging anything:
+
+```
+XX  the quote table is not on QATT_RDB_SERVER (kdb-host:5012); set QUOTE_RDB_SERVER / QUOTE_SERVER to the process that has it
+```
+
+A kdb error during a market names the market, the read and the setting,
+for example `XX  market JT, quote read on QUOTE_RDB_SERVER (kdb-host:5014): QError: ...`.
+Fix the cause and run again: the markets already done are kept.
+
+A market's file name is its exchange code with anything but
+`A-Z a-z 0-9 _ -` replaced by `_` (an empty code is `NONE`). Step 3 lists
+the exchange codes that do not look like one (not 2 to 4 capital letters
+or digits), with an example BloombergCode each:
+
+```
+!!  2 odd exchange codes, filed under a safe name: '.' (ABC .), '' (XYZ)
+```
+
+Those usually come from a malformed BloombergCode in the CrossCode.
 
 ## Before the first live run
 

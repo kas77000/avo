@@ -9,6 +9,12 @@ EQUITY_MASTER_SERVER = "kdb-host:5010"
 QATT_SERVER = "kdb-host:5011"
 QATT_RDB_SERVER = "kdb-host:5012"
 
+# The process with the `quote` table, if it is not the qatt one: QUOTE_SERVER
+# with --date (HDB), QUOTE_RDB_SERVER without (RDB).  Leave blank or
+# commented out to use QATT_SERVER / QATT_RDB_SERVER.
+# QUOTE_SERVER = "kdb-host:5013"
+# QUOTE_RDB_SERVER = "kdb-host:5014"
+
 # Where extract.py leaves phase1-YYYYMMDD.zip.
 EXPORT_DIR = r"C:\path\to\phase1_export"
 

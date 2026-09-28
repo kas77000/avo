@@ -19,6 +19,10 @@ DEFAULTS = {
     "EQUITY_MASTER_SERVER": "",
     "QATT_SERVER": "",
     "QATT_RDB_SERVER": "",
+    #  The process with the `quote` table, when it is not qatt's: with
+    #  --date (HDB) and without (RDB).  Blank means qatt's server.
+    "QUOTE_SERVER": "",
+    "QUOTE_RDB_SERVER": "",
     #  Where extract.py leaves phase1-YYYYMMDD.zip.
     "EXPORT_DIR": "",
 
