@@ -21,9 +21,11 @@ partition on or before that date, as qatt_export did.  equity_master and
 the tick ladders always come from EQUITY_MASTER_SERVER, at the newest
 equity_master date on or before the day.
 
-THE UNIVERSE IS THE CROSSCODE, resolved to qatt syms exactly as
-qatt_export.py did (equity_master in three passes, config/markets.csv as the
-fallback).
+THE UNIVERSE IS THE CROSSCODE, filtered to our markets: a row is kept when
+its Bloomberg exchange code is in config/close_conditions.csv and its Type
+is exactly Equity or ETF.  The kept rows are resolved to qatt syms exactly
+as qatt_export.py did (equity_master in three passes, config/markets.csv as
+the fallback).
 
 THE CLOSE is closes.py's rule: the last print carrying one of its market's
 close codes (config/close_conditions.csv), else equity_master's PX_LAST with
@@ -57,6 +59,7 @@ reference fetch, stops the run and leaves no zip.  The zip is written as
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import datetime as dt
 import hashlib
@@ -179,6 +182,32 @@ def candidates(rows, markets) -> dict:
                       crosscode.bbg_full(r.bbg),
                       f"{r.ticker}.{comp}" if r.ticker and comp else "")
     return out
+
+
+#  The CrossCode Types the extract covers - exact match, as
+#  ../../Phase0/AB/LimitUpDown/crosscode.py's KEEP_TYPES.
+KEEP_TYPES = ("Equity", "ETF")
+
+
+def universe_rows(rows, conditions) -> tuple:
+    """(kept, {reason: Counter}): the CrossCode rows this extract covers.
+
+    A row is ours when its Bloomberg exchange code (the last word of its
+    BloombergCode) is a BBGCode of config/close_conditions.csv, and its Type
+    is exactly Equity or ETF.  The CrossCode is the whole firm's; without
+    this the day ran over some 400 exchange codes.  Dropped rows are counted
+    per exchange code or per Type, for the log."""
+    kept = []
+    dropped = {"exchange code not ours": collections.Counter(),
+               "Type not Equity/ETF": collections.Counter()}
+    for r in rows:
+        if r.bbg_ext not in conditions:
+            dropped["exchange code not ours"][r.bbg_ext] += 1
+        elif r.sec_type not in KEEP_TYPES:
+            dropped["Type not Equity/ETF"][r.sec_type] += 1
+        else:
+            kept.append(r)
+    return kept, dropped
 
 
 def wanted_syms(rows, master, markets) -> list:
@@ -493,6 +522,22 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     for e in dropped:
         if e.rows:
             log.warn(f"{logs.thousands(len(e.rows))} rows dropped: {e.reason}")
+    everything = len(rows)
+    rows, dropped = universe_rows(rows, conditions)
+    log.kv("universe", logs.thousands(len(rows)) + " rows",
+           f"of {logs.thousands(everything)}, the exchange codes of "
+           f"close_conditions.csv, Type Equity or ETF")
+    for reason, counts in dropped.items():
+        if counts:
+            log.kv("dropped", logs.thousands(sum(counts.values())) + " rows",
+                   f"{reason}: " + ", ".join(
+                       f"{k or '(blank)'} {logs.thousands(v)}"
+                       for k, v in counts.most_common(10))
+                   + (" ..." if len(counts) > 10 else ""))
+    if not rows:
+        raise ExtractError("no CrossCode row is ours: none has an exchange "
+                           "code of close_conditions.csv and Type Equity "
+                           "or ETF")
 
     log.step(2, f"qatt, from the {source.upper()}")
     require_table(conns["qatt"], "qatt", names["qatt"],
@@ -894,6 +939,26 @@ def self_test() -> int:
           wanted_syms(rows, {"7203 JE": {"sym": "7203.JP"}}, markets),
           ["7203.JP"])
 
+    def typed(bbg, sec_type):
+        ticker, ext = crosscode.split_bbg(bbg)
+        return R("", "", bbg, ticker, ext, sec_type, "", "", "")
+
+    ours = {"JT": ["e"], "HK": ["CA"]}
+    kept, dropped = universe_rows(
+        [typed("7203 JT", "Equity"), typed("1321 JT", "ETF"),
+         typed("7203W JT", "Warrant"), typed("AAA XX", "Equity"),
+         typed("BBB XX", "Equity"), typed("5 HK", ""),
+         typed("6 HK", "equity")], ours)
+    check("a JT Equity row and a JT ETF row are kept",
+          [r.bbg for r in kept], ["7203 JT", "1321 JT"])
+    check("an exchange code not in close_conditions.csv is dropped, "
+          "counted per code",
+          dict(dropped["exchange code not ours"]), {"XX": 2})
+    check("a Warrant, a blank Type and a lower-case equity are dropped, "
+          "counted per Type (exact match, as Phase0 LimitUpDown)",
+          dict(dropped["Type not Equity/ETF"]),
+          {"Warrant": 1, "": 1, "equity": 1})
+
     print("\nreading qatt")
     asked = []
 
@@ -1046,12 +1111,17 @@ def self_test() -> int:
         def emit(self, level, text=""):
             self.lines.append(self.line(level, text))
 
-    conditions = {"JT": ["e", "ES"], "NZ": ["CA"], "HK": ["CA"]}
+    #  JE and XX are ours here, with no close code - a blank
+    #  CloseCondCodes cell - so the universe filter keeps them.
+    conditions = {"JT": ["e", "ES"], "NZ": ["CA"], "HK": ["CA"],
+                  "JE": [], "XX": []}
 
     CROSSCODE = ("BloombergCode,FidessaMarket,Type\n"
-                 "7203 JT,TYO-MAIN,\n7203 JE,JNX-MAIN,\nAIA NZ,NZE-MAIN,\n"
-                 "8888 HK,HKG-MAIN,\n8889 HK,HKG-MAIN,\nZZZ XX,XXX-MAIN,\n"
-                 "QQQ XX,XXX-MAIN,\nBSKT HK,HKG-MAIN,Basket\n")
+                 "7203 JT,TYO-MAIN,Equity\n7203 JE,JNX-MAIN,Equity\n"
+                 "AIA NZ,NZE-MAIN,Equity\n8888 HK,HKG-MAIN,Equity\n"
+                 "8889 HK,HKG-MAIN,ETF\nZZZ XX,XXX-MAIN,Equity\n"
+                 "QQQ XX,XXX-MAIN,Equity\nBSKT HK,HKG-MAIN,Basket\n"
+                 "7203W JT,TYO-MAIN,Warrant\nAAA US,NYS-MAIN,Equity\n")
 
     def run(tmp, date, em=None, qatt=None, quote=None, log=None,
             fresh=False, cc_text=CROSSCODE, extra=None, conds=None,
@@ -1155,6 +1225,15 @@ def self_test() -> int:
                 "closes from qatt", "closes from equity_master", "no close")],
               ["2026-09-25", "hdb", "2026-09-24", T, "6", "7", "3", "1",
                "1", "3", "2"])
+        check("the universe: the kept rows, and each drop with its reason",
+              [ln for ln in log.lines if ln.startswith("..  universe")
+               or ln.startswith("..  dropped")],
+              ["..  universe                7 rows   of 9, the exchange codes "
+               "of close_conditions.csv, Type Equity or ETF",
+               "..  dropped                 1 rows   exchange code not ours: "
+               "US 1",
+               "..  dropped                 1 rows   Type not Equity/ETF: "
+               "Warrant 1"])
         check("one !! line per fallback, with the market and the price",
               [ln for ln in log.lines if ln.startswith("!!  close")],
               ["!!  close  8888.HK  HK  no-trades  -> equity_master 3.4",
@@ -1387,7 +1466,7 @@ def self_test() -> int:
         qatt, log = FakeQatt(), Caught()
         run(tmp, D(2026, 9, 25), qatt=qatt, log=log,
             em=FakeEm(date=D(2026, 9, 25)),
-            cc_text=CROSSCODE.replace("QQQ XX,XXX-MAIN,\n", ""))
+            cc_text=CROSSCODE.replace("QQQ XX,XXX-MAIN,Equity\n", ""))
         check("so does another CrossCode",
               (any(ln.startswith("!!  staged folder was built from")
                    for ln in log.lines), len(set(qatt.syms))), (True, 5))
@@ -1402,6 +1481,17 @@ def self_test() -> int:
                                  "rdb") for ln in log.lines),
                "8888.HK" in qatt.syms), (True, True))
 
+    with tempfile.TemporaryDirectory() as tmp:
+        run(tmp, D(2026, 9, 25))
+        qatt, log = FakeQatt(), Caught()
+        run(tmp, D(2026, 9, 25), qatt=qatt, log=log,
+            cc_text=CROSSCODE + "BBB US,NYS-MAIN,Equity\n"
+                                "8890 HK,HKG-MAIN,Warrant\n")
+        check("the CrossCode fingerprint covers only the rows kept: rows "
+              "outside the universe change nothing",
+              (any(ln.startswith("!!  staged folder") for ln in log.lines),
+               qatt.syms), (False, []))
+
     print("\nthe halved read size, across markets")
     with tempfile.TemporaryDirectory() as tmp:
         qatt = FakeQatt(max_syms=1)
@@ -1413,9 +1503,10 @@ def self_test() -> int:
     print("\nPX_LAST, the sym's own row first")
     with tempfile.TemporaryDirectory() as tmp:
         em = FakeEm(equity=EQUITY_ROWS + [equity_row("7203.JT", 1)])
-        cc_text = "BloombergCode,FidessaMarket,Type\n7203 JT,TYO-MAIN,\n"
+        cc_text = ("BloombergCode,FidessaMarket,Type\n"
+                   "7203 JT,TYO-MAIN,Equity\n")
         z = members(run(tmp, D(2026, 9, 25), em=em, cc_text=cc_text,
-                        conds={}))
+                        conds={"JT": []}))
         check("7203 JT picks 7203.JT for equity.csv",
               [r.split(",")[:3] for r in z[EQUITY][1:]],
               [["7203 JT", "7203.JT", "1"]])
@@ -1423,7 +1514,7 @@ def self_test() -> int:
               z[CLOSES][1:], ["7203.JP,2871,equity_master,no-close-codes"])
         (Path(tmp) / "out" / "phase1-20260925" / "ticks-JT.csv").unlink()
         z = members(run(tmp, D(2026, 9, 25), em=FakeEm(equity=[]),
-                        cc_text=cc_text, conds={}))
+                        cc_text=cc_text, conds={"JT": []}))
         check("and a resumed run reads it back from px.csv",
               z[CLOSES][1:], ["7203.JP,2871,equity_master,no-close-codes"])
 
