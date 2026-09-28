@@ -73,7 +73,9 @@ for a bad argument or setting.
 The day is built in a staging folder, `EXPORT_DIR/phase1-YYYYMMDD/` (the
 trade day), one file at a time, each as soon as it is ready:
 
-1. `master.csv`, `equity.csv`, `ladders.csv`, once each;
+1. `stage.csv` (what the folder was built from, see below), then
+   `master.csv`, `px.csv` (every fetched `PX_LAST`, for the closes),
+   `equity.csv`, `ladders.csv`, once each;
 2. then, market by market in code order, `ticks-<MKT>.csv`,
    `closes-<MKT>.csv` and `quote_only-<MKT>.csv`. A market is the Bloomberg
    exchange code of a sym's primary CrossCode row (equity_master's
@@ -86,16 +88,38 @@ ticks file is renamed last, so a market counts as done only when all three
 of its files exist.
 
 **If a run stops** (kdb drops, the machine restarts, Ctrl+C), run the same
-command again. The rerun reads `master.csv` and `equity.csv` back instead of
-asking equity_master, skips every market already done (the log says
-`HK done already, skipped`), redoes the market it stopped in, and carries on.
-Leftover `.part` files are simply overwritten. The zip is the same as an
-uninterrupted run would have written.
+command again. The rerun reads `master.csv`, `px.csv` and `equity.csv` back
+instead of asking equity_master, skips every market already done (the log
+says `HK done already, skipped`), redoes the market it stopped in, and
+carries on. Leftover `.part` files are simply overwritten. The zip is the
+same as an uninterrupted run would have written. A market whose staged
+`closes-<MKT>.csv` does not hold exactly this run's syms is redone, with a
+`!!` line.
 
-**`--fresh`** deletes the day's folder and starts over. Use it when the
-CrossCode changed, or after a no-argument run made too early: the RDB keeps
-filling during the day, and a rerun of today would otherwise keep the
-markets an earlier run already finished.
+**The folder only resumes a run like the one that built it.** `stage.csv`
+records the source (`rdb`/`hdb`), the equity_master date and a fingerprint
+of the CrossCode's BloombergCodes. If any of them differs on a later run of
+the same day, for example a failed no-argument run followed next morning by
+`--date` for that day, or an edited CrossCode, the log says
+
+```
+!!  staged folder was built from source rdb, equity_master date 2026-09-24; starting the day fresh
+```
+
+and the run starts the day from scratch, as with `--fresh`.
+
+**`--fresh`** deletes the day's folder and starts over. Use it after a
+no-argument run made too early: the RDB keeps filling during the day, and a
+rerun of today would otherwise keep the markets an earlier run already
+finished.
+
+**Disk space:** the staging folder holds the day's ticks **uncompressed**,
+several times the zip's size. It is left in place so a rerun can resume;
+once `phase1-YYYYMMDD.zip` exists it is no longer needed and can be
+deleted.
+
+**A read that is too big** (kdb drops the connection) is halved, and the
+smaller size is kept for the rest of the run, across markets.
 
 ## What the zip contains
 

@@ -38,7 +38,9 @@ equity.csv and ladders.csv once, then per market (the exchange code of a
 sym's primary CrossCode row) ticks-, closes- and quote_only-<MKT>.csv.
 Each is written as .part and renamed, the ticks file last, so a market
 whose three files exist is done.  A rerun of the same day reads back what
-is staged and skips the done markets; --fresh deletes the folder first.
+is staged and skips the done markets; --fresh deletes the folder first, and
+so does a run whose source, equity_master date or CrossCode differs from
+what stage.csv says the folder was built from.
 The zip is then assembled from the folder, which is left in place.
 
 FAIL LOUDLY.  A kdb failure, or equity_master answering nothing for the
@@ -57,6 +59,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import io
 import os
 import shutil
@@ -80,6 +83,8 @@ HERE = Path(__file__).resolve().parent
 MANIFEST, MASTER, TICKS = "manifest.csv", "master.csv", "ticks.csv"
 CLOSES, QUOTE_ONLY = "closes.csv", "quote_only.csv"
 EQUITY, LADDERS = "equity.csv", "ladders.csv"
+#  Staged only: what the folder was built from, and every fetched PX_LAST.
+STAGE, PX = "stage.csv", "px.csv"
 MEMBERS = (MANIFEST, MASTER, TICKS, CLOSES, QUOTE_ONLY, EQUITY, LADDERS)
 
 TICK_COLUMNS = ["sym", "time", "price", "size", "cond", "ex"]
@@ -156,10 +161,12 @@ def too_big(e) -> bool:
 def fetch_chunks(conn, date, syms, cols, size, reconnect, log):
     """{sym: rows} per chunk of syms, in order.  `date` None reads the RDB.
     A read that is too big is halved and asked again on a fresh connection,
-    and the smaller size is kept - as in historical_ticks.run.  One sym that
-    still fails stops the export: a zip missing a name would look exactly
-    like a quiet day."""
-    size, pos, reads = max(1, int(size)), 0, 0
+    and the smaller size is kept - as in historical_ticks.run.  `size` is a
+    number, or a {"n": number} shared across calls, which keeps the halved
+    size for every later market too.  One sym that still fails stops the
+    export: a zip missing a name would look exactly like a quiet day."""
+    state = size if isinstance(size, dict) else {"n": size}
+    size, pos, reads = max(1, int(state["n"])), 0, 0
     while pos < len(syms):
         group = syms[pos:pos + size]
         t0 = time.monotonic()
@@ -173,7 +180,7 @@ def fetch_chunks(conn, date, syms, cols, size, reconnect, log):
             if len(group) == 1:
                 raise RuntimeError(f"qatt failed on ONE sym, {group[0]} on "
                                    f"{date or 'the RDB'}: {e}") from e
-            size = max(1, len(group) // 2)
+            size = state["n"] = max(1, len(group) // 2)
             log.warn(f"{len(group)} syms was too much for qatt "
                      f"({type(e).__name__}: {str(e)[:80]}); reconnecting "
                      f"and asking {size} at a time from here on")
@@ -449,19 +456,40 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         raise ExtractError(str(e)) from e
     log.kv("columns asked for", ", ".join(cols))
 
-    stage = stage_dir(cfg["EXPORT_DIR"], day)
-    if fresh and stage.exists():
-        shutil.rmtree(stage)
-        log.kv("--fresh", "staging folder deleted", str(stage))
-    stage.mkdir(parents=True, exist_ok=True)
-    log.kv("staging", str(stage))
-
     log.step(3, "equity_master")
     #  days_back bounds the server-side fallback (.z.D-n) at the trade day
     #  too; the default of 1 would take a date AFTER an older --date day.
     master_date = qattsource.resolve_master_date(
         em, day, days_back=(today - day).days)
     log.kv("equity_master date", master_date)
+
+    #  WHAT THE FOLDER WAS BUILT FROM.  It is keyed by the trade day only, so
+    #  an RDB run's markets must not pass for an HDB run's of the same day,
+    #  nor another equity_master date's or another CrossCode's.
+    built = {"source": source, "equity_master date": str(master_date),
+             "crosscode": hashlib.sha1("\n".join(sorted(
+                 {r.bbg for r in rows})).encode("utf-8")).hexdigest()[:12]}
+    stage = stage_dir(cfg["EXPORT_DIR"], day)
+    if stage.exists() and not fresh:
+        try:
+            was = {r["key"]: r["value"] for r in read_csv(stage / STAGE)}
+        except (OSError, KeyError):
+            was = {}
+        if was != built:
+            said = ", ".join(f"{k} {was.get(k, '?')}"
+                             for k in ("source", "equity_master date"))
+            if was.get("crosscode") != built["crosscode"]:
+                said += ", another CrossCode"
+            log.warn(f"staged folder was built from {said}; starting the "
+                     f"day fresh")
+            fresh = True
+    if fresh and stage.exists():
+        shutil.rmtree(stage)
+        log.kv("fresh", "staging folder deleted", str(stage))
+    stage.mkdir(parents=True, exist_ok=True)
+    if not (stage / STAGE).exists():
+        write_csv(stage / STAGE, ["key", "value"], built.items())
+    log.kv("staging", str(stage))
     chunk = int(cfg["MASTER_CHUNK"])
     if (stage / MASTER).exists():
         master = {r["BloombergCode"]: {f: r[f] for f in
@@ -506,13 +534,12 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                 r, markets, universe.resolve_sym(r, master, markets)[0])
     wanted = sorted({c for cs in ref.values() for c in cs})
 
-    if (stage / EQUITY).exists():
-        eq_pick, equity = {}, {}
-        for r in read_csv(stage / EQUITY):
-            eq_pick[r["BloombergCode"]] = r["sym"]
-            equity[r["sym"]] = {f: r[f] for f in refdata.EQUITY_FIELDS}
+    if (stage / EQUITY).exists() and (stage / PX).exists():
+        eq_pick = {r["BloombergCode"]: r["sym"]
+                   for r in read_csv(stage / EQUITY)}
+        px = {r["sym"]: r["PX_LAST"] for r in read_csv(stage / PX)}
         log.kv("equity rows", f"{len(eq_pick):,} codes",
-               "read back from equity.csv")
+               "read back from equity.csv and px.csv")
     else:
         equity = {}
         for i in range(0, len(wanted), chunk):
@@ -525,13 +552,16 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         eq_pick = {b: p for b, p in
                    ((b, refdata.pick_ref(None, cs, equity))
                     for b, cs in ref.items()) if p}
-        #  Only what equity.csv holds, so a resumed run prices exactly
-        #  like this one.
-        equity = {p: equity[p] for p in eq_pick.values()}
+        #  EVERY fetched sym's PX_LAST, not only the picked ones: a sym's
+        #  own row prices its fallback even when a code picked another.
+        #  Staged before equity.csv, and read back only with it.
+        px = {p: row["PX_LAST"] for p, row in equity.items()}
+        write_csv(stage / PX, ["sym", "PX_LAST"], sorted(px.items()))
         write_csv(stage / EQUITY, EQUITY_COLUMNS, (
             [b, p] + [equity[p][f] for f in refdata.EQUITY_FIELDS]
             for b, p in sorted(eq_pick.items())))
         log.kv("equity rows", f"{len(eq_pick):,} of {len(ref):,} codes")
+        del equity
 
     if (stage / LADDERS).exists():
         log.kv("ladders", "already staged", "ladders.csv kept")
@@ -555,8 +585,8 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     def px_of(sym):
         """PX_LAST of the sym itself, else of the row its codes found."""
         for s in [sym] + [eq_pick.get(r.bbg) for r in groups.get(sym, [])]:
-            if s and s in equity:
-                return px_or_none(equity[s]["PX_LAST"])
+            if s and s in px:
+                return px_or_none(px[s])
         return None
 
     settled = {}
@@ -575,28 +605,33 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         return conns["qatt"]
 
     n = int(cfg["SYM_CHUNK"])
-    for i, mkt in enumerate(sorted(by_market), 1):
+    size = {"n": n}                 # the halved read size, for every market
+    for step, mkt in enumerate(sorted(by_market), 1):
         msyms = by_market[mkt]
-        log.step(f"5.{i}", f"market {mkt}, {logs.thousands(len(msyms))} syms")
+        log.step(f"5.{step}",
+                 f"market {mkt}, {logs.thousands(len(msyms))} syms")
         files = market_files(stage, mkt)
         if all(f.exists() for f in files):
-            log.info(f"{mkt} done already, skipped")
-            continue
+            if {r["sym"] for r in read_csv(files[1])} == set(msyms):
+                log.info(f"{mkt} done already, skipped")
+                continue
+            log.warn(f"{mkt} staged for other syms than this run's; "
+                     f"redoing it")
         settled = {}
         parts = [_part(f) for f in files]
         try:
             with parts[0].open("w", encoding="utf-8", newline="") as fh:
                 stats = write_ticks(fh, fetch_chunks(
-                    conns["qatt"], qday, msyms, cols, cfg["SYM_CHUNK"],
-                    reconnect, log), settle)
+                    conns["qatt"], qday, msyms, cols, size, reconnect,
+                    log), settle)
             ticked = set(settled)
 
             quiet = [s for s in msyms if s not in ticked]
             qconn = conns.get("quote") or conns["qatt"]
             quotes = {}
-            for i in range(0, len(quiet), n):
+            for k in range(0, len(quiet), n):
                 quotes.update(refdata.fetch_quotes(qconn, qday,
-                                                   quiet[i:i + n]))
+                                                   quiet[k:k + n]))
             log.kv("no print", logs.thousands(len(quiet)),
                    f"{logs.thousands(len(quotes))} with a quote")
             quote_rows = []
@@ -787,6 +822,14 @@ def self_test() -> int:
     list(fetch_chunks(fake, None, ["A"], ["sym"], 4, lambda: fake, quiet))
     check("no date asks the RDB, with no date in the query",
           asked[0][0], qattsource.live_ticks_q(None, ["sym"]))
+    asked.clear()
+    size = {"n": 4}
+    list(fetch_chunks(fake, None, ["A", "B", "C"], ["sym"], size,
+                      lambda: fake, quiet))
+    list(fetch_chunks(fake, None, ["D", "E"], ["sym"], size,
+                      lambda: fake, quiet))
+    check("a shared size keeps the halving for the next call",
+          ([n for _q, n in asked], size), ([3, 1, 1, 1, 1, 1], {"n": 1}))
 
     print("\nan end-to-end build, on fake kdb")
     em_date = D(2026, 9, 24)
@@ -813,19 +856,21 @@ def self_test() -> int:
                    equity_row("ZZZ.XX", 1.4), equity_row("QQQ.XX", 0.0)]
 
     class FakeEm:
-        def __init__(self, equity=EQUITY_ROWS, client_fails=False):
+        def __init__(self, equity=EQUITY_ROWS, client_fails=False,
+                     date=em_date):
             self.equity, self.asked = equity, []
             self.client_fails, self.days_back = client_fails, None
+            self.date = date
 
         def __call__(self, q, *args):
             self.asked.append(q)
             if q == qattsource.MAXDATE_CLIENT_Q:
                 if self.client_fails:
                     raise RuntimeError("'type")
-                return em_date
+                return self.date
             if q == qattsource.MAXDATE_SERVER_Q:
                 self.days_back = args[0]
-                return em_date
+                return self.date
             s = set(args[-1]) if args else set()
             for query, col in ((qattsource.MASTER_BPIPE_Q, "sym_bpipe"),
                                (qattsource.MASTER_MBPIPE_Q, "sym_mbpipe"),
@@ -853,18 +898,23 @@ def self_test() -> int:
         "ZZZ.XX": [("09:00:00", 1.5, 10, "")]}
 
     class FakeQatt:
-        def __init__(self, fail=False, fail_on=()):
+        def __init__(self, fail=False, fail_on=(), parts=None,
+                     max_syms=None):
             self.asked, self.fail, self.fail_on = [], fail, set(fail_on)
-            self.syms = []
+            self.syms, self.sizes, self.max_syms = [], [], max_syms
+            self.parts = parts or [D(2026, 9, 24), D(2026, 9, 25)]
 
         def __call__(self, q, *args):
             self.asked.append(q)
             if q == qattsource.PARTITIONS_Q:
-                return [D(2026, 9, 24), D(2026, 9, 25)]
+                return self.parts
             if q == qattsource.COLUMNS_Q:
                 return ["sym", "time", T, "price", "size", "cond", "ex"]
             if "from qatt" in q:
                 self.syms += list(args[-1])
+                self.sizes.append(len(args[-1]))
+                if self.max_syms and len(args[-1]) > self.max_syms:
+                    raise ConnectionResetError("dropped")
                 if self.fail or self.fail_on & set(args[-1]):
                     raise RuntimeError("'type")
                 return [{"sym": s, T: dt.time.fromisoformat(t), "price": p,
@@ -893,21 +943,25 @@ def self_test() -> int:
 
     conditions = {"JT": ["e", "ES"], "NZ": ["CA"], "HK": ["CA"]}
 
+    CROSSCODE = ("BloombergCode,FidessaMarket,Type\n"
+                 "7203 JT,TYO-MAIN,\n7203 JE,JNX-MAIN,\nAIA NZ,NZE-MAIN,\n"
+                 "8888 HK,HKG-MAIN,\n8889 HK,HKG-MAIN,\nZZZ XX,XXX-MAIN,\n"
+                 "QQQ XX,XXX-MAIN,\nBSKT HK,HKG-MAIN,Basket\n")
+
     def run(tmp, date, em=None, qatt=None, quote=None, log=None,
-            fresh=False):
+            fresh=False, cc_text=CROSSCODE, extra=None, conds=None,
+            reconnect=None):
         cc = Path(tmp) / "CrossCode.csv"
-        cc.write_text(
-            "BloombergCode,FidessaMarket,Type\n"
-            "7203 JT,TYO-MAIN,\n7203 JE,JNX-MAIN,\nAIA NZ,NZE-MAIN,\n"
-            "8888 HK,HKG-MAIN,\n8889 HK,HKG-MAIN,\nZZZ XX,XXX-MAIN,\n"
-            "QQQ XX,XXX-MAIN,\nBSKT HK,HKG-MAIN,Basket\n", encoding="utf-8")
+        cc.write_text(cc_text, encoding="utf-8")
         cfg = dict(settings.DEFAULTS, CROSSCODE_PATH=str(cc),
-                   EXPORT_DIR=str(Path(tmp) / "out"))
+                   EXPORT_DIR=str(Path(tmp) / "out"), **(extra or {}))
         conns = {"em": em or FakeEm(), "qatt": qatt or FakeQatt(),
                  "quote": quote or FakeQuote(),
-                 "reconnect": lambda: FakeQatt()}
+                 "reconnect": reconnect or (lambda: FakeQatt())}
         return build(cfg, date, conns, log or Caught(), today=D(2026, 9, 28),
-                     markets=markets, conditions=conditions, fresh=fresh)
+                     markets=markets,
+                     conditions=conditions if conds is None else conds,
+                     fresh=fresh)
 
     def members(path):
         with zipfile.ZipFile(path) as z:
@@ -933,7 +987,7 @@ def self_test() -> int:
         check("the staging folder holds each market's three files",
               out and sorted(p.name for p in
                              (out.parent / "phase1-20260925").iterdir()),
-              sorted([EQUITY, LADDERS, MASTER] +
+              sorted([EQUITY, LADDERS, MASTER, PX, STAGE] +
                      [f"{n}-{m}.csv" for n in ("closes", "quote_only",
                                                "ticks")
                       for m in ("HK", "JT", "NZ", "XX")]))
@@ -1093,7 +1147,8 @@ def self_test() -> int:
               "nothing, and no zip",
               (sorted(p.name for p in stage.iterdir()),
                sorted(p.name for p in stage.parent.glob("*.zip*"))),
-              (sorted([EQUITY, LADDERS, MASTER, "closes-HK.csv",
+              (sorted([EQUITY, LADDERS, MASTER, PX, STAGE,
+                       "closes-HK.csv",
                        "quote_only-HK.csv", "ticks-HK.csv"]), []))
 
         em, qatt, quote, log = FakeEm(), FakeQatt(), FakeQuote(), Caught()
@@ -1124,6 +1179,82 @@ def self_test() -> int:
               ["7203.JP", "8888.HK", "8889.HK", "AIA.NZ", "QQQ.XX",
                "ZZZ.XX"])
         check("and gives the same zip", same(members(out)), whole)
+
+    print("\nresuming only what is still valid")
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp) / "out" / "phase1-20260925"
+        run(tmp, D(2026, 9, 25))
+        (stage / "ticks-JT.csv").unlink()
+        (stage / "ticks-JT.csv.part").write_text("half a file", "utf-8")
+        qatt = FakeQatt()
+        out = run(tmp, D(2026, 9, 25), qatt=qatt)
+        check("the crash window: closes and quote_only there, ticks not - "
+              "the market is redone", sorted(set(qatt.syms)), ["7203.JP"])
+        check("and the zip is whole", same(members(out)), whole)
+
+        lines = (stage / "closes-HK.csv").read_text("utf-8").splitlines()
+        (stage / "closes-HK.csv").write_text(
+            "\n".join(lines[:-1]) + "\n", "utf-8")
+        qatt, log = FakeQatt(), Caught()
+        out = run(tmp, D(2026, 9, 25), qatt=qatt, log=log)
+        check("a done market whose syms differ from this run's is redone",
+              (sorted(set(qatt.syms)),
+               any(ln.startswith("!!  HK staged for other syms")
+                   for ln in log.lines)),
+              (["8888.HK", "8889.HK"], True))
+        check("and the zip is whole", same(members(out)), whole)
+
+        qatt, log = FakeQatt(), Caught()
+        out = run(tmp, D(2026, 9, 25), qatt=qatt, log=log,
+                  em=FakeEm(date=D(2026, 9, 25)))
+        check("another equity_master date starts the day fresh",
+              ([ln for ln in log.lines if ln.startswith("!!  staged")][:1],
+               len(set(qatt.syms))),
+              (["!!  staged folder was built from source hdb, equity_master "
+                "date 2026-09-24; starting the day fresh"], 6))
+
+        qatt, log = FakeQatt(), Caught()
+        run(tmp, D(2026, 9, 25), qatt=qatt, log=log,
+            em=FakeEm(date=D(2026, 9, 25)),
+            cc_text=CROSSCODE.replace("QQQ XX,XXX-MAIN,\n", ""))
+        check("so does another CrossCode",
+              (any(ln.startswith("!!  staged folder was built from")
+                   for ln in log.lines), len(set(qatt.syms))), (True, 5))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp) / "out" / "phase1-20260928"
+        attempt(lambda: run(tmp, None, qatt=FakeQatt(fail_on={"7203.JP"})))
+        qatt, log = FakeQatt(parts=[D(2026, 9, 25), D(2026, 9, 28)]), Caught()
+        run(tmp, D(2026, 9, 28), qatt=qatt, log=log)
+        check("an HDB run of a day an RDB run staged starts it fresh",
+              (any(ln.startswith("!!  staged folder was built from source "
+                                 "rdb") for ln in log.lines),
+               "8888.HK" in qatt.syms), (True, True))
+
+    print("\nthe halved read size, across markets")
+    with tempfile.TemporaryDirectory() as tmp:
+        qatt = FakeQatt(max_syms=1)
+        run(tmp, D(2026, 9, 25), qatt=qatt, extra={"SYM_CHUNK": 2},
+            reconnect=lambda: qatt)
+        check("HK is halved once, and every later market starts at 1",
+              qatt.sizes, [2, 1, 1, 1, 1, 1, 1])
+
+    print("\nPX_LAST, the sym's own row first")
+    with tempfile.TemporaryDirectory() as tmp:
+        em = FakeEm(equity=EQUITY_ROWS + [equity_row("7203.JT", 1)])
+        cc_text = "BloombergCode,FidessaMarket,Type\n7203 JT,TYO-MAIN,\n"
+        z = members(run(tmp, D(2026, 9, 25), em=em, cc_text=cc_text,
+                        conds={}))
+        check("7203 JT picks 7203.JT for equity.csv",
+              [r.split(",")[:3] for r in z[EQUITY][1:]],
+              [["7203 JT", "7203.JT", "1"]])
+        check("but 7203.JP's fallback is its own row's PX_LAST",
+              z[CLOSES][1:], ["7203.JP,2871,equity_master,no-close-codes"])
+        (Path(tmp) / "out" / "phase1-20260925" / "ticks-JT.csv").unlink()
+        z = members(run(tmp, D(2026, 9, 25), em=FakeEm(equity=[]),
+                        cc_text=cc_text, conds={}))
+        check("and a resumed run reads it back from px.csv",
+              z[CLOSES][1:], ["7203.JP,2871,equity_master,no-close-codes"])
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1
