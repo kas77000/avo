@@ -109,11 +109,20 @@ p1_log_open <- function(dir, date) {
 
 # -- the zip ------------------------------------------------------------
 
-p1_read <- function(dir, member) {
-  read.csv(file.path(dir, member), stringsAsFactors = FALSE,
-           colClasses = "character", na.strings = character(0),
-           check.names = FALSE, fileEncoding = "UTF-8-BOM")
+# Every CSV this job reads, all as text. encoding = "UTF-8" marks the
+# strings without converting them: fileEncoding would re-encode to the
+# Windows codepage and silently stop at the first character it cannot hold
+# (a kanji name), dropping every row after it. A BOM then stays on the
+# first column's name, so it is stripped there.
+p1_csv <- function(path) {
+  x <- read.csv(path, stringsAsFactors = FALSE, colClasses = "character",
+                na.strings = character(0), check.names = FALSE,
+                encoding = "UTF-8")
+  names(x)[1] <- sub("^\ufeff", "", names(x)[1])
+  x
 }
+
+p1_read <- function(dir, member) p1_csv(file.path(dir, member))
 
 p1_unzip <- function(zip) {
   if (!file.exists(zip)) stop(zip, " does not exist", call. = FALSE)
@@ -134,9 +143,7 @@ p1_unzip <- function(zip) {
 # "2316145D", "NZ") and fidessa (#FidessaCode, or FidessaCode in the older
 # header, whose #ReutersCode becomes RicCode).
 p1_crosscode <- function(path) {
-  cc <- read.csv(path, stringsAsFactors = FALSE, colClasses = "character",
-                 na.strings = character(0), check.names = FALSE,
-                 fileEncoding = "UTF-8-BOM")
+  cc <- p1_csv(path)
   if (!"RicCode" %in% names(cc) && "#ReutersCode" %in% names(cc)) {
     names(cc)[names(cc) == "#ReutersCode"] <- "RicCode"
   }
@@ -311,6 +318,25 @@ p1_common_self_test <- function() {
   check("and as a condition", odd$cond[1], "NA")
   check("0005 keeps its zeros", odd$size[1], "0005")
   check("an empty cell is empty, not NA", odd$cond[2], "")
+  # A BOM, then Tokyo in kanji (UTF-8 bytes, written raw so this file's
+  # own encoding does not matter) in the middle row.
+  tokyo <- as.raw(c(0xe6, 0x9d, 0xb1, 0xe4, 0xba, 0xac))
+  con <- file(file.path(d, "bom.csv"), "wb")
+  writeBin(as.raw(c(0xef, 0xbb, 0xbf)), con)
+  writeBin(charToRaw(paste0("#FidessaCode,BloombergCode,LONG_COMP_NAME\n",
+                            "A.T,A JT,ALPHA\nB.T,B JT,")), con)
+  writeBin(tokyo, con)
+  writeBin(charToRaw("\nC.T,C JT,GAMMA\n"), con)
+  close(con)
+  bom <- p1_read(d, "bom.csv")
+  check("a non-Latin name does not cut the file short", nrow(bom), 3)
+  check("and the rows after it are there", bom$BloombergCode[3], "C JT")
+  check("the name itself comes through, as UTF-8",
+        charToRaw(bom$LONG_COMP_NAME[2]), tokyo)
+  check("a BOM is not part of the first column's name", names(bom)[1],
+        "#FidessaCode")
+  check("nor of the crosscode's",
+        names(p1_crosscode(file.path(d, "bom.csv")))[1], "#FidessaCode")
 
   cat("\nthe crosscode\n")
   cc <- p1_crosscode(file.path(here, "tests", "fixture", "CrossCode.csv"))
