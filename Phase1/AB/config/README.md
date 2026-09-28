@@ -11,8 +11,11 @@ It has one row per Bloomberg exchange code in
 `Phase0/AB/Historical/config/composites.csv` (18 codes). Add a row here when
 a code is added there.
 
-Part 1 uses it to find the close in qatt. A market that was closed that day
-falls back to `equity_master`.
+Part 1 uses it to find the close in qatt. A name with no trade carrying one
+of these codes takes its close from `equity_master` instead, whether its
+market was closed that day or it simply had no closing trade. Every fallback
+is written to the log file with the name, its market and the reason, so the
+situation can be traced afterwards.
 
 | Column | Meaning |
 |---|---|
