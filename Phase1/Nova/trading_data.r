@@ -1,6 +1,7 @@
 # trading_data.r: the day's zip -> TradingData.csv, one row per crosscode
-# name with a BloombergCode, the reference columns from equity.csv and the
-# Close from closes.csv.
+# name with a BloombergCode in the extract's universe (an exchange code in
+# close_conditions.csv, as historical.r), the reference columns from
+# equity.csv and the Close from closes.csv.
 #
 # A port of Phase0/AB/TradingData: trading_data.py build_rows, columns.py,
 # msci.py, auction.py, caslist.py and marketcfg.py, which are the reference
@@ -20,6 +21,10 @@ local({
 })
 
 T_REQUIRED <- c("CROSSCODE_PATH", "LOG_DIR", "TD_OUTPUT_PATH")
+T_MEMBERS <- c("master.csv", "closes.csv", "equity.csv")
+
+# A zip older than this many calendar days is not today's TradingData.
+T_MAX_AGE <- 4
 
 T_COLUMNS <- c(
   "#FidessaCode", "Type", "Sector", "Capi", "Index", "ICBIndex",
@@ -467,11 +472,23 @@ t_write <- function(path, lines) {
 # -- the run ------------------------------------------------------------
 
 # TRUE when TD_OUTPUT_PATH was written; FALSE (with XX) when it was not.
-t_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
+t_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
+                  today = Sys.Date()) {
+  if (as.numeric(today - z$date) > T_MAX_AGE) {
+    log$fail(paste0("the zip is for ", format(z$date), ", more than ",
+                    T_MAX_AGE, " days before today, ", format(today),
+                    "; TradingData.csv not written"))
+    return(FALSE)
+  }
   log$step(1, "universe")
   log$kv("day", format(z$date))
   cc <- p1_crosscode(s$CROSSCODE_PATH)
   log$kv("crosscode", paste(nrow(cc), "rows"), s$CROSSCODE_PATH)
+  f <- p1_filter(cc, file.path(cfg, "close_conditions.csv"))
+  cc <- f$cc
+  for (k in names(f$dropped)) {
+    if (f$dropped[[k]]) log$info(paste(f$dropped[[k]], "rows dropped:", k))
+  }
   u <- t_universe(cc)
   if (length(u$dropped)) {
     log$info(paste0(length(u$dropped), " rows dropped: no BloombergCode (",
@@ -526,7 +543,8 @@ t_run <- function(z, s, log, cfg = file.path(p1_here(), "config")) {
   master <- p1_read(z$dir, "master.csv")
   cl <- p1_read(z$dir, "closes.csv")
   cl <- cl[nzchar(trimws(cl$close)), ]
-  sym <- master$sym[match(u$rows$bbg, trimws(master$BloombergCode))]
+  sym <- p1_sym(u$rows$bbg, u$rows$ticker, u$rows$market, master,
+                p1_hist_markets(file.path(cfg, "hist_markets.csv")))$sym
   close <- cl$close[match(sym, cl$sym)]
   closes <- setNames(ifelse(is.na(close), "", close), u$rows$bbg)
   out <- t_build(u$rows, eq, closes, markets, mapping, cas, hkex, override)
@@ -992,8 +1010,9 @@ INE002A01018 1
             OPEN_AUCTION_OVERRIDE_PATH = file.path(d, "no-override.csv"),
             HKEX_CAS_LIST_PATH = put("hk.txt", "8888"),
             INDIA_NSE_CAS_LIST_PATH = "", INDIA_BSE_CAS_LIST_PATH = "")
+  today <- as.Date("2026-09-28")
   log <- t_quiet_log()
-  ok <- tryCatch(t_run(z, s, log), error = function(e) {
+  ok <- tryCatch(t_run(z, s, log, today = today), error = function(e) {
     cat("  t_run failed: ", conditionMessage(e), "\n", sep = "")
     FALSE
   })
@@ -1005,14 +1024,18 @@ INE002A01018 1
   got <- strsplit(text, "\r\n", fixed = TRUE)[[1]]
   check("every line ends \\r\\n", c(grepl("\r\n$", text),
                                     grepl("[^\r]\n", text)), c(TRUE, FALSE))
-  check("the header, then nine rows", c(got[1], length(got)),
-        c(paste(T_COLUMNS, collapse = ","), "10"))
-  check("sorted by market then RicCode",
+  check("the header, then eight rows", c(got[1], length(got)),
+        c(paste(T_COLUMNS, collapse = ","), "9"))
+  check("sorted by market then RicCode, and 7203 JE is not there: JE is not our exchange code",
         sub(",.*", "", got[-1]),
-        c("BSKT.HKG", "8888.HKG", "8889.HKG", "7203.JNX", "123450.KOE",
+        c("BSKT.HKG", "8888.HKG", "8889.HKG", "123450.KOE",
           "005930.KSC", "299990.KSC", "AIA.NZX", "7203.TYO"))
+  check("the drop is a .. line, as historical.r logs it",
+        list(any(grepl("2 rows dropped: exchange code not ours", log$said())),
+             any(grepl("exchange code", log$warned()))),
+        list(TRUE, FALSE))
   check("7203 JT: the close from qatt, cap 46.5tn yen at 0.0068 is BIG",
-        got[10], paste0("7203.TYO,Equity,Consumer| Cyclical,BIG,TPX,TPX,,,,,",
+        got[9], paste0("7203.TYO,Equity,Consumer| Cyclical,BIG,TPX,TPX,,,,,",
                         "Default,1.05,2876,24,FALSE,TRUE,,316200000000,",
                         "JP00FIXTURE1,FALSE"))
   check("8888 HK: a zero beta is blank, the close from equity_master",
@@ -1039,11 +1062,49 @@ INE002A01018 1
     "X.HKG,X.HK,Equity,X HK,Common Stock,HKG-MAIN,HKD"))
   s2$TD_OUTPUT_PATH <- file.path(d, "out2", "TradingData.csv")
   log2 <- t_quiet_log()
-  ok2 <- tryCatch(t_run(z, s2, log2), error = function(e) NA)
+  ok2 <- tryCatch(t_run(z, s2, log2, today = today), error = function(e) NA)
   check("a file with not one Close publishes nothing, and says so with XX",
         list(ok2, file.exists(s2$TD_OUTPUT_PATH),
              any(grepl("not one row has a Close", log2$failed()))),
         list(FALSE, FALSE, TRUE))
+
+  cat("\nan old zip\n")
+  s3 <- s
+  s3$TD_OUTPUT_PATH <- file.path(d, "out3", "TradingData.csv")
+  log3 <- t_quiet_log()
+  ok3 <- tryCatch(t_run(z, s3, log3, today = as.Date("2026-09-30")),
+                  error = function(e) NA)
+  check("a trade date more than four days back FAILS with XX, and writes nothing",
+        list(ok3, any(grepl("2026-09-25", log3$failed())),
+             file.exists(s3$TD_OUTPUT_PATH)),
+        list(FALSE, TRUE, FALSE))
+  check("four days back is fine",
+        tryCatch(t_run(z, s3, t_quiet_log(), today = as.Date("2026-09-29")),
+                 error = function(e) conditionMessage(e)), TRUE)
+
+  cat("\nthe close of a name with no master row\n")
+  zc <- z
+  zc$dir <- tempfile()
+  dir.create(zc$dir)
+  file.copy(list.files(z$dir, full.names = TRUE), zc$dir)
+  cat("7777.JP,3133,qatt,\r\n", file = file.path(zc$dir, "closes.csv"),
+      append = TRUE)
+  s4 <- s
+  s4$TD_OUTPUT_PATH <- file.path(d, "out4", "TradingData.csv")
+  s4$CROSSCODE_PATH <- put("cc7777.csv", c(
+    "#FidessaCode,RicCode,Type,BloombergCode,BloombergSecurityType,FidessaMarket,Currency",
+    "7777.TYO,7777.T,Equity,7777 JT,Common Stock,TYO-MAIN,JPY"))
+  tryCatch(t_run(zc, s4, t_quiet_log(), today = today),
+           error = function(e) cat("  t_run failed: ", conditionMessage(e), "\n",
+                                   sep = ""))
+  check("is found as ticker.composite, as historical.r resolves it: 7777.JP",
+        tryCatch(strsplit(readLines(s4$TD_OUTPUT_PATH)[2], ",")[[1]][13],
+                 error = function(e) "no file"), "3133")
+  unlink(zc$dir, recursive = TRUE)
+
+  cat("\nthe members it reads\n")
+  check("ticks.csv is not among them",
+        sort(T_MEMBERS), c("closes.csv", "equity.csv", "master.csv"))
 
   unlink(c(d, z$dir), recursive = TRUE)
   t$done()
@@ -1055,7 +1116,7 @@ t_main <- function() {
   a <- p1_args()
   if (identical(a[1], "--self-test")) return(t_self_test())
   s <- p1_settings(required = T_REQUIRED)
-  z <- p1_unzip(a[1])
+  z <- p1_unzip(a[1], T_MEMBERS)
   log <- p1_log_open(s$LOG_DIR, z$date)
   log$info(paste("trading_data.r", a[1]))
   ok <- tryCatch(t_run(z, s, log), error = function(e) {

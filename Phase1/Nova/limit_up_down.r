@@ -19,6 +19,7 @@ local({
 })
 
 L_REQUIRED <- c("CROSSCODE_PATH", "LOG_DIR", "LULD_OUT_TEMP")
+L_MEMBERS <- c("master.csv", "closes.csv", "equity.csv", "ladders.csv")
 L_ENVS <- c("Test", "Pilot", "Prod")
 
 L_HEADER <- c("#ReutersCode", "BloombergCode", "LimitDate", "LimitUpPrice",
@@ -496,8 +497,16 @@ l_envs <- function(spec) {
 # -- the run ------------------------------------------------------------
 
 # TRUE when the file was written to TEMP and copied to every environment
-# with a path; FALSE (with XX) when it was not.
-l_run <- function(z, s, log, envs, cfg = file.path(p1_here(), "config")) {
+# asked for; FALSE (with XX) when it was not. A zip whose LimitDate has
+# passed publishes nothing: its limits are for a day already traded.
+l_run <- function(z, s, log, envs, cfg = file.path(p1_here(), "config"),
+                  today = Sys.Date()) {
+  if (p1_next_weekday(z$date) < today) {
+    log$fail(paste0("the zip is for ", format(z$date), ", so its LimitDate ",
+                    l_limit_date(z$date), " is before today, ", format(today),
+                    "; nothing published"))
+    return(FALSE)
+  }
   venues <- l_markets(file.path(cfg, "luld_markets.csv"))
   bands <- l_bands(file.path(cfg, "luld_bands.csv"), venues)
   scope <- l_first_cutoff(venues)
@@ -525,7 +534,8 @@ l_run <- function(z, s, log, envs, cfg = file.path(p1_here(), "config")) {
   master <- p1_read(z$dir, "master.csv")
   cl <- p1_read(z$dir, "closes.csv")
   cl <- cl[nzchar(trimws(cl$close)), ]
-  sym <- master$sym[match(u$rows$bbg, master$BloombergCode)]
+  sym <- p1_sym(u$rows$bbg, u$rows$ticker, u$rows$venue, master,
+                p1_hist_markets(file.path(cfg, "hist_markets.csv")))$sym
   close <- suppressWarnings(as.numeric(cl$close[match(sym, cl$sym)]))
   has <- !is.na(close)
   closes <- setNames(close[has], u$rows$bbg[has])
@@ -573,7 +583,8 @@ l_run <- function(z, s, log, envs, cfg = file.path(p1_here(), "config")) {
     key <- paste0("LULD_OUT_", toupper(env))
     target <- s[[key]]
     if (is.null(target) || !nzchar(target)) {
-      log$warn(paste0(env, ": ", key, " is blank; not published there"))
+      log$fail(paste0(env, ": ", key, " is blank; not published there"))
+      ok <- FALSE
       next
     }
     dir.create(dirname(target), recursive = TRUE, showWarnings = FALSE)
@@ -954,10 +965,11 @@ l_self_test <- function() {
   s <- list(CROSSCODE_PATH = file.path(fx, "CrossCode.csv"),
             LULD_OUT_TEMP = file.path(d, "temp", "limitUpDown.csv"),
             LULD_OUT_TEST = file.path(d, "test", "limitUpDown.csv"),
-            LULD_OUT_PILOT = "",
+            LULD_OUT_PILOT = file.path(d, "pilot", "limitUpDown.csv"),
             LULD_OUT_PROD = file.path(d, "prod", "limitUpDown.csv"))
+  today <- as.Date("2026-09-28")
   log <- l_quiet_log()
-  ok <- tryCatch(l_run(z, s, log, c("Test", "Pilot", "Prod")),
+  ok <- tryCatch(l_run(z, s, log, c("Test", "Pilot", "Prod"), today = today),
                  error = function(e) {
                    cat("  l_run failed: ", conditionMessage(e), "\n", sep = "")
                    FALSE
@@ -980,11 +992,74 @@ l_self_test <- function() {
   check("123450 KQ has a close but no ladder, so it is excluded as ladder",
         any(grepl("123450 KQ", log$warned()) & grepl("ladder", log$warned())),
         TRUE)
-  check("Test and Prod are copies of it",
-        list(bytes(s$LULD_OUT_TEST), bytes(s$LULD_OUT_PROD)),
-        list(bytes(s$LULD_OUT_TEMP), bytes(s$LULD_OUT_TEMP)))
-  check("and Pilot, whose path is blank, is skipped with a warning",
-        any(grepl("Pilot", log$warned())), TRUE)
+  check("Test, Pilot and Prod are copies of it",
+        list(bytes(s$LULD_OUT_TEST), bytes(s$LULD_OUT_PILOT),
+             bytes(s$LULD_OUT_PROD)),
+        list(bytes(s$LULD_OUT_TEMP), bytes(s$LULD_OUT_TEMP),
+             bytes(s$LULD_OUT_TEMP)))
+
+  cat("\nwhat stops the job\n")
+  sb <- s
+  sb$LULD_OUT_TEMP <- file.path(d, "tempb", "limitUpDown.csv")
+  sb$LULD_OUT_TEST <- file.path(d, "testb", "limitUpDown.csv")
+  sb$LULD_OUT_PILOT <- ""
+  sb$LULD_OUT_PROD <- file.path(d, "prodb", "limitUpDown.csv")
+  logb <- l_quiet_log()
+  okb <- tryCatch(l_run(z, sb, logb, c("Test", "Pilot", "Prod"), today = today),
+                  error = function(e) NA)
+  check("an environment asked for with a blank path FAILS the job, with XX",
+        list(okb, any(grepl("Pilot", logb$failed())),
+             any(grepl("Pilot", logb$warned()))),
+        list(FALSE, TRUE, FALSE))
+  check("the others still get the file",
+        c(file.exists(sb$LULD_OUT_TEST), file.exists(sb$LULD_OUT_PROD)),
+        c(TRUE, TRUE))
+  check("an environment NOT asked for may be blank",
+        tryCatch(l_run(z, sb, l_quiet_log(), c("Test", "Prod"), today = today),
+                 error = function(e) conditionMessage(e)), TRUE)
+  so <- s
+  so$LULD_OUT_TEMP <- file.path(d, "tempo", "limitUpDown.csv")
+  so$LULD_OUT_TEST <- file.path(d, "testo", "limitUpDown.csv")
+  logo <- l_quiet_log()
+  oko <- tryCatch(l_run(z, so, logo, "Test", today = as.Date("2026-09-29")),
+                  error = function(e) NA)
+  check("a zip whose LimitDate is before today FAILS with XX, and publishes nothing",
+        list(oko, any(grepl("2026-09-28", logo$failed())),
+             file.exists(so$LULD_OUT_TEMP), file.exists(so$LULD_OUT_TEST)),
+        list(FALSE, TRUE, FALSE, FALSE))
+  check("LimitDate today is fine: Friday's zip on the Monday",
+        tryCatch(l_run(z, so, l_quiet_log(), "Test", today = today),
+                 error = function(e) conditionMessage(e)), TRUE)
+
+  cat("\nthe close of a name with no master row\n")
+  zc <- z
+  zc$dir <- tempfile()
+  dir.create(zc$dir)
+  file.copy(list.files(z$dir, full.names = TRUE), zc$dir)
+  cat("7777.JP,3133,qatt,\r\n", file = file.path(zc$dir, "closes.csv"),
+      append = TRUE)
+  cat(paste0("7777 JT,7777.JP,", c(3000, 5000, 30000), ",", c(1, 5, 10), "\r\n"),
+      sep = "", file = file.path(zc$dir, "ladders.csv"), append = TRUE)
+  sc <- so
+  sc$LULD_OUT_TEMP <- file.path(d, "tempc", "limitUpDown.csv")
+  sc$CROSSCODE_PATH <- file.path(d, "cc7777.csv")
+  writeLines(c(paste0("#FidessaCode,RicCode,Type,BloombergCode,FidessaMarket,",
+                      "BloombergStatus"),
+               "7777.TYO,7777.T,Equity,7777 JT,TYO-MAIN,ACTV"),
+             sc$CROSSCODE_PATH)
+  tryCatch(l_run(zc, sc, l_quiet_log(), "Test", today = today),
+           error = function(e) cat("  l_run failed: ", conditionMessage(e), "\n",
+                                   sep = ""))
+  check("is found as ticker.composite, as historical.r resolves it: 7777.JP",
+        tryCatch(readLines(sc$LULD_OUT_TEMP)[2], error = function(e) "no file"),
+        "7777.T,7777 JT,2026-09-28,3835,2435,7777.TYO,TYO-MAIN")
+  unlink(zc$dir, recursive = TRUE)
+
+  cat("\nthe members it reads\n")
+  check("ticks.csv is not among them", "ticks.csv" %in% L_MEMBERS, FALSE)
+  check("and the rest are",
+        sort(L_MEMBERS), c("closes.csv", "equity.csv", "ladders.csv",
+                           "master.csv"))
 
   cat("\nvalidating before anything is published\n")
   good <- data.frame(ric = "A.T", up = "110", down = "90",
@@ -1004,7 +1079,8 @@ l_self_test <- function() {
   writeLines(c("#FidessaCode,RicCode,Type,BloombergCode,FidessaMarket,BloombergStatus",
                "X.HKG,X.HK,Equity,X HK,HKG-MAIN,ACTV"), s2$CROSSCODE_PATH)
   log2 <- l_quiet_log()
-  ok2 <- tryCatch(l_run(z, s2, log2, "Test"), error = function(e) NA)
+  ok2 <- tryCatch(l_run(z, s2, log2, "Test", today = today),
+                  error = function(e) NA)
   check("an empty output publishes nothing, and says so with XX",
         list(ok2, file.exists(s2$LULD_OUT_TEMP), file.exists(s2$LULD_OUT_TEST),
              any(grepl("output is empty", log2$failed()))),
@@ -1030,7 +1106,7 @@ l_main <- function() {
   if (identical(a[1], "--self-test")) return(l_self_test())
   s <- p1_settings(required = L_REQUIRED)
   envs <- l_envs(a[2])
-  z <- p1_unzip(a[1])
+  z <- p1_unzip(a[1], L_MEMBERS)
   log <- p1_log_open(s$LOG_DIR, z$date)
   log$info(paste("limit_up_down.r", a[1], paste(envs, collapse = "|")))
   ok <- tryCatch(l_run(z, s, log, envs), error = function(e) {
