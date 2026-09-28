@@ -332,11 +332,17 @@ sixteen thousand names. A venue markets.csv has never heard of is refused by
 name, with the list of real ones — a typo that silently matched nothing would
 look exactly like a market with no rows.
 
-> **A narrowed run does not publish.** The output file is a *replacement*, not a
-> merge, so copying a Korea-only file to Prod would delete every other market's
-> limits from the feed. `--venues` writes `out/limitUpDown.csv` for reading and
-> refuses to copy, whatever environments are named on the command line, and says
-> so on stderr.
+**The venues named ignore their cutoff**, so a Thailand run at 08:00 is not an
+empty file:
+
+```
+python limit_up_down.py --venues "TYO-MAIN|KSC-MAIN|KOE-MAIN"
+```
+
+> **A narrowed run publishes, and it publishes only its venues.** The output file
+> is a *replacement*, not a merge, so after the run above Test, Pilot and Prod
+> carry Japan and Korea and no other market. Every such run says so on stderr.
+> Add `""` to write `out/limitUpDown.csv` without publishing.
 
 The exclusions are still reported for the whole crosscode — a venue nobody
 configured, a security type we do not trade — because those read the same

@@ -421,7 +421,7 @@ def run_report(cfg, *, cc_rows, cc_excluded, narrowed, sources,
     ]
     if narrowed:
         summary.append(["Left out by --venues", narrowed,
-                        "a narrowed run - not published"])
+                        "a narrowed run - only its venues are published"])
     summary += [
         ["Lines priced", universe, "the universe after the CrossCode filters"],
         ["Published", published, outcome],
@@ -1141,6 +1141,14 @@ def parse_venues(spec: str, known):
     return out
 
 
+def without_cutoff(venues: dict, named) -> dict:
+    """The venues with every NAMED one's cutoff at midnight, so it has
+    always passed.  Nothing named changes nothing."""
+    from dataclasses import replace
+    return {vid: replace(v, cutoff=dt.time(0)) if vid in named else v
+            for vid, v in venues.items()}
+
+
 def only_venues(rows, venues):
     return [r for r in rows if r.venue_id in venues] if venues else list(rows)
 
@@ -1300,6 +1308,10 @@ def run(envs_spec: str, venues_spec: str = "", report_base=None,
         for line in input_file_lines(input_files(cfg)):
             print(line)
         now = dt.datetime.now().time()
+        #  A VENUE NAMED ON THE COMMAND LINE IGNORES ITS CUTOFF - asking for
+        #  it by name is the decision the cutoff otherwise makes.
+        only = parse_venues(venues_spec, cfg.venues)
+        in_scope = without_cutoff(cfg.venues, only)
         #  READ BEFORE THE CROSSCODE, and only for the venues whose cutoff
         #  has passed.  An unreadable strategy file is fatal - an empty
         #  exclusion list is indistinguishable from a correct one, and the
@@ -1308,9 +1320,9 @@ def run(envs_spec: str, venues_spec: str = "", report_base=None,
         #  cutoff is what keeps an Indian share being down from taking out
         #  the 07:30 Japan run.
         strat = india.strategy_lists(
-            [v.venue_id for v in cfg.venues.values() if now >= v.cutoff],
+            [v.venue_id for v in in_scope.values() if now >= v.cutoff],
             {v.venue_id: v.exclude_file for v in cfg.venues.values()})
-        rows, excluded = crosscode.load(CROSSCODE_PATH, cfg.venues, now,
+        rows, excluded = crosscode.load(CROSSCODE_PATH, in_scope, now,
                                         strat)
         cc_rows, cc_excluded = len(rows), list(excluded)
 
@@ -1318,14 +1330,14 @@ def run(envs_spec: str, venues_spec: str = "", report_base=None,
         #  are about the whole file - a venue nobody configured, a type we
         #  do not trade - and they read the same whichever venues this run
         #  is about.  Only the universe is narrowed.
-        only = parse_venues(venues_spec, cfg.venues)
         if only:
             before = len(rows)
             rows = only_venues(rows, only)
             narrowed = before - len(rows)
-            print(f"--venues {'|'.join(only)}: {len(rows)} of {before} rows")
+            print(f"--venues {'|'.join(only)}: {len(rows)} of {before} rows, "
+                  f"cutoff ignored")
             if not rows:
-                print("no rows on those venues have reached their cutoff")
+                print("no rows on those venues - nothing to publish")
                 return 0
 
         if not rows:
@@ -1612,16 +1624,13 @@ def run(envs_spec: str, venues_spec: str = "", report_base=None,
                        failed=True)
         return 1
 
-    #  A NARROWED RUN NEVER PUBLISHES, and this is not a convenience.  The
-    #  output file is a REPLACEMENT, not a merge: copying a Korea-only file
-    #  to Prod would delete every other market's limits from the feed.  So
-    #  --venues writes OUT_TEMP for reading and refuses to copy, whatever
-    #  environments were named on the command line.
+    #  A NARROWED RUN PUBLISHES, and what it publishes is ONLY its venues:
+    #  the file is a replacement, not a merge, so the feed then carries
+    #  those markets and no others.  Said on every such run.
     if only and envs:
-        print(f"--venues was given, so NOT publishing to "
-              f"{', '.join(envs)} - a partial file would replace every "
-              f"other market's rows, not add to them.", file=sys.stderr)
-        envs = []
+        print(f"--venues: publishing ONLY {', '.join(only)} to "
+              f"{', '.join(envs)} - every other market's rows are replaced.",
+              file=sys.stderr)
 
     targets = {"Test": OUT_TEST, "Pilot": OUT_PILOT, "Prod": OUT_PROD}
     failures = copy_to_envs(OUT_TEMP, envs, targets)
@@ -2138,10 +2147,9 @@ def main(argv=None) -> int:
     p.add_argument("--venues", default="", metavar="VENUE|VENUE",
                    help="work on these venues only, pipe separated, e.g. "
                         '"KSC-MAIN|KOE-MAIN". Narrows a real run, a '
-                        "--compare and a --kdb-check. A narrowed run does "
-                        "NOT publish: the output file replaces rather than "
-                        "merges, so a partial one would delete every other "
-                        "market's rows.")
+                        "--compare and a --kdb-check. The named venues "
+                        "ignore their cutoff, and a narrowed run PUBLISHES "
+                        "a file with only those venues.")
     p.add_argument("--kdb-check", action="store_true",
                    help="exercise ONLY the kdb path, verbosely, on a few "
                         "names. No Bloomberg, no files written.")
@@ -2626,6 +2634,15 @@ def self_test() -> int:
           "rounding=none publishes the raw band and 10.89 looks exactly "
           "like a price on a 0.01 tick",
           cfg.venues["TAI-MAIN"].rounding, "krx")
+
+    print("\na venue named by --venues ignores its cutoff")
+    early = without_cutoff(cfg.venues, ["SET-MAIN"])
+    check("the named venue's cutoff is midnight, so it has always passed",
+          early["SET-MAIN"].cutoff, dt.time(0))
+    check("every other venue keeps its own",
+          early["TYO-MAIN"].cutoff, cfg.venues["TYO-MAIN"].cutoff)
+    check("and nothing named changes nothing",
+          without_cutoff(cfg.venues, []) == cfg.venues, True)
 
     print("\nnarrowing a run to one venue or several")
     check("pipe separated, like the environments beside it",
