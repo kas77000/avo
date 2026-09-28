@@ -305,7 +305,6 @@ python limit_up_down.py "Test|Pilot|Prod"  real run, publish
 python limit_up_down.py --compare OLD.csv  diff the last output against another
 python limit_up_down.py --kdb-check        only the kdb path, verbosely
 python limit_up_down.py --venues KSC-MAIN  one venue, or several, pipe separated
-python limit_up_down.py "" --compute "TYO-MAIN|KSC-MAIN"   compute only these
 ```
 
 ### Turning a fallback off
@@ -323,20 +322,6 @@ that is computed with no Bloomberg at all is:
 ```
 Japan,TYO-MAIN,JP,07:30:00,computed,,1,,,None,,None
 ```
-
-### Choosing which markets compute, for one run
-
-`--compute` names the venues to compute, by FidessaMarket, and every other
-venue asks Bloomberg — whatever `Source` says in `markets.csv`:
-
-```
-python limit_up_down.py "Test|Pilot|Prod" --compute "TYO-MAIN|KSC-MAIN"
-```
-
-Unlike `--venues` it does not narrow the run, so it **publishes as usual**.
-Leave it out and `markets.csv` decides. A venue with no tiers in `bands.csv`
-(Thailand, India) is refused, and so is a name `markets.csv` has never heard
-of. It works with `--kdb-check` too.
 
 ### Working on one market
 

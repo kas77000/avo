@@ -337,28 +337,6 @@ def load(config_dir, tsr_dir=None) -> Config:
     return Config(venues=venues, bands=band_map, ticks=tick_map)
 
 
-def compute_only(cfg: Config, venue_ids) -> Config:
-    """--compute: THESE venues are computed for this run, every other one
-    asks Bloomberg - whatever markets.csv's Source column says.  An empty
-    list changes nothing.
-
-    The same refusal load() makes, for the same reason: a venue with no
-    tiers cannot be computed, and silently leaving it on Bloomberg would
-    look like the option had worked."""
-    if not venue_ids:
-        return cfg
-    no_tiers = [v for v in venue_ids if v not in cfg.bands]
-    if no_tiers:
-        raise ConfigError(
-            f"--compute {'|'.join(no_tiers)}: no band tiers in bands.csv. A "
-            f"market whose rule nobody has written down cannot be computed.")
-    from dataclasses import replace
-    return replace(cfg, venues={
-        vid: replace(v, source="computed" if vid in venue_ids
-                     else "bloomberg")
-        for vid, v in cfg.venues.items()})
-
-
 # =============================================================================
 # SELF TEST
 # =============================================================================
@@ -603,20 +581,6 @@ def self_test() -> int:
     check("BSE-SECONDARY does not, because it publishes no universe of its "
           "own - every row it carries is a copy of a BSE-MAIN one",
           real.venues["BSE-SECONDARY"].exclude_file, "")
-    print("\n--compute, for one run")
-    only = compute_only(real, ["TYO-MAIN", "KSC-MAIN"])
-    check("the named venues compute and EVERY other one asks Bloomberg - "
-          "KOE-MAIN included, though markets.csv computes it",
-          sorted(k for k, v in only.venues.items() if v.computed),
-          ["KSC-MAIN", "TYO-MAIN"])
-    check("nothing else about a venue changes",
-          only.venues["KSC-MAIN"].rounding, "krx")
-    check("and nothing named leaves markets.csv as it is",
-          compute_only(real, []), real)
-    raises("a venue with no tiers is refused, not left quietly on Bloomberg",
-           lambda: compute_only(real, ["TYO-MAIN", "SET-MAIN"]),
-           "--compute SET-MAIN: no band tiers")
-
     #  The shipped markets.csv names the two .stra files and nothing else,
     #  so where they are read from is TSR_DIR's business - the same share
     #  the tick ladder comes off.

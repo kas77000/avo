@@ -1141,19 +1141,6 @@ def parse_venues(spec: str, known):
     return out
 
 
-def load_config(here, tsr_dir, compute_spec: str = ""):
-    """markets.csv as it is, or with --compute deciding which venues are
-    computed for this run.  Says which, so the log records a run that did
-    not follow the file."""
-    cfg = marketcfg.load(here / "config", tsr_dir)
-    only = parse_venues(compute_spec, cfg.venues)
-    if only:
-        cfg = marketcfg.compute_only(cfg, only)
-        print(f"--compute {'|'.join(only)}: these venues are computed, "
-              f"every other one asks Bloomberg")
-    return cfg
-
-
 def only_venues(rows, venues):
     return [r for r in rows if r.venue_id in venues] if venues else list(rows)
 
@@ -1297,7 +1284,7 @@ def write_compare_report(path, records) -> str:
 
 
 def run(envs_spec: str, venues_spec: str = "", report_base=None,
-        result=None, compute_spec: str = "") -> int:
+        result=None) -> int:
     """`report_base` is the log's path without its suffix; the run summary
     is written beside it and added to result["attach"] for the mail."""
     result = result if result is not None else {"attach": []}
@@ -1309,7 +1296,7 @@ def run(envs_spec: str, venues_spec: str = "", report_base=None,
         _check_modules()
         _check_connection_settings()
         here = Path(__file__).resolve().parent
-        cfg = load_config(here, Path(TSR_DIR), compute_spec)
+        cfg = marketcfg.load(here / "config", Path(TSR_DIR))
         for line in input_file_lines(input_files(cfg)):
             print(line)
         now = dt.datetime.now().time()
@@ -1922,8 +1909,7 @@ def demo(report_base=None) -> int:
     return 0
 
 
-def kdb_check(sample: int = 5, venues_spec: str = "",
-              compute_spec: str = "") -> int:
+def kdb_check(sample: int = 5, venues_spec: str = "") -> int:
     """Exercise ONLY the kdb path, verbosely, on a handful of names.
 
     A real run spends its first minutes fetching sixteen thousand names from
@@ -1936,7 +1922,7 @@ def kdb_check(sample: int = 5, venues_spec: str = "",
         print(line)
 
     here = Path(__file__).resolve().parent
-    cfg = load_config(here, Path(TSR_DIR), compute_spec)
+    cfg = marketcfg.load(here / "config", Path(TSR_DIR))
     computed = [v for v in cfg.venues.values() if v.computed]
     print(f"{len(computed)} computed venues: "
           f"{', '.join(sorted(v.venue_id for v in computed))}")
@@ -2153,12 +2139,6 @@ def main(argv=None) -> int:
                         "NOT publish: the output file replaces rather than "
                         "merges, so a partial one would delete every other "
                         "market's rows.")
-    p.add_argument("--compute", default="", metavar="VENUE|VENUE",
-                   help="compute these venues for this run and ask "
-                        "Bloomberg for every other one, whatever "
-                        'markets.csv says, e.g. "TYO-MAIN|KSC-MAIN". A '
-                        "venue with no tiers in bands.csv is refused. "
-                        "Publishes as usual.")
     p.add_argument("--kdb-check", action="store_true",
                    help="exercise ONLY the kdb path, verbosely, on a few "
                         "names. No Bloomberg, no files written.")
@@ -2175,7 +2155,7 @@ def main(argv=None) -> int:
     _apply_local_settings()
 
     if a.kdb_check:
-        return kdb_check(a.sample, a.venues, a.compute)
+        return kdb_check(a.sample, a.venues)
 
     #  ONE MAIL PER RUN AND PER COMPARISON, success or failure, with the
     #  log and the report attached.  Sent after the log is closed so the
@@ -2190,7 +2170,7 @@ def main(argv=None) -> int:
             if a.compare:
                 rc = compare_job(a.compare, a.venues, a.report, base, result)
             else:
-                rc = run(a.envs, a.venues, base, result, a.compute)
+                rc = run(a.envs, a.venues, base, result)
     finally:
         _mail_result(rc, log_path, result, "compare" if a.compare else "")
     return rc
@@ -2641,20 +2621,6 @@ def self_test() -> int:
           "rounding=none publishes the raw band and 10.89 looks exactly "
           "like a price on a 0.01 tick",
           cfg.venues["TAI-MAIN"].rounding, "krx")
-
-    print("\n--compute, by venue")
-    here_dir = Path(__file__).resolve().parent
-    picked = load_config(here_dir, here_dir / "config", "TYO-MAIN|KSC-MAIN")
-    check("the named venues compute, every other one asks Bloomberg",
-          sorted(k for k, v in picked.venues.items() if v.computed),
-          ["KSC-MAIN", "TYO-MAIN"])
-    try:
-        load_config(here_dir, here_dir / "config", "TYO-MIAN")
-        typo = "no error"
-    except ValueError as e:
-        typo = str(e)
-    check("a typo is refused by name, as --venues refuses one",
-          typo.startswith("unknown venue(s) ['TYO-MIAN']"), True)
 
     print("\nnarrowing a run to one venue or several")
     check("pipe separated, like the environments beside it",
