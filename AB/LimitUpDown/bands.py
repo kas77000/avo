@@ -7,7 +7,7 @@ every market rule here testable on a laptop.
 THE RULE IS DATA.  A market is a set of tiers in config/bands.csv, and a
 tier is a floor on the reference price plus an up and a down move.  A flat
 symmetric market is one tier with equal values; Indonesia is three tiers;
-Japan (later) is thirty-three tiers with kind='abs'.  None of them is a
+Japan is thirty-four tiers with kind='abs'.  None of them is a
 branch in this file.
 
 MOST MARKETS DO NOT ROUND, and rounding='none' is still the common case: the
@@ -475,6 +475,26 @@ def self_test() -> int:
     raises("nor may it answer zero",
            lambda: round_band(D("110"), D("90"), lambda p: D("0"), "inward"),
            "tick is not positive")
+
+    print("\nJapan, off the TSE's own table")
+    import marketcfg
+    from pathlib import Path
+    here = Path(__file__).resolve().parent / "config"
+    JP = marketcfg.load(here, here).bands["TYO-MAIN"]
+
+    def jp(close):
+        return compute(JP, "7203", D(close), None, D(1), "none")
+
+    check("7203 JT at 3,133 is +/-700 yen: 3,833/2,433, which is what "
+          "Bloomberg published on 2026-09-03",
+          jp("3133"), (D("3833"), D("2433")))
+    check("a boundary opens its own row: 3,000 is +/-700, 2,999 is +/-500",
+          (jp("3000"), jp("2999")),
+          ((D("3700"), D("2300")), (D("3499"), D("2499"))))
+    check("under 100 yen the width is 30, and the down limit stops at 1 yen",
+          (jp("99"), jp("20")), ((D("129"), D("69")), (D("50"), D("1"))))
+    check("50 million and above is the open-ended top row, +/-10 million",
+          jp("60000000"), (D("70000000"), D("50000000")))
 
     print("\ncompute, end to end")
     check("Indonesia at 100 with a 1 tick",

@@ -7,8 +7,8 @@ source and any of them can be moved by editing one word:
     Source=bloomberg   ask B-PIPE for MIN_LIMIT and MAX_LIMIT
     Source=computed    band = f(previous close, tiers), rounded to the tick
 
-As shipped, JAPAN is the only market Bloomberg prices; the other twelve
-venues are computed against a close from equity_master.  That is a config
+As shipped, JAPAN and KOREA are computed against a close from
+equity_master and every other venue asks Bloomberg first.  That is a config
 decision, not a code one, and reversing it for any venue is an edit.
 
 LATENT CONFIG IS ALLOWED AND STILL VALIDATED.  Tiers, MinPrice and rounding
@@ -203,9 +203,7 @@ def load(config_dir, tsr_dir=None) -> Config:
 
         #  BLANK MEANS DROP, and that is the safe default on purpose: a
         #  venue only asks Bloomberg for its missing closes when someone
-        #  has written it down.  Japan, Thailand and India are
-        #  Source=bloomberg and never reach the fallback at all; Indonesia
-        #  is computed and deliberately does not use it.
+        #  has written it down.  Indonesia deliberately does not use it.
         fallback = (r.get("NoCloseFallback") or "").strip().lower()
         if fallback and fallback not in VALID_FALLBACK:
             raise ConfigError(
@@ -480,7 +478,7 @@ def self_test() -> int:
     check("and the ones without it are exactly the ones with no band",
           sorted({v.country for v in real.venues.values()
                   if not v.no_data_fallback}),
-          ["India", "Japan", "Thailand"])
+          ["India", "Thailand"])
     with tempfile.TemporaryDirectory() as d:
         raises("a computed venue that does not round but names one anyway",
                lambda: load(write(d, mk=HDR +
@@ -519,17 +517,25 @@ def self_test() -> int:
           sorted({v.country for v in real.venues.values()}),
           ["China", "India", "Indonesia", "Japan", "Korea", "Malaysia",
            "Philippines", "Taiwan", "Thailand"])
-    check("EVERY VENUE ASKS BLOOMBERG, which is what the config now says - "
-          "the question is no longer which venue computes but which one can "
-          "fall back to computing when Bloomberg has nothing",
-          sorted(v.venue_id for v in real.venues.values() if v.computed), [])
-    check("and the seven that CANNOT fall back are Japan, Thailand and "
-          "India, whose band rules nobody has written down - an entitlement "
-          "refusal there still empties the venue",
+    check("JAPAN AND KOREA ARE COMPUTED, every other venue asks Bloomberg",
+          sorted(v.venue_id for v in real.venues.values() if v.computed),
+          ["CHJ-MAIN", "JNX-MAIN", "KOE-MAIN", "KSC-MAIN", "TYO-MAIN"])
+    check("and the four that CANNOT fall back are Thailand and India, whose "
+          "band rules nobody has written down - an entitlement refusal "
+          "there still empties the venue",
           sorted(v.venue_id for v in real.venues.values()
                  if not v.no_data_fallback),
-          ["BSE-MAIN", "BSE-SECONDARY", "CHJ-MAIN", "JNX-MAIN", "NSI-MAIN",
-           "SET-MAIN", "TYO-MAIN"])
+          ["BSE-MAIN", "BSE-SECONDARY", "NSI-MAIN", "SET-MAIN"])
+    check("Japan is the TSE's table, thirty four absolute tiers, on all "
+          "three venues",
+          [(len(real.bands[v]), {t.kind for t in real.bands[v]})
+           for v in ("TYO-MAIN", "JNX-MAIN", "CHJ-MAIN")],
+          [(34, {"abs"})] * 3)
+    check("with the down limit floored at 1 yen, and no rounding - the TSE "
+          "publishes base +/- the width, off the tick",
+          {(real.venues[v].min_price, real.venues[v].rounding)
+           for v in ("TYO-MAIN", "JNX-MAIN", "CHJ-MAIN")},
+          {(Decimal("1"), "none")})
     check("and every computed venue has the tiers it needs, so the shipped "
           "config cannot fail at load",
           [v.venue_id for v in real.venues.values()

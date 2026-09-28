@@ -58,26 +58,45 @@ gets up to two candidates — the crosscode's own suffix first, then the venue's
 `BBGComposite` — because Shanghai is `600001 CG` in the crosscode and
 `600001.CH` in equity_master. The run reports which suffix hit.
 
-### As shipped: Japan, Thailand and India ask; everything else computes
+### As shipped: Japan and Korea compute; everything else asks
 
 ```
-bloomberg   TYO-MAIN  JNX-MAIN  CHJ-MAIN  SET-MAIN
-            NSI-MAIN  BSE-MAIN  BSE-SECONDARY
-computed    the other twelve
+computed    TYO-MAIN  JNX-MAIN  CHJ-MAIN  KSC-MAIN  KOE-MAIN
+bloomberg   the other fourteen, falling back to their band where they have one
 ```
 
-**The markets Bloomberg prices are exactly the markets whose rule is not
-written down here**, and each of them is refused if you try to compute it. TSE
-limits are an absolute price-step table nobody has transcribed; Thailand's and
-India's are not in `bands.csv` either. A percentage tier invented for any of
-them would be a plausible-looking wrong answer on live orders, so switching one
-is refused outright:
+**Thailand and India are the markets whose rule is not written down here**,
+and each of them is refused if you try to compute it. A percentage tier
+invented for either would be a plausible-looking wrong answer on live orders,
+so switching one is refused outright:
 
 ```
-TYO-MAIN has Source=computed but no band tiers in bands.csv. Add its tiers,
+SET-MAIN has Source=computed but no band tiers in bands.csv. Add its tiers,
 or leave it on Source=bloomberg - a market whose rule nobody has written
 down cannot be computed.
 ```
+
+### Japan: the TSE's own table
+
+`bands.csv` carries the TSE daily price-limit table (制限値幅) as 34 `abs`
+tiers, the same on `TYO-MAIN`, `JNX-MAIN` and `CHJ-MAIN` — the PTS venues take
+the Tokyo base price. The limit is **base ± the yen width for the base's row**,
+not rounded to a tick, and the down limit stops at 1 yen (`MinPrice=1`):
+
+```
+base 3,133  ->  row 3,000-5,000, +/-700  ->  3,833 / 2,433   (Bloomberg, 7203 JT)
+```
+
+Two things the table cannot know, both worth watching in the first compares:
+
+- **Widened limits.** After consecutive days at stop-high or stop-low with no
+  trade, the TSE widens a name's limit. Nothing we hold says which names that
+  is, so they get the ordinary width — narrower than the exchange's.
+- **The PTS close.** A `JNX-MAIN`/`CHJ-MAIN` name is looked up in
+  `equity_master` as its own suffix (`7203.JE`) first and the composite
+  (`7203.JP`) second. If equity_master carries a PTS row, its close is the
+  PTS last rather than the Tokyo base. The run's `sym hit` counts say which
+  suffix answered.
 
 ## Thailand and India need more than a config row
 
@@ -389,7 +408,7 @@ finishes last is the file that gets published.
 | `india.py` | the ATS strategy files, and the BSE listings with no row of their own |
 | `limit_up_down.py` | orchestration, validation, environment copy |
 | `config/markets.csv` | one row per venue: cutoff, which side of the split, and India's `ExcludeFile` |
-| `config/bands.csv` | tiers per venue. Present for twelve; they are what make a venue switchable |
+| `config/bands.csv` | tiers per venue. Present for fifteen; they are what make a venue switchable |
 | `config/spol_JKT.tsr` | **placeholder, and Indonesia only.** Point `TSR_DIR` at the ATS share, which also holds India's two `.stra` files. |
 
 `marketcfg` refuses a half-configured venue: a `bloomberg` venue carrying a tick
@@ -428,14 +447,14 @@ Nine countries, nineteen venues:
 
 | | venues | cutoff | source |
 |---|---|---|---|
-| Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | **bloomberg**, no fallback |
+| Japan | `TYO-MAIN` (JT), `JNX-MAIN` (JE), `CHJ-MAIN` (JI) | 07:30 | computed, TSE table, ±yen width, not rounded |
 | Korea | `KSC-MAIN` (KP, KOSPI) | 07:30 | computed, ±30%, rounded on kdb's ladder |
 | Korea | `KOE-MAIN` (KQ, KOSDAQ) | 07:30 | computed, ±30%, rounded on kdb's ladder |
-| Malaysia | `KLS-MAIN` | 07:59 | computed, ±30% |
-| Taiwan | `TAI-MAIN` | 07:59 | computed, ±10%, rounded on kdb's ladder |
-| Indonesia | `JKT-MAIN` | 07:59 | computed, tiered + tick |
-| China | `SHA`, `SHH`, `SSC`, `SZA`, `SHZ`, `SZC` | 09:03 | computed, ±10% / ±20% |
-| Philippines | `PHS-MAIN` | 09:03 | computed, ±30% |
+| Malaysia | `KLS-MAIN` | 07:59 | bloomberg, else ±30% |
+| Taiwan | `TAI-MAIN` | 07:59 | bloomberg, else ±10%, rounded on kdb's ladder |
+| Indonesia | `JKT-MAIN` | 07:59 | bloomberg, else tiered + tick |
+| China | `SHA`, `SHH`, `SSC`, `SZA`, `SHZ`, `SZC` | 09:03 | bloomberg, else ±10% / ±20% |
+| Philippines | `PHS-MAIN` | 09:03 | bloomberg, else ±30% |
 | Thailand | `SET-MAIN` | 10:39 | **bloomberg**, local line only |
 | India | `NSI-MAIN`, `BSE-MAIN`, `BSE-SECONDARY` | 10:49 | **bloomberg**, less the ATS's own names |
 
@@ -595,7 +614,7 @@ first.
 asks, blank drops as before. Blank is the default on purpose — a venue only
 asks once someone has written it down.
 
-As shipped, every computed venue asks **except Indonesia**. Japan, Thailand and
+As shipped, every venue with tiers asks **except Indonesia**. Thailand and
 India are `Source=bloomberg` and never reach the fallback at all, so their
 column is blank too.
 
@@ -690,11 +709,9 @@ guessed.
 refuses, has no answer for, or answers without a usable limit is given **the
 venue's own band** instead of being dropped.
 
-**Blank on every venue today, and it has to be** — `marketcfg` refuses the
-column on a venue with no tiers in `bands.csv`, and none of the six `bloomberg`
-venues has any. Tokyo's limits are an absolute step table nobody has
-transcribed; Thailand's and India's rules are not written down either. Write a
-venue's tiers and the column becomes available to it.
+**Set on every venue that has tiers** — `marketcfg` refuses the column on a
+venue with none, which today is Thailand and India. Write a venue's tiers and
+the column becomes available to it.
 
 **The ordering is the awkward part.** kdb runs *before* B-PIPE, so at the moment
 the closes are fetched we do not yet know which names Bloomberg will fail. So

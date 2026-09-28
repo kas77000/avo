@@ -1746,8 +1746,9 @@ def demo(report_base=None) -> int:
     here = Path(__file__).resolve().parent
     cfg = marketcfg.load(here / "config", here / "config")
 
-    #  Japan exercises the ASKED branch, because Japan is now the only
-    #  market Bloomberg prices.  Everything else exercises the COMPUTED one.
+    #  Japan and Korea are computed.  Japan's names with no close reach
+    #  Bloomberg through NoCloseFallback, which is what exercises the ASKED
+    #  branch; every other market asks Bloomberg and falls back to its band.
     rows = [_row("7203.T", "7203 JT", "7203.JP", "TYO-MAIN"),
             _row("7203.JNX", "7203 JE", "7203.JE", "JNX-MAIN"),
             _row("NOPX.T", "NOPX JT", "NOPX.JP", "TYO-MAIN"),
@@ -1761,9 +1762,8 @@ def demo(report_base=None) -> int:
             #  KOSDAQ, and the name that proved the coarser tick: its up
             #  leg crosses 200,000 where the tick goes 100 -> 500.
             _row("000250.KQ", "000250 KQ", "000250.KR", "KOE-MAIN"),
-            #  A leveraged ETF Bloomberg will not price here, so it reaches
-            #  the computed fallback and must be refused rather than given
-            #  the venue's 30%.
+            #  A leveraged ETF: its name, not its ticker, is what gives it
+            #  twice the venue's 30%.
             _row("0080Y0.KS", "0080Y0 KP", "0080Y0.KR", "KSC-MAIN"),
             _row("MAYBANK.KL", "MAYBANK MK", "MAYBANK.MY", "KLS-MAIN"),
             _row("BBCA.JK", "BBCA IJ", "BBCA.ID", "JKT-MAIN"),
@@ -1781,8 +1781,9 @@ def demo(report_base=None) -> int:
     ask, compute = cfg.by_source(rows)
     secondary = india.secondary_rows(rows)
 
-    #  7203 is the real answer the probe got on 2026-09-03.  The PTS line
-    #  carries the same limits, which is what makes JNX and CHJ publishable.
+    #  7203 is the real answer the probe got on 2026-09-03.  Japan is
+    #  computed now, so these are only reached by a Japanese name with no
+    #  close; 7203 has one and must come out the same off the TSE table.
     limits = {"7203 JT Equity": {"MIN_LIMIT": 2433.0, "MAX_LIMIT": 3833.0,
                                  "LAST_PRICE": 3130.0,
                                  "MARKET_STATUS": "ACTV"},
@@ -1811,7 +1812,10 @@ def demo(report_base=None) -> int:
 
     #  What kdbclose.closes_for returns: keyed on the RIC, already Decimal.
     #  The NOCL pair have no row in equity_master at all.
-    closes = {"600001.SS": Decimal("12.34"),
+    #  7203 at 3,133 is in the 3,000-5,000 row, +/-700 yen: 3,833/2,433,
+    #  exactly what Bloomberg published.  The PTS line takes the TSE base.
+    closes = {"7203.T": Decimal("3133"), "7203.JNX": Decimal("3133"),
+              "600001.SS": Decimal("12.34"),
               "688001.SS": Decimal("50"),      # STAR board, the 688 prefix
               "005930.KS": Decimal("70000"),
               "000250.KQ": Decimal("157500"),
@@ -1837,9 +1841,7 @@ def demo(report_base=None) -> int:
 
     #  What equity_master's LONG_COMP_NAME says.  0080Y0 KP is real: it
     #  closed at 8,025 and Bloomberg published 12,835/3,215, which is
-    #  +/-60% where bands.csv gives Korea 30.  Bloomberg prices it here, so
-    #  it publishes correctly; the demo carries it to show the band is
-    #  REFUSED when Bloomberg cannot.
+    #  +/-60% where bands.csv gives Korea 30 - the leverage row doubles it.
     names = {"005930.KS": "Samsung Electronics Co Ltd",
              "0080Y0.KS": "Shinhan SOL Shipbuilding TOP3 Plus leverage ETF"}
 
@@ -2427,9 +2429,16 @@ def self_test() -> int:
           "and would show the same symptom Taiwan just did if their "
           "exchanges round - nobody has checked one of their names",
           sorted(v.venue_id for v in cfg.venues.values()
-                 if v.rounding == "none" and v.venue_id in cfg.bands),
+                 if v.rounding == "none" and v.venue_id in cfg.bands
+                 and v.country != "Japan"),
           ["KLS-MAIN", "PHS-MAIN", "SHA-MAIN", "SHH-MAIN", "SHZ-MAIN",
            "SSC-MAIN", "SZA-MAIN", "SZC-MAIN"])
+    check("JAPAN DOES NOT ROUND, and that one IS checked - the TSE limit is "
+          "base +/- a yen width and is published off the tick: 7203 JT's "
+          "3,833 is not on its 5 yen tick and Bloomberg prints it",
+          sorted(v.venue_id for v in cfg.venues.values()
+                 if v.country == "Japan" and v.rounding == "none"),
+          ["CHJ-MAIN", "JNX-MAIN", "TYO-MAIN"])
     check("A NAME KDB HAS NO LADDER FOR IS REPORTED, NOT PUBLISHED "
           "UNROUNDED - an unrounded limit is one the exchange will reject",
           [d.ric for d in
@@ -2726,15 +2735,16 @@ def self_test() -> int:
     #  Bloomberg would not price was dropped for want of a close nobody had
     #  fetched.  Pinned here as the arithmetic the gate has to do.
     shipped_ask, shipped_compute = cfg.by_source(
-        [row("005930.KS", "005930 KP", "005930.KR", "KSC-MAIN")])
+        [row("MAYBANK.KL", "MAYBANK MK", "MAYBANK.MY", "KLS-MAIN")])
     retryable = [r for r in shipped_ask
                  if cfg.venues[r.venue_id].no_data_fallback]
-    check("AS SHIPPED `compute` IS EMPTY, so a gate on it would open kdb "
-          "for nothing and the fallback would have no close to use",
+    check("A MALAYSIA-ONLY RUN HAS AN EMPTY `compute`, so a gate on it "
+          "would open kdb for nothing and the fallback would have no close "
+          "to use",
           (shipped_compute, [r.ric for r in retryable]),
-          ([], ["005930.KS"]))
+          ([], ["MAYBANK.KL"]))
     check("the gate is on compute PLUS the retryable names, which is what "
-          "makes a Korean name reach the band at all",
+          "makes a Malaysian name reach the band at all",
           bool(shipped_compute + retryable), True)
 
     print("\na computed name with no close falls back to Bloomberg")
@@ -2768,15 +2778,14 @@ def self_test() -> int:
     check("and its venue is the computed one", cout[0]["Venue"], "JKT-MAIN")
     mixed = idn + [row("600001.SS", "600001 CG", "600001.CN", "SHA-MAIN")]
     asked, computed = cfg.by_source(mixed)
-    check("AS SHIPPED EVERY VENUE ASKS BLOOMBERG FIRST, so by_source puts "
-          "all of them on that side and nothing computes up front",
+    check("INDONESIA AND CHINA ASK BLOOMBERG FIRST, so by_source puts "
+          "both on that side and nothing computes up front",
           (sorted({r.venue_id for r in asked}), computed),
           (["JKT-MAIN", "SHA-MAIN"], []))
     check("and the band is reached through NoDataFallback instead, which "
           "is what makes a Bloomberg outage publishable rather than fatal",
-          sorted({v.venue_id for v in cfg.venues.values()
-                  if v.no_data_fallback}) [:2],
-          ["JKT-MAIN", "KLS-MAIN"])
+          [v for v in ("JKT-MAIN", "SHA-MAIN")
+           if not cfg.venues[v].no_data_fallback], [])
 
     print("\nprices are written plainly, never in exponent form")
     check("a big round number", _plain(D("1E+3")), "1000")
@@ -3056,19 +3065,19 @@ def self_test() -> int:
         except marketcfg.ConfigError as e:
             got = str(e)
         check("switching a venue that has NO tiers is refused loudly rather "
-              "than publishing a made-up band - Tokyo's limits are an "
-              "absolute step table nobody has written down here, and "
-              "neither Thailand's rule nor India's is written either",
+              "than publishing a made-up band - neither Thailand's rule nor "
+              "India's is written down here",
               "no band tiers in bands.csv" in got, True)
 
     shipped = marketcfg.load(real, real)
-    check("as shipped, EVERY market asks Bloomberg - the split is no longer "
-          "which venue computes but which one can fall back to computing",
-          [v.venue_id for v in shipped.venues.values() if v.computed], [])
-    check("AND THE ONES THAT CANNOT ARE EXACTLY THE ONES WITH NO TIERS - "
-          "Japan, Thailand and India, whose rules nobody has written down",
+    check("as shipped, JAPAN AND KOREA ARE COMPUTED and every other market "
+          "asks Bloomberg",
+          sorted({v.country for v in shipped.venues.values() if v.computed}),
+          ["Japan", "Korea"])
+    check("AND THE ONES THAT CANNOT FALL BACK ARE EXACTLY THE ONES WITH NO "
+          "TIERS - Thailand and India, whose rules nobody has written down",
           sorted({v.country for v in shipped.venues.values()
-                  if not v.no_data_fallback}), ["India", "Japan", "Thailand"])
+                  if not v.no_data_fallback}), ["India", "Thailand"])
     check("every other venue can, and has the band to do it with",
           [v.venue_id for v in shipped.venues.values()
            if v.no_data_fallback and v.venue_id not in shipped.bands], [])

@@ -1,9 +1,9 @@
 Country,FidessaVenueID,BBGComposite,Time,Source,TickSource,MinPrice,Rounding,ExcludeFile,NoCloseFallback,TickFrom,NoDataFallback
-Japan,TYO-MAIN,JP,07:30:00,bloomberg,,,,,,,
-Japan,JNX-MAIN,JP,07:30:00,bloomberg,,,,,,,
-Japan,CHJ-MAIN,JP,07:30:00,bloomberg,,,,,,,
-Korea,KOE-MAIN,KS,07:30:00,bloomberg,,,krx,,bloomberg,,computed
-Korea,KSC-MAIN,KS,07:30:00,bloomberg,,,krx,,bloomberg,,computed
+Japan,TYO-MAIN,JP,07:30:00,computed,,1,,,bloomberg,,computed
+Japan,JNX-MAIN,JP,07:30:00,computed,,1,,,bloomberg,,computed
+Japan,CHJ-MAIN,JP,07:30:00,computed,,1,,,bloomberg,,computed
+Korea,KOE-MAIN,KS,07:30:00,computed,,,krx,,bloomberg,,computed
+Korea,KSC-MAIN,KS,07:30:00,computed,,,krx,,bloomberg,,computed
 Malaysia,KLS-MAIN,MK,07:59:00,bloomberg,,,,,bloomberg,,computed
 Taiwan,TAI-MAIN,TT,07:59:00,bloomberg,,,krx,,bloomberg,,computed
 Indonesia,JKT-MAIN,IJ,07:59:00,bloomberg,spol_JKT.tsr,50,inward,,,,computed
