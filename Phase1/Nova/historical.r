@@ -272,7 +272,12 @@ h_start_cluster <- function(n, nm) {
 # next block. b is a list of sym, time, price, size, cond, ex. Parsed as
 # read.csv would (quotes, a line break inside a quoted cell), all text.
 # Returns the rows read and the seconds spent reading.
-h_tick_blocks <- function(path, block, each) {
+#
+# keep: when set (--market=), a raw line whose sym is not in it is dropped
+# BEFORE it is parsed, so a one-market run only parses that market. Each
+# block's each(b, read) still gets called, with the lines read, for the
+# progress line.
+h_tick_blocks <- function(path, block, each, keep = NULL) {
   con <- file(path, "r")
   on.exit(close(con))
   csv <- function(src, what, ...) {
@@ -293,19 +298,41 @@ h_tick_blocks <- function(path, block, each) {
   carry <- NULL
   rows <- 0
   secs <- 0
+  sym_at <- pos[1]
+  pending <- 0
+  # progress: rows handed on, or with keep the lines read (most are dropped)
+  tell <- function(x) if (is.null(keep)) length(x$sym) else pending
   repeat {
     t0 <- proc.time()[["elapsed"]]
-    b <- csv(con, what, nmax = block, fill = TRUE, multi.line = FALSE)
+    if (is.null(keep)) {
+      b <- csv(con, what, nmax = block, fill = TRUE, multi.line = FALSE)
+      got <- length(b[[1]])
+    } else {
+      raw <- readLines(con, n = block, encoding = "UTF-8")
+      got <- length(raw)
+      field <- if (sym_at == 1) sub(",.*$", "", raw) else
+        vapply(strsplit(raw, ",", fixed = TRUE),
+               function(x) if (length(x) >= sym_at) x[sym_at] else "", "")
+      raw <- raw[gsub("\"", "", field, fixed = TRUE) %in% keep]
+      b <- if (length(raw)) csv(textConnection(raw), what, fill = TRUE,
+                                multi.line = FALSE) else
+        lapply(what, function(w) character(0))
+    }
     b <- setNames(b[pos], need)
-    got <- length(b$sym)
     rows <- rows + got
+    pending <- pending + got
     if (!is.null(carry)) b <- Map(c, carry, b)
     secs <- secs + proc.time()[["elapsed"]] - t0
     n <- length(b$sym)
-    if (!n) break
     if (got < block) {
-      each(b)
+      if (n) each(b, tell(b))
       break
+    }
+    if (!n) {
+      each(b, tell(b))
+      pending <- 0
+      carry <- NULL
+      next
     }
     last <- which(b$sym != b$sym[n])
     if (!length(last)) {
@@ -313,7 +340,9 @@ h_tick_blocks <- function(path, block, each) {
       next
     }
     cut <- max(last)
-    each(lapply(b, `[`, seq_len(cut)))
+    part <- lapply(b, `[`, seq_len(cut))
+    each(part, tell(part))
+    pending <- 0
     carry <- lapply(b, `[`, (cut + 1):n)
   }
   list(rows = rows, secs = secs)
@@ -501,7 +530,9 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
   n_block <- 0
   done_rows <- 0
   t_start <- proc.time()[["elapsed"]]
-  got <- h_tick_blocks(file.path(z$dir, "ticks.csv"), block, function(b) {
+  keep <- if (length(only)) unique(names_$sym) else NULL
+  got <- h_tick_blocks(file.path(z$dir, "ticks.csv"), block, keep = keep,
+                       each = function(b, read = length(b$sym)) {
     idx <- match(b$sym, names_$sym)
     if (anyNA(idx)) unknown <<- union(unknown, b$sym[is.na(idx)])
     known <- !is.na(idx)
@@ -525,7 +556,7 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
     st$written <<- st$written + r[["written"]]
     st$prints <<- st$prints + r[["prints"]]
     n_block <<- n_block + 1
-    done_rows <<- done_rows + length(b$sym)
+    done_rows <<- done_rows + read
     secs <- proc.time()[["elapsed"]] - t_start
     pct <- if (is.na(want) || !want) "?" else h_n(100 * done_rows / want)
     log$info(sprintf(paste0("block %d  rows %s/%s (%s%%)  files written %s",
@@ -1078,6 +1109,21 @@ h_self_test <- function() {
   check("--market=NZ writes New Zealand only, and no NoTradingDay row elsewhere",
         list(list.files(s8$OUTPUT_DIR), list.files(s8$NOTRADINGDAY_DIR)),
         list("AIA NZ", character(0)))
+  nz <- file.path("AIA NZ", "raw-AIA NZ-20260925.csv")
+  bytes <- function(dir) {
+    p <- file.path(dir, nz)
+    if (file.exists(p)) readBin(p, "raw", file.info(p)$size) else "no file"
+  }
+  s8b <- s8
+  s8b$OUTPUT_DIR <- file.path(d, "out8b")
+  s8b$TICK_BLOCK <- 2
+  tryCatch(h_run(z, s8b, h_quiet_log(), only = "NZ"), error = function(e) {
+    cat("  h_run failed: ", conditionMessage(e), "\n", sep = "")
+  })
+  check("the one-market file is byte for byte the whole run's, blocks of 2 too",
+        list(identical(bytes(s8$OUTPUT_DIR), bytes(s$OUTPUT_DIR)),
+             identical(bytes(s8b$OUTPUT_DIR), bytes(s$OUTPUT_DIR))),
+        list(TRUE, TRUE))
   check("--market= with a code we do not cover stops",
         tryCatch({h_run(z, s8, h_quiet_log(), only = "XX"); "ran"},
                  error = function(e) grepl("XX not in", conditionMessage(e))),
