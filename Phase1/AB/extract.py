@@ -46,7 +46,10 @@ what stage.csv says the folder was built from.
 The zip is then assembled from the folder, which is left in place.
 
 FAIL LOUDLY.  A kdb failure, or equity_master answering nothing for the
-reference fetch, stops the run and leaves no zip.  The zip is written as
+reference fetch, stops the run and leaves no zip.  So does a day with no
+print at all - a zip of it would give every name a permanent no-trading day
+in Nova - and a no-argument run on a weekend, when the RDB holds no trading
+day.  The zip is written as
 .part and renamed, so a zip under its real name is always a finished one.
 
     python extract.py                     today, from the RDB
@@ -332,6 +335,26 @@ def set_aside(stage, log) -> None:
     if aside.exists():
         log.warn(f"{aside.name} could not be removed; it is harmless, "
                  f"delete it by hand")
+
+
+def any_print(stage, mkts) -> bool:
+    """Whether any market's staged ticks file has a print under its
+    header - done now or by an earlier run alike."""
+    for m in mkts:
+        with market_files(stage, m)[0].open(encoding="utf-8",
+                                            newline="") as fh:
+            next(fh, None)
+            if next(fh, None):
+                return True
+    return False
+
+
+def weekend(date, today):
+    """The day's name when a no-argument run falls on a Saturday or a
+    Sunday, else None."""
+    if date is None and today.weekday() >= 5:
+        return f"{today:%A}"
+    return None
 
 
 def market_files(stage, mkt) -> tuple:
@@ -819,6 +842,15 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                f"no close {sum(c.reason == 'no-close' for c in got):,}, "
                f"quote-only {len(quote_rows):,}")
 
+    #  A WHOLE DAY WITH NO PRINT IS THE WRONG DAY, not a quiet one: the RDB
+    #  on a weekend, or after kdb's midnight rollover.  Nova would write a
+    #  permanent no-trading day for every name.  The staging is kept.
+    if not any_print(stage, sorted(by_market)):
+        hint = (f". After midnight the RDB holds the new day: use --date "
+                f"{day}" if source == "rdb" else "")
+        raise ExtractError(f"qatt returned no prints at all for {day} on "
+                           f"{names['qatt']}; no zip written{hint}")
+
     log.step(6, "the zip")
     out = Path(cfg["EXPORT_DIR"]) / bundle_name(day)
     manifest, table = assemble(stage, out, sorted(by_market), {
@@ -831,8 +863,6 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
            f"{logs.thousands(manifest['syms with prints'])} of "
            f"{logs.thousands(len(syms))}")
     log.kv("prints", logs.thousands(manifest["prints"]))
-    if not manifest["prints"]:
-        log.warn(f"qatt gave no print at all for {day}")
     log.kv("closes", f"qatt {manifest['closes from qatt']:,}, equity_master "
                      f"{manifest['closes from equity_master']:,}, "
                      f"none {manifest['no close']:,}")
@@ -841,7 +871,7 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     return out
 
 
-def main(argv=None) -> int:
+def main(argv=None, today=None) -> int:
     p = argparse.ArgumentParser(
         description="The day's qatt prints, closes and reference data, in "
                     "one zip for Nova.")
@@ -881,6 +911,13 @@ def main(argv=None) -> int:
     names["quote"] = (f"{u_name} ({u_host}:{u_port})" if own_quote
                       else names["qatt"])
     log = logs.Log(path=a.log or None)
+    today = today or dt.date.today()
+    name = weekend(date, today)
+    if name:
+        log.fail(f"today, {today}, is a {name}: the RDB holds no trading "
+                 f"day. Use --date YYYY-MM-DD for the day you want")
+        log.close()
+        return 1
     log.kv("qatt", source, names["qatt"])
     log.kv("quote", source, names["quote"])
     try:
@@ -892,7 +929,7 @@ def main(argv=None) -> int:
             conns["quote"] = qattsource.connect(u_host, u_port)
             conns["quote_reconnect"] = lambda: connect_again(
                 u_host, u_port, log)
-        build(cfg, date, conns, log, fresh=a.fresh)
+        build(cfg, date, conns, log, today=today, fresh=a.fresh)
     except ExtractError as e:
         log.fail(str(e))
         log.fail("no zip written")
@@ -1083,8 +1120,9 @@ def self_test() -> int:
 
     class FakeQatt:
         def __init__(self, fail=False, fail_on=(), parts=None,
-                     max_syms=None, tables=("qatt",)):
+                     max_syms=None, tables=("qatt",), empty=False):
             self.asked, self.fail, self.fail_on = [], fail, set(fail_on)
+            self.empty = empty          # no print at all, as a wrong day
             self.tables = list(tables)
             self.syms, self.sizes, self.max_syms = [], [], max_syms
             self.parts = parts or [D(2026, 9, 24), D(2026, 9, 25)]
@@ -1107,7 +1145,7 @@ def self_test() -> int:
                 return [{"sym": s, T: dt.time.fromisoformat(t), "price": p,
                          "size": n, "cond": c, "ex": "X"}
                         for s in args[-1] for t, p, n, c in
-                        TICK_ROWS.get(s, [])]
+                        ([] if self.empty else TICK_ROWS.get(s, []))]
             raise AssertionError(f"qatt was asked {q}")
 
     class FakeQuote:
@@ -1329,6 +1367,28 @@ def self_test() -> int:
               str(err), "market HK, quote read on QATT_SERVER: "
                         "RuntimeError: 'quote")
 
+    print("\nno print at all for the whole day")
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp) / "out" / "phase1-20260928"
+        err = attempt(lambda: run(tmp, None, qatt=FakeQatt(empty=True)))
+        check("an RDB day with no print at all stops the run: a weekend or "
+              "the new day after midnight",
+              (type(err).__name__, str(err)),
+              ("ExtractError", "qatt returned no prints at all for "
+               "2026-09-28 on QATT_RDB_SERVER; no zip written. After "
+               "midnight the RDB holds the new day: use --date 2026-09-28"))
+        check("and writes no zip",
+              sorted(p.name for p in stage.parent.glob("*.zip*")), [])
+        check("the staging folder is left as it is",
+              sorted(p.name for p in stage.glob("ticks-*.csv")),
+              ["ticks-HK.csv", "ticks-JT.csv", "ticks-NZ.csv",
+               "ticks-XX.csv"])
+        err = attempt(lambda: run(tmp, D(2026, 9, 25),
+                                  qatt=FakeQatt(empty=True)))
+        check("an HDB day with no print stops too",
+              str(err), "qatt returned no prints at all for 2026-09-25 on "
+                        "QATT_SERVER; no zip written")
+
     print("\nthe quote and qatt tables, checked before any market")
     with tempfile.TemporaryDirectory() as tmp:
         stage = Path(tmp) / "out" / "phase1-20260925"
@@ -1355,19 +1415,21 @@ def self_test() -> int:
                  ("quote-host", 3): FakeQuote()}
         saved = qattsource.connect, settings.load
 
-        def main_with(quote_rdb):
+        def main_with(quote_rdb, argv=(), today=D(2026, 9, 28)):
             cfg = dict(settings.DEFAULTS, CROSSCODE_PATH=str(cc),
                        EXPORT_DIR=str(Path(tmp) / "out"),
                        EQUITY_MASTER_SERVER="em-host:1",
                        QATT_RDB_SERVER="qatt-host:2",
-                       QUOTE_RDB_SERVER=quote_rdb)
+                       QUOTE_RDB_SERVER=quote_rdb,
+                       QATT_SERVER="qatt-host:2", QUOTE_SERVER=quote_rdb)
             settings.load = lambda: cfg
             qattsource.connect = lambda h, p: fakes[(h, int(p))]
-            logfile = Path(tmp) / f"run{len(quote_rdb)}.log"
+            logfile = Path(tmp) / f"run{len(quote_rdb)}-{today}.log"
             try:
                 with contextlib.redirect_stdout(io.StringIO()), \
                         contextlib.redirect_stderr(io.StringIO()):
-                    rc = main(["--log", str(logfile)])
+                    rc = main(["--log", str(logfile)] + list(argv),
+                              today=today)
             finally:
                 qattsource.connect, settings.load = saved
             return rc, logfile.read_text("utf-8")
@@ -1386,6 +1448,23 @@ def self_test() -> int:
               {refdata.QUOTE_RDB_Q})
         check("and never to qatt's",
               [q for q in fakes[("qatt-host", 2)].asked if "quote" in q], [])
+
+        print("\nmain: no argument on a weekend")
+        for f in fakes.values():
+            f.asked.clear()
+        rc, text = main_with("quote-host:3", today=D(2026, 9, 26))
+        check("a no-argument run on a Saturday stops, telling the user to "
+              "use --date, before asking kdb anything",
+              (rc, "XX  today, 2026-09-26, is a Saturday: the RDB holds no "
+                   "trading day. Use --date YYYY-MM-DD for the day you "
+                   "want" in text,
+               [f.asked for f in fakes.values()]),
+              (1, True, [[], [], []]))
+        rc, text = main_with("quote-host:3", today=D(2026, 9, 27))
+        check("and on a Sunday", (rc, "is a Sunday" in text), (1, True))
+        rc, text = main_with("quote-host:3", ["--date", "2026-09-25"],
+                             today=D(2026, 9, 26))
+        check("--date on a Saturday goes through", rc, 0)
 
     print("\nthe equity_master date, when the client-date query fails")
     with tempfile.TemporaryDirectory() as tmp:

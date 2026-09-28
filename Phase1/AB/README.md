@@ -6,7 +6,7 @@ tick files, `limitUpDown.csv` and `TradingData.csv` without B-PIPE. A person
 copies the zip to Nova, where `Phase1/Nova/run_phase1.cmd <zip>` does the rest.
 
 ```
-AB (Python, after 18:00 HKT)          copied by hand        Nova (R 3.2.2)
+AB (Python, after 18:30 HKT)          copied by hand        Nova (R 3.2.2)
 extract.py -> phase1-YYYYMMDD.zip  ---------------------->  run_phase1.cmd <zip>
 ```
 
@@ -53,7 +53,8 @@ python extract.py --fresh                    the day again, from scratch
 ```
 
 - **No argument:** the trade date is today, and qatt and quote are read from
-  the RDB (`QATT_RDB_SERVER`).
+  the RDB (`QATT_RDB_SERVER`). On a Saturday or a Sunday it stops at once
+  with `XX`: use `--date YYYY-MM-DD` for the day you want.
 - **`--date YYYY-MM-DD`:** the newest qatt partition on or before that
   date, from the HDB (`QATT_SERVER`). Use it to redo a past day.
 - **`--log FILE`:** also appends the log to FILE. Each run starts with a
@@ -63,9 +64,24 @@ python extract.py --fresh                    the day again, from scratch
 - equity_master and the tick ladders always come from `EQUITY_MASTER_SERVER`,
   at the newest equity_master date on or before the trade date.
 
-**When:** after 18:00 HKT, once every market in the universe has closed and
-its closing trades are in qatt. A run before a market closes finds no
+**When:** after 18:30 HKT, once every market in the universe has closed and
+its closing trades are in qatt. The last is India, whose closing session
+runs 15:30-16:00 IST, 18:00-18:30 HKT. A run before a market closes finds no
 closing trade for it, and every name there falls back to equity_master.
+
+**A run that fails early still leaves its finished markets staged**, and a
+rerun the same evening reuses them as they are. If the first run was too
+early, rerun with `--fresh`.
+
+**Run it the same evening.** The RDB holds today only, and after kdb's
+midnight rollover it holds the new day. A no-argument run then finds no
+print at all and stops:
+
+```
+XX  qatt returned no prints at all for 2026-09-29 on QATT_RDB_SERVER (kdb-host:5012); no zip written. After midnight the RDB holds the new day: use --date 2026-09-29
+```
+
+To redo a day the next morning, use `--date` with that day.
 
 The exit status is 0 when the zip was written, 1 when the run stopped, and 2
 for a bad argument or setting.
@@ -273,8 +289,14 @@ A market whose `no-closing-trade` equals its `ticks` has closing trades
 under a code that is not in `close_conditions.csv`.
 
 The run stops with `XX` and writes no zip when kdb fails, when qatt has no
-partition on or before `--date`, or when equity_master returns no row at all
-for the reference fetch.
+partition on or before `--date`, when equity_master returns no row at all
+for the reference fetch, when qatt has no print at all for the whole day
+(the staging folder is left as it is), or when a no-argument run falls on a
+Saturday or a Sunday:
+
+```
+XX  today, 2026-09-26, is a Saturday: the RDB holds no trading day. Use --date YYYY-MM-DD for the day you want
+```
 
 Before any market, step 2 checks that the `qatt` table is on the qatt
 connection and the `quote` table on the quote connection (`tables[]`). If
@@ -313,7 +335,13 @@ Those usually come from a malformed BloombergCode in the CrossCode.
    If it names another column, set `TIME_FIELD` in `Phase1/AB/qattsource.py`
    to it. The manifest's `time column` records what each zip used.
 
-2. **The close codes.** Run once with `--date` on a normal trading day and
+2. **The quote-only time.** A quote-only line takes its time from the
+   `quote` table's `time` column, while the ticks use `TIME_FIELD`
+   (`tradeTime`). On the first live day, check that both are in the same
+   clock: compare a quote-only sym's time with the ticks of a sym that
+   traded around then.
+
+3. **The close codes.** Run once with `--date` on a normal trading day and
    read the summary. Every market should have most of its `ticks` in `qatt`.
    A market with a large `no-closing-trade` count has closing trades whose
    condition is not in `config/close_conditions.csv`: look at that market's
