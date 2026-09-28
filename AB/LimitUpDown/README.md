@@ -641,6 +641,14 @@ As shipped, every venue with tiers asks **except Indonesia**. Thailand and
 India are `Source=bloomberg` and never reach the fallback at all, so their
 column is blank too.
 
+### Japan: a leveraged product DOES get the venue's band
+
+The TSE's limit table has no leverage adjustment, so `markets.csv` sets
+`LeveragedBand=ordinary` on the three Japanese venues: `1570 JT` (Nikkei 2x)
+is priced off the same table as `7203 JT`. Blank — every other venue — keeps
+the rule below, which is Korea's. The 2026-09-28 run excluded about fifty
+Japanese ETFs before this.
+
 ### A leveraged product does not get the venue's band
 
 `bands.csv` has a `NameMarker` column. A row carrying one applies only to

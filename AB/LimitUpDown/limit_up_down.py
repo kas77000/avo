@@ -851,6 +851,9 @@ def _uncovered(cfg, r, name: str) -> bool:
 
     Asked of the tiers rather than of a list kept here, so the answer is
     whatever bands.csv says and the two cannot drift apart."""
+    #  A venue whose exchange gives these names the ordinary band - Japan.
+    if cfg.venues[r.venue_id].leveraged_band == "ordinary":
+        return False
     markers = [t.name_marker for t in cfg.bands.get(r.venue_id, ())
                if t.name_marker]
     multiple = bands.multiple_in(name)
@@ -2486,6 +2489,35 @@ def self_test() -> int:
            if r["BloombergCode"] == "005930 KP"], [("10420", "5620")])
     check("nothing is excluded now that the band is written down",
           lev_exc, [])
+
+    #  Real names off the 2026-09-28 run's excluded.csv.
+    print("\nJapan gives a leveraged ETF the ordinary band; Korea does not")
+    jp_lev = row("1570.T", "1570 JT", "1570.JP", "TYO-MAIN")
+    jp_out, jp_exc = price_computed(
+        cfg, [jp_lev], {"1570.T": Decimal("3133")}, {},
+        {"1570.T": "NEXT FUNDS Nikkei 225 Leveraged Index Exchange Traded "
+                   "Fund"})
+    check("1570 JT, a 2x Nikkei ETF, is priced off the TSE table like any "
+          "name - LeveragedBand=ordinary, because the TSE has no leverage "
+          "adjustment",
+          ([(r["LimitUpPrice"], r["LimitDownPrice"]) for r in jp_out],
+           jp_exc), ([("3833", "2433")], []))
+    kr = row("X.KS", "X KP", "X.KR", "KSC-MAIN")
+    check("Korea still refuses a name it has no row for - 230480 KP's "
+          "truncated 'Inver' cannot say its multiple",
+          _uncovered(cfg, kr, "Kiwoom KOSEF USD Futures Inver"), True)
+    check("but 'Leveraged' is a row now, at 2x - 580047 KP",
+          (_uncovered(cfg, kr, "KB Securities KB Leveraged Hang Seng TECH "
+                               "Futures ETN H B 47"),
+           bands.select_tier(cfg.bands["KSC-MAIN"], "580047", Decimal(1000),
+                             "KB Leveraged Hang Seng").multiple),
+          (False, Decimal(2)))
+    check("and so is 1.5x, at 1.5 times the 30% - 520076 KP",
+          (_uncovered(cfg, kr, "MiraeAsset Securities Miraeasset 1.5X "
+                               "Natural Gas Futures ETN 91"),
+           bands.select_tier(cfg.bands["KSC-MAIN"], "520076", Decimal(1000),
+                             "Miraeasset -1.5X Natural Gas").multiple),
+          (False, Decimal("1.5")))
 
     #  THE MULTIPLE IS THE SIGNAL, NOT THE WORD "INVERSE".  Real names, as
     #  a run's excluded.csv listed them: a -1x product moves like any other
