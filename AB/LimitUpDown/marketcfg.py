@@ -204,7 +204,10 @@ def load(config_dir, tsr_dir=None) -> Config:
         #  BLANK MEANS DROP, and that is the safe default on purpose: a
         #  venue only asks Bloomberg for its missing closes when someone
         #  has written it down.  Indonesia deliberately does not use it.
+        #  "None" says the same as blank, written out for whoever reads the
+        #  file next.
         fallback = (r.get("NoCloseFallback") or "").strip().lower()
+        fallback = "" if fallback == "none" else fallback
         if fallback and fallback not in VALID_FALLBACK:
             raise ConfigError(
                 f"markets.csv {vid}: NoCloseFallback {fallback!r} is not "
@@ -240,6 +243,7 @@ def load(config_dir, tsr_dir=None) -> Config:
         #  no tiers is a half-finished edit, exactly like Source=computed
         #  with no tiers.
         no_data = (r.get("NoDataFallback") or "").strip().lower()
+        no_data = "" if no_data == "none" else no_data
         if no_data and no_data not in VALID_NO_DATA:
             raise ConfigError(
                 f"markets.csv {vid}: NoDataFallback {no_data!r} is not one "
@@ -489,6 +493,15 @@ def self_test() -> int:
                        bd=BD))
         check("a venue that HAS tiers may name it",
               c.venues["JKT-MAIN"].no_data_fallback, "computed")
+    NONE_HDR = ("Country,FidessaVenueID,Time,Source,TickSource,MinPrice,"
+                "Rounding,ExcludeFile,NoCloseFallback,NoDataFallback\n")
+    with tempfile.TemporaryDirectory() as d:
+        c = load(write(d, mk=NONE_HDR + "Indonesia,JKT-MAIN,07:59:00,"
+                       "computed,spol_JKT.tsr,50,inward,,None,None\n"))
+        check("None turns BOTH fallbacks off, exactly as blank does - a "
+              "computed name with no close is dropped, not asked",
+              (c.venues["JKT-MAIN"].no_close_fallback,
+               c.venues["JKT-MAIN"].no_data_fallback), ("", ""))
     real = load(Path(__file__).resolve().parent / "config",
                 Path(__file__).resolve().parent / "config")
     check("EVERY SHIPPED VENUE WITH TIERS SETS IT - the config asks "

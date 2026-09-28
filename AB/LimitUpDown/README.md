@@ -308,6 +308,22 @@ python limit_up_down.py --venues KSC-MAIN  one venue, or several, pipe separated
 python limit_up_down.py "" --compute "TYO-MAIN|KSC-MAIN"   compute only these
 ```
 
+### Turning a fallback off
+
+Two columns in `markets.csv`, one per direction, and each is per venue:
+
+| column | used when the venue is | on | off |
+|---|---|---|---|
+| `NoCloseFallback` | `computed` — a name with no close in equity_master | `bloomberg` | blank or `None` |
+| `NoDataFallback` | `bloomberg` — a name B-PIPE will not price | `computed` | blank or `None` |
+
+Off means the name is dropped and reported in `excluded.csv`. So a market
+that is computed with no Bloomberg at all is:
+
+```
+Japan,TYO-MAIN,JP,07:30:00,computed,,1,,,None,,None
+```
+
 ### Choosing which markets compute, for one run
 
 `--compute` names the venues to compute, by FidessaMarket, and every other
