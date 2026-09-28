@@ -51,6 +51,7 @@ python extract.py --date 2026-09-25          that day, from the HDB
 python extract.py --date 2026-09-25 --rdb    that day, read from the RDB
 python extract.py --log C:\path\to\logs\extract.log
 python extract.py --fresh                    the day again, from scratch
+python extract.py --market "NZ|HK"           only those markets, read again
 ```
 
 - **No argument:** the trade date is today, and qatt and quote are read from
@@ -83,6 +84,34 @@ python extract.py --fresh                    the day again, from scratch
   `rdb`, so a later `--date` run of the same day (HDB) starts that day
   fresh, and a rerun of the same `--date --rdb` resumes.
 - **`--rdb` alone** is the same as no argument.
+- **`--market CODES`:** one Bloomberg exchange code, or several joined by
+  `|` (quote it: `--market "NZ|HK"`), upper-cased, as in Nova's
+  `historical.r --market`. Each must be a code of `close_conditions.csv`,
+  or the run stops with `XX` before asking kdb anything. Only those markets
+  are read, and each is **read again** even if already staged: its three
+  files are set aside first (the ticks file first, so a crash leaves the
+  market "not done"). The other markets are not touched. Everything before
+  the markets (the universe, master, equity, px, ladders and `stage.csv`)
+  still covers the full universe, so `--market` never restarts a staged
+  day. It combines with `--date`, `--rdb` and `--fresh`. With `--fresh`,
+  every market is reset and only the selected ones are read. Step 1 logs
+  the selection:
+
+  ```
+  ..  --market                NZ|HK   2 of 18 markets this run
+  ```
+
+  **No zip until every market is staged.** After the markets, the zip is
+  written only if every market of the universe has its three files. If any
+  are missing, the run ends (exit 0) with
+
+  ```
+  ..  16 markets still to do (AT, C1, ...); no zip yet - run without --market to finish them
+  ```
+
+  and a run without `--market` reads just those and writes the zip. On a
+  fully staged day, `--market` re-reads those markets and rebuilds the
+  zip, replacing the day's zip.
 - **`--log FILE`:** also appends the log to FILE. Each run starts with a
   `=== YYYY-MM-DD HH:MM:SS ===` line.
 - **`--fresh`:** moves the day's staging folder aside first, so everything

@@ -57,6 +57,7 @@ day.  The zip is written as
     python extract.py --date 2026-09-25 --rdb   that day's zip, read from
                                           the RDB (just after midnight)
     python extract.py --fresh             the day again, from scratch
+    python extract.py --market "NZ|HK"    only those markets, read again
     python extract.py --log extract.log   tee the log to a file
     python extract.py --self-test         checks, no kdb
 """
@@ -365,6 +366,21 @@ def set_aside(stage, log) -> None:
                  f"delete it by hand")
 
 
+def parse_markets(text) -> list:
+    """--market's value: codes joined by |, trimmed, upper-cased, each once,
+    as Nova's historical.r --market takes them."""
+    out = []
+    for c in (text or "").split("|"):
+        c = c.strip().upper()
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
+def market_done(files) -> bool:
+    return all(f.exists() for f in files)
+
+
 def any_print(stage, mkts) -> bool:
     """Whether any market's staged ticks file has a print under its
     header - done now or by an earlier run alike."""
@@ -562,7 +578,7 @@ def read_quotes(conns, qday, syms, log) -> dict:
 
 
 def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
-          fresh=False, rdb=False):
+          fresh=False, rdb=False, only=None):
     """Stage the day market by market, then write
     EXPORT_DIR/phase1-YYYYMMDD.zip, and return its path.
 
@@ -577,7 +593,12 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     RESUMABLE.  Every file goes to EXPORT_DIR/phase1-YYYYMMDD/ as soon as it
     is ready.  master, equity and ladders already there are read back, not
     fetched; a market whose three files are there is skipped.  `fresh`
-    deletes the folder first.  Raises ExtractError, or whatever kdb raised,
+    deletes the folder first.
+
+    `only` (--market) is a list of exchange codes: only those markets are
+    read, each REDONE even if staged; the rest are not touched.  Everything
+    before the markets stays on the full universe.  The zip is written only
+    once every market is staged; until then build returns None.  Raises ExtractError, or whatever kdb raised,
     and then no zip is written; what was staged stays for the rerun."""
     today = today or dt.date.today()
     if markets is None:
@@ -587,6 +608,11 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
             HERE / "config" / "close_conditions.csv")
     q_name, source = qatt_server(date, rdb)
     em = conns["em"]
+    if only:
+        unknown = [c for c in only if c not in conditions]
+        if unknown:
+            raise ExtractError(f"--market {'|'.join(unknown)}: not an "
+                               f"exchange code of close_conditions.csv")
     #  How each connection is named in an error: the setting, and in a real
     #  run its host:port.  Quote is qatt's unless a quote server is set.
     names = {"qatt": q_name, "quote": q_name, **conns.get("names", {})}
@@ -613,6 +639,9 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     if not rows:
         raise ExtractError("no CrossCode row is ours: none has an exchange "
                            "code of close_conditions.csv")
+    if only:
+        log.kv("--market", "|".join(only),
+               f"{len(only)} of {len(conditions)} markets this run")
 
     log.step(2, f"qatt, from the {source.upper()}")
     require_table(conns["qatt"], "qatt", names["qatt"],
@@ -797,12 +826,24 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
 
     n = int(cfg["SYM_CHUNK"])
     size = {"n": n}                 # the halved read size, for every market
-    for step, mkt in enumerate(sorted(by_market), 1):
+    todo = [m for m in sorted(by_market) if not only or m in only]
+    for c in only or []:
+        if c not in by_market:
+            log.info(f"--market {c}: no sym of the universe is in it")
+    for step, mkt in enumerate(todo, 1):
         msyms = by_market[mkt]
         log.step(f"5.{step}",
                  f"market {mkt}, {logs.thousands(len(msyms))} syms")
         files = market_files(stage, mkt)
-        if all(f.exists() for f in files):
+        old = [f.with_name(f.name + ".old") for f in files]
+        if only:
+            #  REDO IT.  Set its files aside, ticks first, so a crash from
+            #  here leaves the market "not done"; renamed, not deleted,
+            #  because a network share keeps a deleted name busy.
+            for f, o in zip(files, old):
+                if f.exists():
+                    os.replace(f, o)
+        elif market_done(files):
             if {r["sym"] for r in read_csv(files[1])} == set(msyms):
                 log.info(f"{mkt} done already, skipped")
                 continue
@@ -864,6 +905,11 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                       ([c.sym, c.close, c.source, c.reason] for c in got))
             write_csv(files[2], QUOTE_COLUMNS, quote_rows)
             os.replace(parts[0], files[0])          # last: the market is done
+            for o in old:
+                try:
+                    o.unlink()
+                except OSError:
+                    pass
         except BaseException:
             for p in parts:
                 if p.exists():
@@ -876,6 +922,15 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                f"{sum(c.source == 'equity_master' for c in got):,}, "
                f"no close {sum(c.reason == 'no-close' for c in got):,}, "
                f"quote-only {len(quote_rows):,}")
+
+    #  NO ZIP UNTIL EVERY MARKET IS STAGED: a --market run may leave some.
+    missing = [m for m in sorted(by_market)
+               if not market_done(market_files(stage, m))]
+    if missing:
+        log.info(f"{len(missing)} markets still to do "
+                 f"({', '.join(missing)}); no zip yet - run without "
+                 f"--market to finish them")
+        return None
 
     #  A WHOLE DAY WITH NO PRINT IS THE WRONG DAY, not a quiet one: the RDB
     #  on a weekend, or after kdb's midnight rollover.  Nova would write a
@@ -925,6 +980,10 @@ def main(argv=None, today=None) -> int:
                         "of the HDB (e.g. just after midnight, while the "
                         "RDB still holds it); alone, the same as no "
                         "argument")
+    p.add_argument("--market", default="",
+                   help="only these exchange codes this run, joined by | "
+                        "(e.g. \"NZ|HK\"): each is read again; the zip is "
+                        "written once every market is staged")
     p.add_argument("--log", default="", help="tee the log to this file")
     p.add_argument("--fresh", action="store_true",
                    help="delete the day's staging folder and start over")
@@ -977,7 +1036,7 @@ def main(argv=None, today=None) -> int:
             conns["quote_reconnect"] = lambda: connect_again(
                 u_host, u_port, log)
         build(cfg, date, conns, log, today=today, fresh=a.fresh,
-              rdb=a.rdb)
+              rdb=a.rdb, only=parse_markets(a.market) or None)
     except ExtractError as e:
         log.fail(str(e))
         log.fail("no zip written")
@@ -1238,7 +1297,7 @@ def self_test() -> int:
 
     def run(tmp, date, em=None, qatt=None, quote=None, log=None,
             fresh=False, cc_text=CROSSCODE, extra=None, conds=None,
-            reconnect=None, rdb=False):
+            reconnect=None, rdb=False, only=None):
         cc = Path(tmp) / "CrossCode.csv"
         cc.write_text(cc_text, encoding="utf-8")
         cfg = dict(settings.DEFAULTS, CROSSCODE_PATH=str(cc),
@@ -1249,7 +1308,7 @@ def self_test() -> int:
         return build(cfg, date, conns, log or Caught(), today=D(2026, 9, 28),
                      markets=markets,
                      conditions=conditions if conds is None else conds,
-                     fresh=fresh, rdb=rdb)
+                     fresh=fresh, rdb=rdb, only=only)
 
     def members(path):
         with zipfile.ZipFile(path) as z:
@@ -1661,6 +1720,72 @@ def self_test() -> int:
               ["7203.JP", "8888.HK", "8889.HK", "AIA.NZ", "QQQ.XX",
                "ZZZ.XX"])
         check("and gives the same zip", same(members(out)), whole)
+
+    print("\n--market: some markets this run")
+    check("the codes are split on |, trimmed and upper-cased",
+          parse_markets("nz| HK|nz"), ["NZ", "HK"])
+    with tempfile.TemporaryDirectory() as tmp:
+        em, qatt = FakeEm(), FakeQatt()
+        err = attempt(lambda: run(tmp, D(2026, 9, 25), em=em, qatt=qatt,
+                                  only=["NZ", "ZZ"]))
+        check("a code not in close_conditions.csv stops the run, before "
+              "kdb is asked anything",
+              (str(err), em.asked, qatt.asked),
+              ("--market ZZ: not an exchange code of close_conditions.csv",
+               [], []))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        outdir = Path(tmp) / "out"
+        stage = outdir / "phase1-20260925"
+        qatt, log = FakeQatt(), Caught()
+        out = run(tmp, D(2026, 9, 25), qatt=qatt, log=log,
+                  only=["HK", "NZ"])
+        check("a --market run on a fresh day stages only those markets",
+              (sorted(p.name for p in stage.glob("ticks-*.csv")),
+               sorted(set(qatt.syms))),
+              (["ticks-HK.csv", "ticks-NZ.csv"],
+               ["8888.HK", "8889.HK", "AIA.NZ"]))
+        check("and writes no zip, saying what is left",
+              (out, sorted(p.name for p in outdir.glob("*.zip*")),
+               [ln for ln in log.lines if "still to do" in ln]),
+              (None, [], ["..  2 markets still to do (JT, XX); no zip yet - "
+                          "run without --market to finish them"]))
+        check("the selection is logged in step 1",
+              [ln for ln in log.lines if ln.startswith("..  --market")],
+              ["..  --market                HK|NZ   2 of 5 markets this run"])
+        fingerprint = (stage / STAGE).read_text("utf-8")
+
+        qatt, log = FakeQatt(), Caught()
+        out = run(tmp, D(2026, 9, 25), qatt=qatt, log=log)
+        check("the next run without --market reads only the others",
+              sorted(set(qatt.syms)), ["7203.JP", "QQQ.XX", "ZZZ.XX"])
+        check("and writes the zip a single full run writes",
+              same(members(out)), whole)
+
+        qatt, log = FakeQatt(), Caught()
+        out = run(tmp, D(2026, 9, 25), qatt=qatt, log=log, only=["JT"])
+        check("--market on a fully staged day re-reads only that market",
+              sorted(set(qatt.syms)), ["7203.JP"])
+        check("and rebuilds the zip", (out and out.name,
+                                       same(members(out))),
+              ("phase1-20260925.zip", whole))
+        check("no .old or .part is left from the redo",
+              sorted(p.name for p in stage.iterdir()
+                     if p.suffix in (".old", ".part")), [])
+        check("the fingerprint is the full universe's, whatever --market "
+              "says: stage.csv is unchanged and nothing restarted",
+              ((stage / STAGE).read_text("utf-8") == fingerprint,
+               any("staged folder was built" in ln for ln in log.lines)),
+              (True, False))
+
+        qatt, log = FakeQatt(), Caught()
+        out = run(tmp, D(2026, 9, 25), qatt=qatt, log=log, only=["XX"],
+                  fresh=True)
+        check("--fresh with --market resets every market and reads only "
+              "the selected: no zip until a full run",
+              (out, sorted(set(qatt.syms)),
+               sorted(p.name for p in stage.glob("ticks-*.csv"))),
+              (None, ["QQQ.XX", "ZZZ.XX"], ["ticks-XX.csv"]))
 
     print("\nresuming only what is still valid")
     with tempfile.TemporaryDirectory() as tmp:
