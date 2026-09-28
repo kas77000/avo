@@ -48,6 +48,7 @@ extract.py -> phase1-YYYYMMDD.zip  ---------------------->  run_phase1.cmd <zip>
 ```
 python extract.py                            today, from the RDB
 python extract.py --date 2026-09-25          that day, from the HDB
+python extract.py --date 2026-09-25 --rdb    that day, read from the RDB
 python extract.py --log C:\path\to\logs\extract.log
 python extract.py --fresh                    the day again, from scratch
 ```
@@ -57,6 +58,31 @@ python extract.py --fresh                    the day again, from scratch
   with `XX`: use `--date YYYY-MM-DD` for the day you want.
 - **`--date YYYY-MM-DD`:** the newest qatt partition on or before that
   date, from the HDB (`QATT_SERVER`). Use it to redo a past day.
+- **`--date YYYY-MM-DD --rdb`:** the zip and the staging folder are named
+  for that date, but qatt and quote are read from the **RDB**
+  (`QATT_RDB_SERVER`, `QUOTE_RDB_SERVER`, blank meaning qatt's) with the
+  undated queries, exactly as a no-argument run reads them. There is no
+  partition list and no weekend stop. Use it when the day is over but not
+  yet in the HDB, for example just after midnight while the RDB still holds
+  it, or when a no-argument run was missed.
+
+  **The risk:** the RDB holds one day, whatever day that is, and those
+  prints are filed under the date you gave. The run asks the RDB for its
+  `.z.D` and logs it:
+
+  ```
+  ..  RDB date                2026-09-25   asked for 2026-09-25
+  !!  the RDB is on 2026-09-26, not 2026-09-25: the prints are whatever day the RDB holds, filed under 2026-09-25
+  ```
+
+  A mismatch does not stop the run. Read the `!!` line: if the RDB has
+  already rolled over, do not copy that zip to Nova. Run `--date` without
+  `--rdb` once the HDB has the day; it starts the day fresh and replaces
+  the zip. If the RDB holds no print at all, the run stops with
+  `XX` (no zip) and says to read the HDB instead. Its staging is marked
+  `rdb`, so a later `--date` run of the same day (HDB) starts that day
+  fresh, and a rerun of the same `--date --rdb` resumes.
+- **`--rdb` alone** is the same as no argument.
 - **`--log FILE`:** also appends the log to FILE. Each run starts with a
   `=== YYYY-MM-DD HH:MM:SS ===` line.
 - **`--fresh`:** moves the day's staging folder aside first, so everything

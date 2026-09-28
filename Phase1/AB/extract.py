@@ -54,6 +54,8 @@ day.  The zip is written as
 
     python extract.py                     today, from the RDB
     python extract.py --date 2026-09-25   that day, from the HDB
+    python extract.py --date 2026-09-25 --rdb   that day's zip, read from
+                                          the RDB (just after midnight)
     python extract.py --fresh             the day again, from scratch
     python extract.py --log extract.log   tee the log to a file
     python extract.py --self-test         checks, no kdb
@@ -116,16 +118,42 @@ def bundle_name(date) -> str:
     return f"phase1-{date:%Y%m%d}.zip"
 
 
-def qatt_server(date):
-    """(setting, source) for qatt and quote: the RDB for today, the HDB for
-    a --date."""
-    return ("QATT_SERVER", "hdb") if date else ("QATT_RDB_SERVER", "rdb")
+def qatt_server(date, rdb=False):
+    """(setting, source) for qatt and quote: the RDB for today or with
+    --rdb, the HDB for a --date."""
+    return (("QATT_SERVER", "hdb") if date and not rdb
+            else ("QATT_RDB_SERVER", "rdb"))
 
 
-def quote_server(date) -> str:
+def quote_server(date, rdb=False) -> str:
     """The setting for the quote table's own process, for the same mode as
     qatt_server.  Blank in local_settings.py means qatt's server."""
-    return "QUOTE_SERVER" if date else "QUOTE_RDB_SERVER"
+    return "QUOTE_SERVER" if date and not rdb else "QUOTE_RDB_SERVER"
+
+
+#  The RDB's own date: what day it holds.  A plain expression.
+ZD_Q = ".z.D"
+
+
+def rdb_date(conn, day, where, log):
+    """Log the RDB's .z.D next to the day asked for; a different one is a
+    !! line, never a stop - with --date --rdb the user chose to read the
+    RDB.  Returns .z.D, or None when it cannot be read."""
+    try:
+        zd = qattsource._as_date(conn(ZD_Q))
+    except Exception as e:                                  # noqa: BLE001
+        zd, why = None, f"{type(e).__name__}: {str(e)[:80]}"
+    else:
+        why = "not a date"
+    if zd is None:
+        log.warn(f"could not read the RDB's .z.D on {where} ({why}); "
+                 f"going on")
+        return None
+    log.kv("RDB date", str(zd), f"asked for {day}")
+    if zd != day:
+        log.warn(f"the RDB is on {zd}, not {day}: the prints are whatever "
+                 f"day the RDB holds, filed under {day}")
+    return zd
 
 
 #  One cheap question, asked once per connection before any market: is the
@@ -534,11 +562,12 @@ def read_quotes(conns, qday, syms, log) -> dict:
 
 
 def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
-          fresh=False):
+          fresh=False, rdb=False):
     """Stage the day market by market, then write
     EXPORT_DIR/phase1-YYYYMMDD.zip, and return its path.
 
-    `date` None is today from the RDB; a date is the HDB.  `conns` holds
+    `date` None is today from the RDB; a date is the HDB, or with `rdb`
+    that date's zip from the RDB's undated queries.  `conns` holds
     the open connections - "em" for equity_master and the ladders, "qatt"
     for the prints, "quote" for the quotes (qatt's when absent) - and
     "reconnect" / "quote_reconnect", which open fresh ones, and "names",
@@ -556,7 +585,7 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     if conditions is None:
         conditions = closes.load_conditions(
             HERE / "config" / "close_conditions.csv")
-    q_name, source = qatt_server(date)
+    q_name, source = qatt_server(date, rdb)
     em = conns["em"]
     #  How each connection is named in an error: the setting, and in a real
     #  run its host:port.  Quote is qatt's unless a quote server is set.
@@ -590,9 +619,15 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                   "QATT_RDB_SERVER / QATT_SERVER", log)
     require_table(conns.get("quote") or conns["qatt"], "quote",
                   names["quote"], "QUOTE_RDB_SERVER / QUOTE_SERVER", log)
+    zd = None
     if source == "rdb":
-        day = today
-        log.kv("day", str(day), "today")
+        #  --date D --rdb: D names the day, and stands for today in the
+        #  equity_master lookup; the RDB is read as it is.
+        day = date or today
+        today = day
+        log.kv("day", str(day), "given, read from the RDB" if date
+               else "today")
+        zd = rdb_date(conns["qatt"], day, names["qatt"], log)
     else:
         parts = qattsource.partitions(conns["qatt"])
         day = pick_day(parts, today, date)
@@ -846,8 +881,15 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     #  on a weekend, or after kdb's midnight rollover.  Nova would write a
     #  permanent no-trading day for every name.  The staging is kept.
     if not any_print(stage, sorted(by_market)):
-        hint = (f". After midnight the RDB holds the new day: use --date "
-                f"{day}" if source == "rdb" else "")
+        if source == "rdb" and date:
+            hint = (f". The RDB is on {zd or 'an unknown day'}, so it may "
+                    f"no longer hold {day}: run --date {day} without --rdb "
+                    f"to read the HDB")
+        elif source == "rdb":
+            hint = (f". After midnight the RDB holds the new day: use "
+                    f"--date {day}")
+        else:
+            hint = ""
         raise ExtractError(f"qatt returned no prints at all for {day} on "
                            f"{names['qatt']}; no zip written{hint}")
 
@@ -878,6 +920,11 @@ def main(argv=None, today=None) -> int:
     p.add_argument("--date", default="",
                    help="YYYY-MM-DD: that day from the HDB, instead of "
                         "today from the RDB")
+    p.add_argument("--rdb", action="store_true",
+                   help="with --date: read that day from the RDB instead "
+                        "of the HDB (e.g. just after midnight, while the "
+                        "RDB still holds it); alone, the same as no "
+                        "argument")
     p.add_argument("--log", default="", help="tee the log to this file")
     p.add_argument("--fresh", action="store_true",
                    help="delete the day's staging folder and start over")
@@ -892,8 +939,8 @@ def main(argv=None, today=None) -> int:
     except ValueError:
         print(f"FAIL  --date {a.date!r} is not YYYY-MM-DD", file=sys.stderr)
         return 2
-    q_name, source = qatt_server(date)
-    u_name = quote_server(date)
+    q_name, source = qatt_server(date, a.rdb)
+    u_name = quote_server(date, a.rdb)
     try:
         cfg = settings.load()
         settings.require(cfg, "CROSSCODE_PATH", "EXPORT_DIR")
@@ -929,7 +976,8 @@ def main(argv=None, today=None) -> int:
             conns["quote"] = qattsource.connect(u_host, u_port)
             conns["quote_reconnect"] = lambda: connect_again(
                 u_host, u_port, log)
-        build(cfg, date, conns, log, today=today, fresh=a.fresh)
+        build(cfg, date, conns, log, today=today, fresh=a.fresh,
+              rdb=a.rdb)
     except ExtractError as e:
         log.fail(str(e))
         log.fail("no zip written")
@@ -1120,8 +1168,10 @@ def self_test() -> int:
 
     class FakeQatt:
         def __init__(self, fail=False, fail_on=(), parts=None,
-                     max_syms=None, tables=("qatt",), empty=False):
+                     max_syms=None, tables=("qatt",), empty=False,
+                     zd=D(2026, 9, 28)):
             self.asked, self.fail, self.fail_on = [], fail, set(fail_on)
+            self.zd = zd                # the RDB's .z.D; None cannot say
             self.empty = empty          # no print at all, as a wrong day
             self.tables = list(tables)
             self.syms, self.sizes, self.max_syms = [], [], max_syms
@@ -1131,6 +1181,10 @@ def self_test() -> int:
             self.asked.append(q)
             if q == TABLES_Q:
                 return self.tables
+            if q == ZD_Q:
+                if self.zd is None:
+                    raise RuntimeError("'.z.D")
+                return self.zd
             if q == qattsource.PARTITIONS_Q:
                 return self.parts
             if q == qattsource.COLUMNS_Q:
@@ -1184,7 +1238,7 @@ def self_test() -> int:
 
     def run(tmp, date, em=None, qatt=None, quote=None, log=None,
             fresh=False, cc_text=CROSSCODE, extra=None, conds=None,
-            reconnect=None):
+            reconnect=None, rdb=False):
         cc = Path(tmp) / "CrossCode.csv"
         cc.write_text(cc_text, encoding="utf-8")
         cfg = dict(settings.DEFAULTS, CROSSCODE_PATH=str(cc),
@@ -1195,7 +1249,7 @@ def self_test() -> int:
         return build(cfg, date, conns, log or Caught(), today=D(2026, 9, 28),
                      markets=markets,
                      conditions=conditions if conds is None else conds,
-                     fresh=fresh)
+                     fresh=fresh, rdb=rdb)
 
     def members(path):
         with zipfile.ZipFile(path) as z:
@@ -1415,16 +1469,18 @@ def self_test() -> int:
                  ("quote-host", 3): FakeQuote()}
         saved = qattsource.connect, settings.load
 
-        def main_with(quote_rdb, argv=(), today=D(2026, 9, 28)):
+        def main_with(quote_rdb, argv=(), today=D(2026, 9, 28), hdb=None):
             cfg = dict(settings.DEFAULTS, CROSSCODE_PATH=str(cc),
                        EXPORT_DIR=str(Path(tmp) / "out"),
                        EQUITY_MASTER_SERVER="em-host:1",
                        QATT_RDB_SERVER="qatt-host:2",
                        QUOTE_RDB_SERVER=quote_rdb,
                        QATT_SERVER="qatt-host:2", QUOTE_SERVER=quote_rdb)
+            cfg.update(hdb or {})
             settings.load = lambda: cfg
             qattsource.connect = lambda h, p: fakes[(h, int(p))]
-            logfile = Path(tmp) / f"run{len(quote_rdb)}-{today}.log"
+            logfile = Path(tmp) / (f"run{len(quote_rdb)}-{today}-"
+                                   f"{'_'.join(argv)}.log")
             try:
                 with contextlib.redirect_stdout(io.StringIO()), \
                         contextlib.redirect_stderr(io.StringIO()):
@@ -1465,6 +1521,84 @@ def self_test() -> int:
         rc, text = main_with("quote-host:3", ["--date", "2026-09-25"],
                              today=D(2026, 9, 26))
         check("--date on a Saturday goes through", rc, 0)
+
+        print("\nmain: --date with --rdb")
+        fakes[("hdb-host", 4)] = FakeQatt()
+        fakes[("hdbq-host", 5)] = FakeQuote()
+        for f in fakes.values():
+            f.asked.clear()
+        hdb = {"QATT_SERVER": "hdb-host:4", "QUOTE_SERVER": "hdbq-host:5"}
+        rc, text = main_with("quote-host:3", ["--date", "2026-09-25",
+                                              "--rdb"], hdb=hdb)
+        out = Path(tmp) / "out"
+        check("--date D --rdb goes through", rc, 0)
+        check("the zip and the staging folder are named D",
+              ((out / "phase1-20260925.zip").exists(),
+               read_csv(out / "phase1-20260925" / STAGE)[0]["value"]),
+              (True, "rdb"))
+        check("the manifest says rdb",
+              dict(r.split(",", 1) for r in members(
+                  out / "phase1-20260925.zip")[MANIFEST][1:])["source"],
+              "rdb")
+        check("qatt and quote are asked on the RDB connections, undated, "
+              "with no partition list",
+              (sorted({q for q in fakes[("qatt-host", 2)].asked
+                       if "from qatt" in q}),
+               qattsource.PARTITIONS_Q in fakes[("qatt-host", 2)].asked,
+               {q for q, _a in fakes[("quote-host", 3)].asked}),
+              ([qattsource.live_ticks_q(None, ["sym", T, "price", "size",
+                                               "cond", "ex"])],
+               False, {refdata.QUOTE_RDB_Q}))
+        check("and the HDB ones are never asked anything",
+              (fakes[("hdb-host", 4)].asked, fakes[("hdbq-host", 5)].asked),
+              ([], []))
+        check("the RDB's .z.D is logged next to D",
+              "..  RDB date                2026-09-28   asked for 2026-09-25"
+              in text, True)
+        check("and a mismatch is a !! line, not a stop",
+              "!!  the RDB is on 2026-09-28, not 2026-09-25: the prints are "
+              "whatever day the RDB holds, filed under 2026-09-25" in text,
+              True)
+        rc, text = main_with("quote-host:3", ["--date", "2026-09-26",
+                                              "--rdb"], hdb=hdb)
+        check("a weekend D with --rdb is allowed",
+              (rc, (out / "phase1-20260926.zip").exists()), (0, True))
+        rc, text = main_with("quote-host:3", ["--rdb"], hdb=hdb)
+        check("--rdb alone is a no-argument run: today, from the RDB - it "
+              "resumes the no-argument run's staging of 2026-09-28",
+              (rc, "done already, skipped" in text,
+               "staged folder was built" in text), (0, True, False))
+        rc, text = main_with("quote-host:3", ["--rdb"], hdb=hdb,
+                             today=D(2026, 9, 27))
+        check("so on a Sunday it stops as a no-argument run does",
+              (rc, "is a Sunday" in text), (1, True))
+
+    print("\nbuild: --date with --rdb")
+    with tempfile.TemporaryDirectory() as tmp:
+        qatt, quote, log, em = (FakeQatt(zd=D(2026, 9, 25)), FakeQuote(),
+                                Caught(), FakeEm(client_fails=True))
+        out = run(tmp, D(2026, 9, 25), qatt=qatt, quote=quote, log=log,
+                  em=em, rdb=True)
+        check("named D, read undated from the RDB, no partition list",
+              (out.name, qattsource.PARTITIONS_Q in qatt.asked,
+               {q for q, _a in quote.asked}),
+              ("phase1-20260925.zip", False, {refdata.QUOTE_RDB_Q}))
+        check("equity_master is resolved with D as today: .z.D-0",
+              em.days_back, 0)
+        check("the same .z.D: no !! about it",
+              [ln for ln in log.lines if "the RDB is on" in ln], [])
+        log = Caught()
+        run(tmp, D(2026, 9, 25), qatt=FakeQatt(zd=None), log=log, rdb=True)
+        check("a .z.D that cannot be read is a !!, and the run goes on",
+              [ln.split(" on ")[0] for ln in log.lines if ".z.D" in ln],
+              ["!!  could not read the RDB's .z.D"])
+        err = attempt(lambda: run(tmp, D(2026, 9, 24), rdb=True,
+                                  qatt=FakeQatt(empty=True)))
+        check("no print at all with --rdb: the hint says to drop --rdb",
+              str(err).split("; no zip written")[1],
+              ". The RDB is on 2026-09-28, so it may no longer hold "
+              "2026-09-24: run --date 2026-09-24 without --rdb to read "
+              "the HDB")
 
     print("\nthe equity_master date, when the client-date query fails")
     with tempfile.TemporaryDirectory() as tmp:
