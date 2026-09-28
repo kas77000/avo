@@ -458,8 +458,8 @@ silently missing from a production feed.
   job runs pre-open and a real-time field may not have ticked yet. If
   `LAST_PRICE` turns out to be always populated at run time, tighten
   `bpipe.band_from`.
-- **A name under Rp 50 takes the lowest tier**, 35%, without the Rp 50 floor
-  that would put its down limit above its up one.
+- **A name under Rp 50 is excluded** as `minimum price above the up limit`: its
+  up limit would sit under the Rp 50 minimum, which is not a normal name.
 - **Rights are excluded** by the `Type in {Equity, ETF}` filter on CrossCode.csv,
   for every market.
 - **Write to temp, validate, then copy.**
@@ -602,10 +602,10 @@ Only Indonesia still names a `TickSource`, and that is deliberate: its ladder
 the trading system actually rounds by. A venue that names one uses it; every
 other venue asks kdb.
 
-**A name kdb has no ladder for is published unrounded** — the raw band, rather
-than no limit. The run prints an `unrounded` line with the count and the first
-few names, and `--kdb-check` fetches ladders for its sample so coverage can be
-checked in seconds rather than discovered by a live run.
+**A name kdb has no ladder for is excluded** — no ladder is not normal, and an
+unrounded limit is one the exchange rejects. The run prints the count and lists
+the first few, and `--kdb-check` fetches ladders for its sample so coverage can
+be checked in seconds rather than discovered by a live run.
 
 ### A computed name with no close falls back to Bloomberg
 
@@ -643,15 +643,16 @@ column is blank too.
 
 ### A name with a close always gets a limit
 
-A name is excluded only when **there is no close and every fallback failed**.
-Anything else takes a default rather than being dropped:
+A name is excluded when **there is no close and every fallback failed**, or
+when something about it is not normal. Otherwise a gap in our rules takes a
+default rather than a drop:
 
-| what is missing | the default |
+| | |
 |---|---|
-| a `bands.csv` row for its leverage | the venue's ordinary band |
-| a tick ladder in kdb | the band, unrounded |
-| a tier for its price | the lowest tier |
-| room for `MinPrice` under the up limit | the band without the floor |
+| no `bands.csv` row for its leverage | **default**: the venue's ordinary band |
+| no tier for its price | **default**: the lowest tier |
+| no tick ladder in kdb | **excluded**, `ladder` |
+| `MinPrice` at or above the up limit | **excluded**, `min-price` |
 
 Japan has no leverage rows at all, so `1570 JT` (Nikkei 2x) is priced off the
 same TSE table as `7203 JT` — which is the TSE's own rule.
@@ -851,7 +852,8 @@ C.JK,C IJ,JKT-MAIN,close-and-bloomberg,"no close ..., then no answer ...",
 ```
 
 **`Missing` names the input that was absent**, in one word, so the file filters
-by it — `close`, `close-and-bloomberg`, `entitlement`, `no-answer` and so on.
+by it — `close`, `close-and-bloomberg`, `ladder`, `min-price`, `entitlement`,
+`no-answer` and so on.
 The `Reason` says the same thing in prose; `Missing` is what makes "how many
 names did we lose for want of a close" a filter rather than a reading exercise.
 The run report totals the same tokens.

@@ -275,6 +275,7 @@ MISSING_TOKENS = (
     ("no tick ladder", "ladder"),
     ("no tick tier", "tick-tier"),
     ("no band tier", "band-tier"),
+    ("minimum price above", "min-price"),
     ("Security Entitlement Check Failed", "entitlement"),
     ("Bloomberg refused", "refused"),
     ("no answer from Bloomberg", "no-answer"),
@@ -952,7 +953,7 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
     floor the down leg at MinPrice, and only THEN round to the tick.
     Rounding before flooring would move prices near a tier boundary.  The
     tick too is chosen from the close, not from the limit being rounded."""
-    out, by_reason, no_tick = [], {}, []
+    out, by_reason = [], {}
     ladders = ladders or {}
     names = names or {}
 
@@ -965,8 +966,7 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
         venue = cfg.venues[r.venue_id]
         #  A LEVERAGED OR INVERSE PRODUCT takes the row bands.csv writes for
         #  it - Korea's leverage is 2x the 30% - and one with no row takes
-        #  the venue's ordinary band.  Every name with a close gets a limit;
-        #  select_tier does the choosing.
+        #  the venue's ordinary band; select_tier does the choosing.
         name = names.get(r.ric, "")
 
         ref = closes.get(r.ric)
@@ -975,21 +975,24 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
             continue
 
         tick = None
-        unrounded = False
         if venue.rounding != "none":
             #  THE VENUE'S OWN LADDER WINS, and only Indonesia has one: its
             #  .tsr IS the ATS's file, so a ladder from anywhere else could
             #  disagree with what the trading system rounds by.  Everywhere
             #  else takes the per-name ladder out of kdb's ticksizeids /
             #  ticksizetbl - the same two tables blp_lib.q rounds by.
+            #
+            #  NO LADDER IS NOT NORMAL, so the name is excluded rather than
+            #  published on no tick.
             ladder = cfg.ticks.get(r.venue_id) or ladders.get(r.ric)
-            at_ref = ticks.tick_for(ladder, ref) if ladder else None
+            if not ladder:
+                drop("no tick ladder for this name", r, f"close {ref}")
+                continue
+            at_ref = ticks.tick_for(ladder, ref)
             if at_ref is None:
-                #  NO TICK TO ROUND ON: the raw band is published rather
-                #  than no band, and counted so the run says how many.
-                unrounded = True
-                no_tick.append(f"{r.ric} ({r.bbg})")
-        if venue.rounding != "none" and not unrounded:
+                drop("no tick tier for the previous close", r, f"price {ref}")
+                continue
+
             #  THE COARSER OF THE TWO TICKS: the one at the close, and the
             #  one where the leg being rounded actually lands.  A ladder is
             #  monotonic, so this is just "the tick at the higher of the
@@ -1037,17 +1040,12 @@ def price_computed(cfg, rows, closes, ladders=None, names=None):
         try:
             high, low = bands.compute(cfg.bands[r.venue_id], r.ticker, ref,
                                       tick, venue.min_price, venue.rounding,
-                                      name, unrounded)
+                                      name)
         except bands.BandError as e:
             drop(e.reason, r, e.detail)
             continue
         out.append(_out_row(r, low, high))
 
-    if no_tick:
-        more = (f" (+{len(no_tick) - SHOW_NAMES} more)"
-                if len(no_tick) > SHOW_NAMES else "")
-        print(f"  unrounded {len(no_tick):5d}  no tick ladder, published the "
-              f"raw band: {', '.join(no_tick[:SHOW_NAMES])}{more}")
     return out, _excluded(by_reason)
 
 
@@ -2316,7 +2314,7 @@ def self_test() -> int:
 
     check("the names with a previous close",
           [r["#ReutersCode"] for r in cout],
-          ["BBCA.JK", "TLKM.JK", "MIDS.JK", "TINY.JK"])
+          ["BBCA.JK", "TLKM.JK", "MIDS.JK"])
     check("8000 rupiah takes the 20% tier, and both legs land on the 25 "
           "tick exactly",
           (cout[0]["LimitUpPrice"], cout[0]["LimitDownPrice"]),
@@ -2328,11 +2326,12 @@ def self_test() -> int:
           (cout[2]["LimitUpPrice"], cout[2]["LimitDownPrice"]),
           ("135", "65"))
     creasons = {e.reason: e.rows for e in cexcl}
-    check("A NAME UNDER Rp 50 STILL GETS A LIMIT: the lowest tier, 35%, "
-          "without the Rp 50 floor that would put the down leg over the up",
-          (cout[3]["LimitUpPrice"], cout[3]["LimitDownPrice"]), ("13", "7"))
-    check("so the only name excluded is the one with no close",
-          list(creasons), ["no previous close in equity_master"])
+    check("A NAME UNDER Rp 50 IS EXCLUDED - its up limit would be under the "
+          "Rp 50 minimum, which is not a normal name",
+          [str(d) for d in creasons["minimum price above the up limit"]],
+          ["TINY.JK (TINY IJ) price 10, minimum 50"])
+    check("with its own word in the excluded report",
+          missing_token("minimum price above the up limit"), "min-price")
     check("a name equity_master had no close for",
           [d.ric for d in creasons["no previous close in equity_master"]],
           ["NOCL.JK"])
@@ -2417,11 +2416,11 @@ def self_test() -> int:
           sorted(v.venue_id for v in cfg.venues.values()
                  if v.country == "Japan" and v.rounding == "none"),
           ["CHJ-MAIN", "JNX-MAIN", "TYO-MAIN"])
-    check("A NAME KDB HAS NO LADDER FOR IS PUBLISHED UNROUNDED - the raw "
-          "30% band, rather than no limit at all",
-          ([(r["#ReutersCode"], r["LimitUpPrice"], r["LimitDownPrice"])
-            for r in kout if r["#ReutersCode"] == "ZZZZ.KS"], kexcl),
-          ([("ZZZZ.KS", "6695", "3605")], []))
+    check("A NAME KDB HAS NO LADDER FOR IS EXCLUDED - no ladder is not "
+          "normal, and a limit off no tick is one the exchange rejects",
+          [d.ric for d in
+           {e.reason: e.rows for e in kexcl}["no tick ladder for this name"]],
+          ["ZZZZ.KS"])
 
     print("\na leveraged product takes its own band, or the venue's")
     lev = [row("0080Y0.KS", "0080Y0 KP", "0080Y0.KR", "KSC-MAIN"),

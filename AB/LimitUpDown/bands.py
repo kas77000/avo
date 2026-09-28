@@ -274,11 +274,7 @@ def _krx_band(tier: Tier, ref: Decimal, tick, min_price):
 
 
 def compute(tiers, ticker: str, ref: Decimal, tick,
-            min_price: Optional[Decimal], rounding: str, name: str = "",
-            unrounded: bool = False):
-    """`unrounded` publishes the raw band whatever the venue or tier says -
-    the default for a name with no tick to round on, which is still given
-    a limit rather than left without one."""
+            min_price: Optional[Decimal], rounding: str, name: str = ""):
     if ref is None or ref <= 0:
         raise BandError("reference price is not positive")
     tier = select_tier(tiers, ticker, ref, name)
@@ -288,13 +284,13 @@ def compute(tiers, ticker: str, ref: Decimal, tick,
     #  THE TIER MAY OVERRIDE THE VENUE.  Same precedence as everything else
     #  here: the more specific rule wins, and a blank means "as the venue
     #  does".
-    mode = "none" if unrounded else (tier.rounding or rounding)
-    #  A FLOOR ABOVE THE UP LEG IS NOT APPLIED: a close under Indonesia's
-    #  Rp 50 would otherwise give a down limit over the up one, and no
-    #  limit at all.  The band without the floor is the default.
+    mode = tier.rounding or rounding
+    #  A MINIMUM PRICE AT OR ABOVE THE UP LEG IS NOT NORMAL - a close under
+    #  Indonesia's Rp 50 - and the name is excluded, not given a band.
     up_raw = raw_band(tier, ref)[0]
     if min_price is not None and min_price >= up_raw:
-        min_price = None
+        raise BandError("minimum price above the up limit",
+                        detail=f"price {ref}, minimum {min_price}")
     if mode == "krx":
         up, down = _krx_band(tier, ref, tick, min_price)
     else:
@@ -517,15 +513,14 @@ def self_test() -> int:
     check("no minimum price configured, no floor",
           compute(IDN, "BBCA", D("60"), D("1"), None, "inward"),
           (D("81"), D("39")))
-    check("a price under every tier takes the lowest, and a floor above "
-          "the up leg is dropped rather than inverting the band: Rp 10 "
-          "gives 13/7, not 13/50",
-          compute(IDN, "BBCA", D("10"), D("1"), D("50"), "inward"),
+    check("a price under every tier takes the lowest - Rp 10 with no "
+          "minimum is 13/7",
+          compute(IDN, "BBCA", D("10"), D("1"), None, "inward"),
           (D("13"), D("7")))
-    check("unrounded publishes the raw band even where the venue rounds - "
-          "the default for a name with no tick",
-          compute(IDN, "BBCA", D("100.5"), None, None, "inward",
-                  unrounded=True), (D("135.675"), D("65.325")))
+    raises("but a minimum price above the up leg is EXCLUDED - Rp 10 "
+           "against Indonesia's Rp 50 is not a normal name",
+           lambda: compute(IDN, "BBCA", D("10"), D("1"), D("50"), "inward"),
+           "minimum price above the up limit")
     raises("a zero reference price is refused",
            lambda: compute(IDN, "BBCA", D("0"), D("1"), None, "inward"),
            "reference price is not positive")
