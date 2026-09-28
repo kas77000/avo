@@ -176,6 +176,7 @@ def fetch_chunks(conn, date, syms, cols, size, reconnect, log):
                  f"{sum(len(v) for v in by_sym.values()):,} prints  "
                  f"{time.monotonic() - t0:.1f}s")
         yield by_sym
+        by_sym = None           # one chunk alive at a time
 
 
 def connect_again(host, port, log, tries=6, wait=10.0):
@@ -336,7 +337,10 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None):
     log.kv("columns asked for", ", ".join(cols))
 
     log.step(3, "equity_master")
-    master_date = qattsource.resolve_master_date(em, day)
+    #  days_back bounds the server-side fallback (.z.D-n) at the trade day
+    #  too; the default of 1 would take a date AFTER an older --date day.
+    master_date = qattsource.resolve_master_date(
+        em, day, days_back=(today - day).days)
     log.kv("equity_master date", master_date)
     cands = candidates(rows, markets)
     master, hits = {}, {"sym_bpipe": 0, "sym_mbpipe": 0, "sym": 0}
@@ -655,12 +659,18 @@ def self_test() -> int:
                    equity_row("ZZZ.XX", 1.4), equity_row("QQQ.XX", 0.0)]
 
     class FakeEm:
-        def __init__(self, equity=EQUITY_ROWS):
+        def __init__(self, equity=EQUITY_ROWS, client_fails=False):
             self.equity, self.asked = equity, []
+            self.client_fails, self.days_back = client_fails, None
 
         def __call__(self, q, *args):
             self.asked.append(q)
             if q == qattsource.MAXDATE_CLIENT_Q:
+                if self.client_fails:
+                    raise RuntimeError("'type")
+                return em_date
+            if q == qattsource.MAXDATE_SERVER_Q:
+                self.days_back = args[0]
                 return em_date
             s = set(args[-1]) if args else set()
             for query, col in ((qattsource.MASTER_BPIPE_Q, "sym_bpipe"),
@@ -885,6 +895,16 @@ def self_test() -> int:
         err = attempt(lambda: run(tmp, D(2026, 9, 1)))
         check("a --date before every partition stops the run",
               type(err).__name__, "ExtractError")
+
+    print("\nthe equity_master date, when the client-date query fails")
+    with tempfile.TemporaryDirectory() as tmp:
+        em = FakeEm(client_fails=True)
+        run(tmp, D(2026, 9, 25), em=em)
+        check("the server query is bounded at the trade day, not yesterday: "
+              "today 2026-09-28 minus 3", em.days_back, 3)
+        em = FakeEm(client_fails=True)
+        run(tmp, None, em=em)
+        check("an RDB run asks for today's, .z.D-0", em.days_back, 0)
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1
