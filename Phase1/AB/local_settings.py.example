@@ -2,13 +2,15 @@
 #
 # AB phase1 modules load settings from here.  An unknown name is a hard error.
 
-# kdb servers: equity_master on the order side (:5010); qatt must be the HDB.
+# kdb servers: equity_master (and the tick ladders) on the order side;
+# QATT_SERVER is the qatt HDB (read with --date); QATT_RDB_SERVER is the RDB
+# (read for today, with no --date).
 EQUITY_MASTER_SERVER = "kdb-host:5010"
 QATT_SERVER = "kdb-host:5011"
 QATT_RDB_SERVER = "kdb-host:5012"
 
-# Where the daily extract leaves qatt-YYYYMMDD.zip.
-EXPORT_DIR = r"C:\path\to\qatt_export"
+# Where extract.py leaves phase1-YYYYMMDD.zip.
+EXPORT_DIR = r"C:\path\to\phase1_export"
 
 # NewCrosscode.csv, wherever it lives on this machine.
 CROSSCODE_PATH = r"C:\path\to\NewCrosscode.csv"

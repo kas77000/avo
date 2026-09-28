@@ -13,13 +13,13 @@ from __future__ import annotations
 #  Every setting, with the default used when local_settings.py is silent.
 #  "" means there is no sane default and the script that needs it refuses.
 DEFAULTS = {
-    #  kdb servers that AB contacts.  equity_master is on the order side
-    #  (:5010), qatt on its own (:5011), and qatt_rdb for historical data.
-    #  QATT_SERVER must be the HDB.
+    #  kdb servers that AB contacts.  equity_master (and the tick ladders)
+    #  on the order side; QATT_SERVER is the qatt HDB, read with --date;
+    #  QATT_RDB_SERVER is the RDB, read for today.
     "EQUITY_MASTER_SERVER": "",
     "QATT_SERVER": "",
     "QATT_RDB_SERVER": "",
-    #  Where the daily extract leaves qatt-YYYYMMDD.zip.
+    #  Where extract.py leaves phase1-YYYYMMDD.zip.
     "EXPORT_DIR": "",
 
     #  AB modules: NewCrosscode.csv, wherever it lives on THIS machine.
