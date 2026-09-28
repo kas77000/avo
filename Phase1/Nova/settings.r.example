@@ -1,0 +1,33 @@
+# Copy to settings.r beside the scripts (settings.r is gitignored) and set
+# the paths for this machine. Forward slashes work on Windows.
+
+CROSSCODE_PATH   <- "C:/path/to/CrossCode.csv"
+
+# historical.r
+OUTPUT_DIR       <- "C:/path/to/Historical"
+NOTRADINGDAY_DIR <- "C:/path/to/NoTradingDay"
+
+# Every job appends to LOG_DIR/phase1-YYYYMMDD.log.
+LOG_DIR          <- "C:/path/to/logs"
+
+# The Windows timezone id kdb stamps prints in. Must match the zip's
+# manifest "kdb timezone".
+KDB_TIMEZONE     <- "China Standard Time"
+
+# limit_up_down.r: written to TEMP, then copied to each environment.
+LULD_OUT_TEMP    <- "C:/path/to/temp/limitUpDown.csv"
+LULD_OUT_TEST    <- "C:/path/to/test/limitUpDown.csv"
+LULD_OUT_PILOT   <- "C:/path/to/pilot/limitUpDown.csv"
+LULD_OUT_PROD    <- "C:/path/to/prod/limitUpDown.csv"
+INDIA_NSE_STRA   <- ""
+INDIA_BSE_STRA   <- ""
+
+# trading_data.r
+TD_OUTPUT_PATH   <- "C:/path/to/TradingData.csv"
+
+# Optional inputs: read when set, skipped (and logged) when "".
+MSCI_MAPPING_PATH          <- ""
+OPEN_AUCTION_OVERRIDE_PATH <- ""
+HKEX_CAS_LIST_PATH         <- ""
+INDIA_NSE_CAS_LIST_PATH    <- ""
+INDIA_BSE_CAS_LIST_PATH    <- ""
