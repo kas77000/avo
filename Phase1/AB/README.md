@@ -47,6 +47,7 @@ extract.py -> phase1-YYYYMMDD.zip  ---------------------->  run_phase1.cmd <zip>
 python extract.py                            today, from the RDB
 python extract.py --date 2026-09-25          that day, from the HDB
 python extract.py --log C:\path\to\logs\extract.log
+python extract.py --fresh                    the day again, from scratch
 ```
 
 - **No argument:** the trade date is today, and qatt and quote are read from
@@ -55,6 +56,8 @@ python extract.py --log C:\path\to\logs\extract.log
   date, from the HDB (`QATT_SERVER`). Use it to redo a past day.
 - **`--log FILE`:** also appends the log to FILE. Each run starts with a
   `=== YYYY-MM-DD HH:MM:SS ===` line.
+- **`--fresh`:** deletes the day's staging folder first, so everything is
+  read again (see below). Combine it with `--date` for a past day.
 - equity_master and the tick ladders always come from `EQUITY_MASTER_SERVER`,
   at the newest equity_master date on or before the trade date.
 
@@ -64,6 +67,35 @@ closing trade for it, and every name there falls back to equity_master.
 
 The exit status is 0 when the zip was written, 1 when the run stopped, and 2
 for a bad argument or setting.
+
+## Market by market, and resuming
+
+The day is built in a staging folder, `EXPORT_DIR/phase1-YYYYMMDD/` (the
+trade day), one file at a time, each as soon as it is ready:
+
+1. `master.csv`, `equity.csv`, `ladders.csv`, once each;
+2. then, market by market in code order, `ticks-<MKT>.csv`,
+   `closes-<MKT>.csv` and `quote_only-<MKT>.csv`. A market is the Bloomberg
+   exchange code of a sym's primary CrossCode row (equity_master's
+   `EQY_PRIM_EXCH_SHRT`), so `7203 JT` and `7203 JE` are both in `JT`. A big
+   market is still read `SYM_CHUNK` syms at a time;
+3. then the zip is assembled from the folder. The folder is left in place.
+
+Every file is written as `<name>.part` and renamed when complete. A market's
+ticks file is renamed last, so a market counts as done only when all three
+of its files exist.
+
+**If a run stops** (kdb drops, the machine restarts, Ctrl+C), run the same
+command again. The rerun reads `master.csv` and `equity.csv` back instead of
+asking equity_master, skips every market already done (the log says
+`HK done already, skipped`), redoes the market it stopped in, and carries on.
+Leftover `.part` files are simply overwritten. The zip is the same as an
+uninterrupted run would have written.
+
+**`--fresh`** deletes the day's folder and starts over. Use it when the
+CrossCode changed, or after a no-argument run made too early: the RDB keeps
+filling during the day, and a rerun of today would otherwise keep the
+markets an earlier run already finished.
 
 ## What the zip contains
 
@@ -84,9 +116,11 @@ suffixes (`.IS` then `.IN` for NSE, `.IN` for BSE), `ticker.ext`,
 `ticker.composite`, then the sym equity_master resolved it to. The `sym`
 column says which one was found. A code none of them finds has no row.
 
-The zip is written as `phase1-YYYYMMDD.zip.part` and renamed at the end, so
-a zip under its real name is always complete. A run that stops leaves
-neither.
+`ticks.csv`, `closes.csv` and `quote_only.csv` are the markets' files joined
+under one header, in market order, and each sym's prints are still
+together. The zip is written as `phase1-YYYYMMDD.zip.part` and renamed at
+the end, so a zip under its real name is always complete. A run that stops
+leaves no zip, only what it staged.
 
 ## The close
 
@@ -120,9 +154,22 @@ Each line is `HH:MM:SS  lvl  text`. `..` is commentary, `ok` a stage that
 finished well, `!!` something a person should look at (the run goes on), and
 `XX` a failure (the run stops, no zip).
 
-The run goes through eight numbered steps: crosscode, qatt (the day and the
-columns), equity_master (the date and how many codes it matched), reference
-data, ticks and closes (one line per qatt read), quotes, closes, result.
+The run goes through numbered steps: 1 crosscode, 2 qatt (the day, the
+columns and the staging folder), 3 equity_master (the date and how many
+codes it matched), 4 reference data, 5.1, 5.2, ... one per market, and 6
+the zip. A market's step looks like this:
+
+```
+..  --- 5.3. market NZ, 1 syms -----------------------------------
+..  read 1  1/1 syms  2 prints  0.0s
+..  no print                0   0 with a quote
+!!  close  AIA.NZ  NZ  no-closing-trade  -> equity_master 6.13
+..  NZ done                 1 syms   2 prints, qatt 0, equity_master 1, no close 0, quote-only 0
+```
+
+A market finished by an earlier run shows `NZ done already, skipped`
+instead, and its `!!` lines are in that earlier run's log. On a rerun,
+steps 3 and 4 say `read back from master.csv` / `equity.csv`.
 
 The `!!` lines to expect:
 
@@ -136,7 +183,8 @@ The `!!` lines to expect:
 
 There is one `close` line per fallback: the sym, its exchange codes, the
 reason, and the price taken or `no close`. The run ends with a table per
-Bloomberg exchange code:
+market, counted from the staged files, so it covers the markets a rerun
+skipped too:
 
 ```
 market      syms   ticks    qatt  no-trades  no-closing-trade  no-close-codes  no-close  quote-only
