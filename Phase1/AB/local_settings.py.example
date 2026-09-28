@@ -1,0 +1,24 @@
+# Copy to local_settings.py and fill in.  local_settings.py is gitignored.
+#
+# AB phase1 modules load settings from here.  An unknown name is a hard error.
+
+# kdb servers: equity_master on the order side (:5010); qatt must be the HDB.
+EQUITY_MASTER_SERVER = "kdb-host:5010"
+QATT_SERVER = "kdb-host:5011"
+QATT_RDB_SERVER = "kdb-host:5012"
+
+# Where the daily extract leaves qatt-YYYYMMDD.zip.
+EXPORT_DIR = r"C:\path\to\qatt_export"
+
+# NewCrosscode.csv, wherever it lives on this machine.
+CROSSCODE_PATH = r"C:\path\to\NewCrosscode.csv"
+
+# Optional settings below.
+
+# The zone kdb stamps prints in.  Written into the zip's manifest, so
+# downstream converts from what the export saw.
+# KDB_TIMEZONE = "China Standard Time"
+
+# Performance tuning.
+# SYM_CHUNK = 200
+# MASTER_CHUNK = 5000
