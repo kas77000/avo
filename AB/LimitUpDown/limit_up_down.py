@@ -2121,8 +2121,11 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description="Build limitUpDown.csv from Bloomberg limits over "
                     "B-PIPE.")
-    p.add_argument("envs", nargs="?", default="",
-                   help='pipe separated, e.g. "Test|Pilot|Prod"')
+    #  None, not "", so that leaving it out and writing "" stay different:
+    #  left out publishes everywhere, "" is the dry run.
+    p.add_argument("envs", nargs="?", default=None,
+                   help='pipe separated, e.g. "Test|Pilot". Left out, '
+                        'all three: Test|Pilot|Prod. "" publishes nowhere.')
     p.add_argument("--self-test", action="store_true",
                    help="run the arithmetic checks and exit")
     p.add_argument("--demo", action="store_true",
@@ -2146,6 +2149,8 @@ def main(argv=None) -> int:
                    help="how many names PER VENUE --kdb-check uses "
                         "(default 5)")
     a = p.parse_args(argv)
+    if a.envs is None:
+        a.envs = "|".join(VALID_ENVS)
 
     if a.self_test:
         return self_test()

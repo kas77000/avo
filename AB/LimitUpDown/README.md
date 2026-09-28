@@ -300,8 +300,9 @@ what the `arg ... -> ... (q type N)` line settles.
 ```
 python limit_up_down.py --self-test        checks, no Bloomberg, no files
 python limit_up_down.py --demo             both branches on canned data
+python limit_up_down.py                    real run, publish to Test, Pilot and Prod
+python limit_up_down.py "Test|Pilot"       real run, publish to those only
 python limit_up_down.py ""                 real run, publish nowhere
-python limit_up_down.py "Test|Pilot|Prod"  real run, publish
 python limit_up_down.py --compare OLD.csv  diff the last output against another
 python limit_up_down.py --kdb-check        only the kdb path, verbosely
 python limit_up_down.py --venues KSC-MAIN  one venue, or several, pipe separated
