@@ -470,6 +470,21 @@ def to_time(value, int_unit: str = "ms"):
         return value.time()
     if isinstance(value, dt.timedelta):
         ms = int(value.total_seconds() * 1000)
+    elif getattr(getattr(value, "dtype", None), "kind", "") in ("m", "M"):
+        #  A bare numpy timedelta64 (a kdb time or second out of a column)
+        #  or datetime64 (a timestamp).  numpy 2 will not int() a
+        #  timedelta64, and the TypeError made every line's time blank, so
+        #  it is divided out in milliseconds here, truncated as a timedelta
+        #  is above.  A datetime64 keeps its time of day.  NaT is null.
+        import numpy as np
+        try:
+            if np.isnat(value):
+                return None
+            if value.dtype.kind == "M":
+                value = value - value.astype("datetime64[D]")
+            ms = int(value / np.timedelta64(1, "ms"))
+        except (TypeError, ValueError, OverflowError):
+            return None
     else:
         try:
             ms = int(value) * (1000 if int_unit == "s" else 1)
@@ -1203,6 +1218,33 @@ def self_test() -> int:
         check("and NaT, what .pd() makes of 0Nv, is no time",
               (to_time(_pd.NaT, "s"), _seconds_of(_pd.NaT, "s"),
                clock(_pd.NaT, 0, "s")), (None, None, ""))
+    except ImportError:
+        pass
+    try:
+        import numpy as _np
+        check("a bare numpy timedelta64, in each unit kdb sends, is a time "
+              "(numpy 2 will not int() one, which blanked every line)",
+              [to_time(_np.timedelta64(NINE * 1000 + 250, "ms")),
+               to_time(_np.timedelta64(NINE, "s"), "s"),
+               to_time(_np.timedelta64(NINE * 10**9 + 7, "ns"))],
+              [T(9, 31, 33, 250_000), T(9, 31, 33), T(9, 31, 33)])
+        check("and whatever int_unit claims, for it knows its own unit",
+              to_time(_np.timedelta64(NINE, "s"), "ms"), T(9, 31, 33))
+        check("timedelta64 NaT, a negative and a whole day are no time",
+              [to_time(_np.timedelta64("NaT")),
+               to_time(_np.timedelta64("NaT", "s"), "s"),
+               to_time(_np.timedelta64(-1, "ms")),
+               to_time(_np.timedelta64(86_400, "s"))],
+              [None, None, None, None])
+        check("a numpy datetime64 keeps its time of day; NaT is no time",
+              [to_time(_np.datetime64("2026-09-25T09:31:33.250")),
+               to_time(_np.datetime64("NaT"))],
+              [T(9, 31, 33, 250_000), None])
+        check("the seconds of day and the clock from a timedelta64",
+              (_seconds_of(_np.timedelta64(NINE, "s"), "s"),
+               clock(_np.timedelta64(NINE, "s"), 3600, "s"),
+               clock(_np.timedelta64("NaT", "s"), 0, "s")),
+              (NINE, "10:31:33", ""))
     except ImportError:
         pass
 

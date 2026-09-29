@@ -147,10 +147,13 @@ h_universe <- function(cc, master, markets, composites) {
 # -- writing ------------------------------------------------------------
 
 # "08:00:00" kdb's clock -> the market's, shift seconds on, round the day.
+# shift is one number, or one per cell; a blank cell stays blank and takes
+# its own shift with it, so the lines after it keep theirs.
 h_clock <- function(cell, shift) {
   out <- rep("", length(cell))
   has <- nzchar(cell)
   x <- cell[has]
+  shift <- rep_len(shift, length(cell))[has]
   secs <- as.integer(sub(":.*$", "", x)) * 3600 +
     as.integer(sub("^[^:]*:([^:]*):.*$", "\\1", x)) * 60 +
     as.integer(sub("^.*:", "", x))
@@ -158,6 +161,37 @@ h_clock <- function(cell, shift) {
   out[has] <- sprintf("%02d:%02d:%02d", s %/% 3600L, (s %% 3600L) %/% 60L,
                       s %% 60L)
   out
+}
+
+# A market's Exchange letter, for its quote-only names, as its prints carry
+# it. A line of ticks.csv is condensed (size summed by second, price, cond
+# and ex), so it is not one print: each ex is weighed by the volume it
+# traded, the sum of size over the market's lines, not by its line count.
+# h_ex_tally makes one block's weights, keyed "ext\001ex"; h_ex_pick adds
+# the blocks up and takes each exchange code's heaviest ex, ties to the
+# first in sorted order. A size that is not a number weighs 0.
+h_ex_tally <- function(ext, ex, size) {
+  w <- suppressWarnings(as.numeric(size))
+  w[is.na(w)] <- 0
+  keep <- nzchar(ex)
+  tapply(w[keep], paste(ext, ex, sep = "\001")[keep], sum)
+}
+
+h_ex_pick <- function(tabs) {
+  ex_ext <- character(0)
+  ex_of <- character(0)
+  if (!length(tabs)) return(list(ext = ex_ext, ex = ex_of))
+  tot <- tapply(unlist(lapply(tabs, as.vector)),
+                unlist(lapply(tabs, names)), sum)
+  tot_ext <- sub("\001.*$", "", names(tot))
+  tot_ex <- sub("^.*\001", "", names(tot))
+  for (e in unique(tot_ext)) {
+    x <- setNames(as.vector(tot[tot_ext == e]), tot_ex[tot_ext == e])
+    x <- x[sort(names(x))]
+    ex_ext <- c(ex_ext, e)
+    ex_of <- c(ex_of, names(x)[which.max(x)])
+  }
+  list(ext = ex_ext, ex = ex_of)
 }
 
 # One CSV cell, quoted only when it must be, as Python's csv.writer does.
@@ -552,7 +586,7 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
     ex <- b$ex[known]
     if (any(nzchar(ex))) {
       ex_tabs[[length(ex_tabs) + 1]] <<-
-        table(paste(names_$ext[idx], ex, sep = "\001")[nzchar(ex)])
+        h_ex_tally(names_$ext[idx], ex, b$size[known])
     }
     no_tz <<- c(no_tz, u[is.na(names_$shift[u])])
     clock <- !is.na(names_$shift[idx])
@@ -587,23 +621,9 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
   log$kv("rows a second",
          round(got$rows / max(got$secs + t_write, 0.001)))
 
-  # A market's Exchange letter, as its prints carry it: the commonest ex
-  # among the ticks of names with that exchange code; ties go to the first
-  # in sorted order, as table() and sort() have it.
-  ex_ext <- character(0)
-  ex_of <- character(0)
-  if (length(ex_tabs)) {
-    tot <- tapply(unlist(lapply(ex_tabs, as.vector)),
-                  unlist(lapply(ex_tabs, names)), sum)
-    tot_ext <- sub("\001.*$", "", names(tot))
-    tot_ex <- sub("^.*\001", "", names(tot))
-    for (e in unique(tot_ext)) {
-      x <- setNames(as.vector(tot[tot_ext == e]), tot_ex[tot_ext == e])
-      x <- x[sort(names(x))]
-      ex_ext <- c(ex_ext, e)
-      ex_of <- c(ex_of, names(sort(as.table(x), decreasing = TRUE))[1])
-    }
-  }
+  ex_pick <- h_ex_pick(ex_tabs)
+  ex_ext <- ex_pick$ext
+  ex_of <- ex_pick$ex
 
   log$step(3, "quote-only")
   qo <- p1_read(z$dir, "quote_only.csv")
@@ -773,6 +793,27 @@ h_self_test <- function() {
   check("kdb's clock moved on, past midnight too, and a blank stays blank",
         h_clock(c("08:00:00", "", "23:30:05"), 3600),
         c("09:00:00", "", "00:30:05"))
+  check("a blank time keeps the next line on its own shift",
+        h_clock(c("08:00:00", "", "05:00:30"), c(3600, 3600, 18000)),
+        c("09:00:00", "", "10:00:30"))
+  check("a block of names with a blank in the first: each keeps its clock",
+        h_clock(c("08:00:00", "", "08:00:01", "08:00:00", "08:00:02", "",
+                  "08:00:00"),
+                c(3600, 3600, 3600, 14400, 14400, 14400, -3600)),
+        c("09:00:00", "", "09:00:01", "12:00:00", "12:00:02", "",
+          "07:00:00"))
+
+  cat("\na quote-only name's Exchange letter\n")
+  check("weighed by volume: 10 H prints condensed to one line beat 4 X lines",
+        h_ex_pick(list(h_ex_tally(rep("HK", 5), c("H", "X", "X", "X", "X"),
+                                  c("10", "1", "1", "1", "1"))))$ex,
+        "H")
+  check("added up across blocks, per exchange code, a blank ex not counted",
+        h_ex_pick(list(h_ex_tally(c("HK", "HK", "JT"), c("X", "", "T"),
+                                  c("5", "100", "1")),
+                       h_ex_tally(c("HK", "HK"), c("H", "H"),
+                                  c("3", "3")))),
+        list(ext = c("HK", "JT"), ex = c("H", "T")))
 
   cat("\nwriting a file\n")
   tokyo <- as.raw(c(0xe6, 0x9d, 0xb1, 0xe4, 0xba, 0xac))

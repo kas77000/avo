@@ -558,7 +558,7 @@ def scenario1(tmp):
           {k for k, _, _ in kB.asked} == {"raw"}
           and any("ticks NOT condensed" in l for l in logB.lines))
     mA, mB = manifest(zA), manifest(zB)
-    raw_n = sum(len(v) for s, v in day.raw.items() if s != NOMAS_SYM)
+    raw_n = sum(len(v) for v in day.raw.values())
     check(f"B's prints are the raw prints ({mB['prints']} = {raw_n})",
           int(mB["prints"]) == raw_n)
     check(f"A's prints are fewer, condensed ({mA['prints']} < {raw_n})",
@@ -593,7 +593,7 @@ def scenario1(tmp):
             bad_order.append(f)
         n = by_code.get(f.split("/")[0])
         if n and n.kind == "trade":
-            raw = day.raw[n.sym]
+            raw = day.raw[n.sym or NOMAS_SYM]
             if (len(lB) != len(raw) or sum(int(l[2]) for l in lB)
                     != sum(r["size"] for r in raw)):
                 bad_truth.append(f)
@@ -627,10 +627,11 @@ def scenario1(tmp):
     closes = {r["sym"]: r for r in member_rows(zA, "closes.csv")}
     want = {}
     for n in day.names:
-        if n.kind == "trade" and n.sym:
+        if n.kind == "trade":
             codes = SESSIONS[n.ext][2]
-            want[n.sym] = str([r for r in day.raw[n.sym]
-                               if r["cond"] == codes][-1]["price"])
+            sym = n.sym or NOMAS_SYM
+            want[sym] = str([r for r in day.raw[sym]
+                             if r["cond"] == codes][-1]["price"])
     check("every traded name's close is its last close-code print",
           all(closes.get(s, {}).get("close") == p for s, p in want.items()),
           str({s: (closes.get(s, {}).get("close"), p)
@@ -647,8 +648,8 @@ def scenario1(tmp):
 
 
 def flip_probe(tmp):
-    """A quote-only name's Exchange letter is the commonest ex among the
-    market's LINES. Condensing can change which that is."""
+    """A quote-only name's Exchange letter is the market's ex with the most
+    volume. Weighed by LINES, condensing could change which that is."""
     hk = [n for n in small_names() if n.bbg in ("700 HK", "8888 HK")]
     day = Day(hk)
     rows = []
@@ -750,7 +751,7 @@ def scenario3(tmp, s1):
     #  AB, interrupted in its second market, then run again.
     mkts = sorted({n.prim for n in day.names if n.sym})
     second = mkts[1]
-    fail = {n.sym for n in day.names if n.prim == second and n.sym}
+    fail = {n.sym or NOMAS_SYM for n in day.names if n.prim == second}
     export = tmp / "abR"
     try:
         ab_build(export, cc, FakeKdb(day, fail_syms=fail))
@@ -765,7 +766,7 @@ def scenario3(tmp, s1):
           and not (export / extract.bundle_name(DAY)).exists())
     k = FakeKdb(day)
     z, log = ab_build(export, cc, k)
-    first_syms = {n.sym for n in day.names if n.prim == mkts[0] and n.sym}
+    first_syms = {n.sym or NOMAS_SYM for n in day.names if n.prim == mkts[0]}
     check(f"the rerun skips {mkts[0]} and reads the rest",
           not first_syms & set(k.tick_syms())
           and any(f"{mkts[0]} done already, skipped" in l for l in log.lines))
@@ -775,7 +776,7 @@ def scenario3(tmp, s1):
     #  AB --market on a finished day.
     k = FakeKdb(day)
     z2, _ = ab_build(export, cc, k, only=["NZ"])
-    nz = {n.sym for n in day.names if n.prim == "NZ" and n.sym}
+    nz = {n.sym or NOMAS_SYM for n in day.names if n.prim == "NZ"}
     check("AB --market NZ reads NZ only", set(k.tick_syms()) == nz,
           str(sorted(set(k.tick_syms()))))
     check("AB --market NZ rebuilds the same zip",
