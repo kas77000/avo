@@ -33,6 +33,11 @@ to.  A crosscode name it has never carried has no prints on any date, ever -
 and with no record of having asked, every run asks again for every day of the
 backfill, forever.  See misscache.py, including what does NOT go in it.
 
+CONDENSED IN q.  A line is one second, price, cond and ex, with the volume
+of every print behind it summed - see qattsource.ticks_q, which falls back to
+one line per print (and says why in the log) only when qatt lacks one of
+those columns.  --trace still reads uncondensed: its query is a diagnostic.
+
 WHAT IT DOES NOT DO.  It does not build the volume curve.  It lands the raw
 prints another process turns into one, which is the same division the
 Bloomberg version had.
@@ -458,7 +463,8 @@ def run(conn, plan_, markets, out_dir, chunk, dry_run, cache=None,
                 if item[0] == "chunk":
                     kind, date, live, names, raw, label, t_read = item
                     t0 = time.monotonic()
-                    by_sym = qattsource.shape(raw)
+                    by_sym = qattsource.shape(
+                        raw, cols=(live_cols or cols) if live else cols)
                     del raw
                     #  The MIC and the clock are both the NAME's, so two
                     #  names on one sym get their own rows either way.
@@ -1059,6 +1065,12 @@ def main(argv=None) -> int:
         return 1
     log.kv("columns asked for", ", ".join(cols),
            f"of the {len(have)} qatt has   `cols qatt` in {cols_took:.1f}s")
+    note = qattsource.condense_note(cols)
+    if note:
+        log.warn(f"ticks NOT condensed: {note}")
+    else:
+        log.kv("ticks condensed", "one line per sym, second, price, cond, "
+               "ex; size summed")
     if a.date_from:
         #  The window IS the range: every partition left after the cut.
         backfill = len(parts)
@@ -1106,6 +1118,9 @@ def main(argv=None) -> int:
         live_cols = qattsource.select_columns(qattsource.columns(live_conn))
         if live_cols != cols:
             log.warn(f"the RDB's columns differ: {', '.join(live_cols)}")
+        note = qattsource.condense_note(live_cols)
+        if note:
+            log.warn(f"the RDB's ticks NOT condensed: {note}")
     else:
         live_cols = cols
 

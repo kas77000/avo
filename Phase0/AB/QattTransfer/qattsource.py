@@ -36,6 +36,11 @@ THREE UNCERTAINTIES, ALL REPORTED RATHER THAN ASSUMED.
 ONE ROUND TRIP PER DATE PER CHUNK, never one per symbol.  A universe is tens
 of thousands of names; a per-symbol query would still be running at the open.
 
+CONDENSED IN q.  A tick read groups by sym, the second of the time, price,
+cond and ex and sums size - one line where the file would have written the
+same line many times over but for its size.  See ticks_q: it needs all six
+columns, and without one of them it falls back to the plain select.
+
 HDB FOR EVERY FINISHED DAY, RDB FOR TODAY.  A partition appears when the day
 is done, so today is not in the HDB and no dated query will ever find it.
 The two are DIFFERENT SERVERS - QATT_SERVER and QATT_RDB_SERVER - and the
@@ -157,23 +162,84 @@ def select_columns(have, time_field: str = None) -> list:
     return ["sym", field] + [c for c in TICK_FIELDS if c in have]
 
 
+def condensed(cols, time_field: str = None) -> bool:
+    """Whether a read with these columns is CONDENSED - see ticks_q.
+
+    Only when every column the grouping and the sum need is in the list:
+    sym, the time, price, cond and ex to group by, size to sum.  Anything
+    less is not one line per second/price/cond/ex, so it is not condensed
+    at all rather than condensed on a guess."""
+    field = time_field or TIME_FIELD
+    return bool(cols) and all(c in cols for c in ("sym", field) + TICK_FIELDS)
+
+
+def condense_note(cols, time_field: str = None) -> str:
+    """Why a read with these columns is NOT condensed, or "" when it is -
+    for the caller's log, next to the columns asked for."""
+    if condensed(cols, time_field):
+        return ""
+    if not cols:
+        return "no column list: every column of every print, uncondensed"
+    missing = [c for c in ("sym", time_field or TIME_FIELD) + TICK_FIELDS
+               if c not in cols]
+    return (f"qatt has no {', '.join(missing)}, so every print is read as it "
+            f"is: summing size by second, price, cond and ex needs all of "
+            f"them, and the missing ones are not guessed")
+
+
+def time_unit(cols, time_field: str = None) -> str:
+    """What a bare integer in the time column counts: "s" for a condensed
+    read, whose time is a q `second`; "ms" for any other, a q `time`.  Only
+    a raw pykx answer hands integers back - see to_time."""
+    return "s" if condensed(cols, time_field) else "ms"
+
+
+def _condensed_q(args: str, where: str, field: str) -> str:
+    #  0! UNKEYS THE ANSWER.  A `by` answer is a keyed table, and a keyed
+    #  table is what broke pykx in Phase0 - see TradingData/equitymaster.py
+    #  and LimitUpDown/kdbclose.py.  Unkeyed, it is a plain table with the
+    #  same names as the uncondensed read, so shape() takes it unchanged.
+    return ("{" + args + " 0!select size:sum size by sym, " + field + ":" +
+            field + ".second, price, cond, ex from qatt where " + where + "}")
+
+
 def ticks_q(time_field: str = None, cols=None) -> str:
-    """The tick query: a plain select on the two predicates that matter.
+    """The tick query, CONDENSED in q: one line per sym, second of the time
+    field, price, cond and ex, with size summed.
+
+        {[d;s] 0!select size:sum size by sym, tradeTime:tradeTime.second,
+               price, cond, ex from qatt where date=d, sym in s}
+
+    WHY IN q.  The file carries the time to the second, so every print in
+    one second at one price, with one condition on one venue, writes the
+    same line but for its size.  Summing them on the server is the same
+    day in far fewer rows - less to send, less to shape, less to write.
+    The time comes back as a q `second`; to_time and _second_column read it
+    as the same seconds of day the uncondensed read gave.
+
+    ROW ORDER IS THE `by`'s: sym, then second, then price, cond, ex.  Each
+    sym's lines stay together, and within a sym they run in time - but two
+    lines in the same second run by price, not by which printed first.
 
     `cols` names the columns - see select_columns, and pass it for every
-    real read.  Without it every column comes back, which is kept only for
-    the trace and the probe, where the point is to SEE the schema.
+    real read.  The read is condensed only when `cols` holds sym, the time,
+    price, size, cond and ex - see condensed().  Without one of those it
+    falls back to the plain select of whatever `cols` names, uncondensed,
+    and condense_note() says why for the log.  Without `cols` at all every
+    column comes back, uncondensed, which is kept only for the trace and
+    the probe, where the point is to SEE the schema.
 
-    NO COLUMN LIST AND NO price>0/size>0.  Both named columns this module
-    has never confirmed - TIME_FIELD is openly a placeholder and so are
-    TICK_FIELDS - and a select that names a column qatt does not have is a
-    hard q error, which is the worst way to discover a schema.  Taking every
-    column means the answer itself says what qatt holds; the row shaping
-    below picks by name and reports what is missing instead of dying on it.
+    NO price>0/size>0.  A select that names a column qatt does not have is
+    a hard q error, which is the worst way to discover a schema, so every
+    column named comes from `cols qatt`; the row shaping below picks by
+    name and reports what is missing instead of dying on it.
 
-    time_field is kept in the signature because the probe passes one, but
-    the query no longer varies with it: every column comes back regardless.
-    The date and the sym are the whole question."""
+    time_field is the column the time is read from, TIME_FIELD by default;
+    it reaches the query only when the read is condensed.  The date and the
+    sym are the whole question."""
+    field = time_field or TIME_FIELD
+    if condensed(cols, field):
+        return _condensed_q("[d;s]", "date=d, sym in s", field)
     return "{[d;s] select " + _col_list(cols) + "from qatt where date=d, sym in s}"
 
 
@@ -182,7 +248,8 @@ def _col_list(cols) -> str:
 
 
 def live_ticks_q(time_field: str = None, cols=None) -> str:
-    """The same prints, from the RDB, for today.
+    """The same prints, from the RDB, for today - condensed the same way,
+    and falling back the same way, as ticks_q.
 
     TODAY IS NOT IN THE HDB.  qatt is partitioned by date and a partition
     appears when the day is done, so the only way to see today is the RDB -
@@ -194,6 +261,9 @@ def live_ticks_q(time_field: str = None, cols=None) -> str:
     constrain and nothing to pass.  The RDB holds today and only today, so
     the table itself is the filter.  LimitUpDown/v1/kdbsource.py asks qatt
     the same undated way for the same reason."""
+    field = time_field or TIME_FIELD
+    if condensed(cols, field):
+        return _condensed_q("[s]", "sym in s", field)
     return "{[s] select " + _col_list(cols) + "from qatt where sym in s}"
 
 
@@ -368,13 +438,24 @@ def to_decimal(value):
     return d if d.is_finite() else None
 
 
-def to_time(value):
-    """kdb's `t` -> datetime.time.
+def to_time(value, int_unit: str = "ms"):
+    """kdb's `t` or `v` -> datetime.time.
 
-    pykx hands this back as a datetime.time on some builds, a timedelta on
-    others, and a bare count of milliseconds on a raw connection.  All three
-    mean the same thing - milliseconds since midnight - so all three are
-    accepted and anything else is None."""
+    A q `time` (t) comes back as a datetime.time on some builds, a timedelta
+    on others, and a bare count of milliseconds on a raw connection.  All
+    three mean the same thing - milliseconds since midnight - so all three
+    are accepted and anything else is None.
+
+    A q `second` (v) - what a condensed read's time is, see ticks_q - comes
+    back as a pykx SecondAtom, a datetime.timedelta from its .py(), a pandas
+    Timedelta from .pd(), or on a raw connection a bare count of SECONDS.
+    The first three are durations and read as any other.  A bare integer
+    cannot say which it counts, so `int_unit` says: "ms" (the default, a q
+    time) or "s" (a q second - see time_unit).  A pykx atom that knows its
+    own q type overrides it: -18 is a second, -19 a time."""
+    qtype = getattr(value, "t", None)
+    if qtype in (-18, -19) and not isinstance(value, bool):
+        int_unit = "s" if qtype == -18 else "ms"
     value = _py(value)
     if value is None or isinstance(value, bool):
         return None
@@ -391,10 +472,11 @@ def to_time(value):
         ms = int(value.total_seconds() * 1000)
     else:
         try:
-            ms = int(value)
+            ms = int(value) * (1000 if int_unit == "s" else 1)
         except (TypeError, ValueError):
             return None
-    #  kdb's null time is 0Ni, which arrives as a very large negative.
+    #  kdb's null time is 0Ni, and its null second 0Nv, both of which arrive
+    #  as a very large negative.
     if ms < 0 or ms >= 86_400_000:
         return None
     s, ms = divmod(ms, 1000)
@@ -403,7 +485,7 @@ def to_time(value):
     return dt.time(h, m, s, ms * 1000)
 
 
-def clock(value, shift: int = 0) -> str:
+def clock(value, shift: int = 0, int_unit: str = "ms") -> str:
     """A time as the CSV writes it: zero padded, to the second.
 
     Excel renders 09:31:33 and 9:31:33 identically, and the padded form is
@@ -411,8 +493,8 @@ def clock(value, shift: int = 0) -> str:
 
     `shift` moves the reading into another zone - see marketcfg.shift_seconds
     - and wraps at midnight, because the file carries a clock and not an
-    instant."""
-    t = to_time(value)
+    instant.  `int_unit` is to_time's: what a bare integer counts."""
+    t = to_time(value, int_unit)
     if t is None:
         return ""
     return hms((t.hour * 3600 + t.minute * 60 + t.second + shift) % 86_400)
@@ -604,7 +686,9 @@ def _master_row(row) -> dict:
 
 def fetch_ticks(conn, date, syms, time_field: str = None, cols=None,
                 shift: int = 0) -> dict:
-    """Every print for these syms on this date, grouped by sym.
+    """Every print for these syms on this date, grouped by sym - one line
+    per second/price/cond/ex with its size summed when `cols` makes the
+    read condensed (see ticks_q), every print as it is otherwise.
 
     One round trip for the whole chunk.  The caller decides the chunk size:
     a day of the entire universe is millions of rows and does not want to
@@ -613,9 +697,10 @@ def fetch_ticks(conn, date, syms, time_field: str = None, cols=None,
         return {}
     out = {}
     field = time_field or TIME_FIELD
+    unit = time_unit(cols, field)
     for row in _rows(conn(ticks_q(field, cols), date, list(syms))):
         out.setdefault(text(row.get("sym")), []).append({
-            "time": clock(row.get(field), shift),
+            "time": clock(row.get(field), shift, unit),
             "price": to_decimal(row.get("price")),
             "size": to_decimal(row.get("size")),
             "cond": text(row.get("cond")),
@@ -624,7 +709,9 @@ def fetch_ticks(conn, date, syms, time_field: str = None, cols=None,
 
 
 def fetch_raw(conn, date, syms, cols=None):
-    """EXTRACT: the answer exactly as kdb gave it, untouched.
+    """EXTRACT: the answer exactly as kdb gave it, untouched - condensed in
+    q when `cols` allows it (see ticks_q), so pass the same `cols` on to
+    shape().
 
     Nothing is converted here, so the connection is free for the next read
     while shape() works on this one - see historical_ticks.run."""
@@ -678,14 +765,20 @@ def _memo(fn):
     return f
 
 
-def _second_column(src, field) -> list:
+def _second_column(src, field, int_unit: str = "ms") -> list:
     """The time column as seconds of day, or None.
 
     THE ONE COLUMN THE MEMO CANNOT HELP.  Nearly every print has its own
     millisecond, so there is nothing to share - and boxing each one into a
     pandas Timedelta just to call clock() on it was most of the transform.
-    A kdb time or timespan (timedelta64) or timestamp (datetime64) is cut to
-    whole seconds in numpy instead, and there are at most 86,400 of those.
+    A kdb time, second or timespan (timedelta64) or timestamp (datetime64)
+    is cut to whole seconds in numpy instead, and there are at most 86,400
+    of those.  A condensed read's q `second` arrives as timedelta64[s] and
+    takes this same path; its null, 0Nv, is a NaT and stays blank.
+
+    Anything that is not one of those - a list of rows, an object column of
+    Timedeltas or timedeltas, integers - goes through _seconds_of one value
+    at a time, and a bare integer counts `int_unit`s (see to_time).
 
     Seconds rather than text because the zone conversion is the NAME's, and
     a chunk holds many names: clock_maker() stamps each name's rows with its
@@ -698,8 +791,9 @@ def _second_column(src, field) -> list:
     col = (src[field] if not isinstance(src, list) and field in src.columns
            else None)
     kind = col.dtype.kind if col is not None else ""
+    one = _memo(lambda v: _seconds_of(v, int_unit))
     if kind not in ("m", "M") or getattr(col.dt, "tz", None) is not None:
-        return list(map(_memo(_seconds_of), _columns_of(src, (field,))[field]))
+        return list(map(one, _columns_of(src, (field,))[field]))
     import numpy as np
     #  TO NANOSECONDS EXPLICITLY.  pandas 2 keeps the unit the data arrived
     #  in - a kdb time column comes back as timedelta64[ms] - and reading
@@ -710,7 +804,7 @@ def _second_column(src, field) -> list:
         ns = col.to_numpy(dtype=f"{'timedelta' if kind == 'm' else 'datetime'}"
                                 f"64[ns]").view("i8")
     except (ValueError, OverflowError):     # pandas' OutOfBounds is a ValueError
-        return list(map(_memo(_seconds_of), _columns_of(src, (field,))[field]))
+        return list(map(one, _columns_of(src, (field,))[field]))
     null = col.isna().to_numpy()
     if kind == "m":
         #  int(total_seconds() * 1000) truncates toward zero.
@@ -724,18 +818,26 @@ def _second_column(src, field) -> list:
             for b, v in zip(bad.tolist(), secs.tolist())]
 
 
-def _seconds_of(value):
-    """One value the fast path cannot take in bulk, as seconds of day."""
-    t = to_time(value)
+def _seconds_of(value, int_unit: str = "ms"):
+    """One value the fast path cannot take in bulk, as seconds of day.
+    `int_unit` is to_time's: what a bare integer counts."""
+    t = to_time(value, int_unit)
     return None if t is None else t.hour * 3600 + t.minute * 60 + t.second
 
 
-def shape(result, time_field: str = None) -> dict:
+def shape(result, time_field: str = None, cols=None) -> dict:
     """TRANSFORM: {sym: [(seconds of day, price, size, cond, ex), ...]}.
 
     Everything but the time is the cell the file carries.  The time stays a
     number until the load stage, which knows which name - and so which
     zone - each row belongs to; clock_maker() turns it into the cell.
+
+    `cols` is the column list the read was asked with - the one passed to
+    fetch_raw.  It says whether the read was condensed, and so whether a
+    bare integer time counts seconds (a q `second`) or milliseconds (a q
+    `time`); see time_unit.  A condensed read is shaped exactly as any
+    other: one row in, one row out, in the order kdb sent them - so each
+    sym's rows stay together, as ticks_q's `by` gave them.
 
     Byte for byte what fetch_ticks + ticksfile.write produce - the same
     to_decimal, text and number formatting, and the same clock once
@@ -746,7 +848,7 @@ def shape(result, time_field: str = None) -> dict:
     field = time_field or TIME_FIELD
     src = _frame(result)
     c = _columns_of(src, ("sym",) + TICK_FIELDS)
-    seconds = _second_column(src, field)
+    seconds = _second_column(src, field, time_unit(cols, field))
     del src
     num = _memo(lambda v: _num(to_decimal(v)))
     txt = _memo(text)
@@ -762,15 +864,17 @@ def shape(result, time_field: str = None) -> dict:
 
 def fetch_live_ticks(conn, syms, time_field: str = None, cols=None,
                      shift: int = 0) -> dict:
-    """Today's prints for these syms, from the RDB.  No date, either sent or
-    returned - the table is today."""
+    """Today's prints for these syms, from the RDB, condensed as
+    fetch_ticks's are.  No date, either sent or returned - the table is
+    today."""
     if not syms:
         return {}
     out = {}
     field = time_field or TIME_FIELD
+    unit = time_unit(cols, field)
     for row in _rows(conn(live_ticks_q(field, cols), list(syms))):
         out.setdefault(text(row.get("sym")), []).append({
-            "time": clock(row.get(field), shift),
+            "time": clock(row.get(field), shift, unit),
             "price": to_decimal(row.get("price")),
             "size": to_decimal(row.get("size")),
             "cond": text(row.get("cond")),
@@ -795,8 +899,8 @@ def self_test() -> int:
     check("the tick query names no column at all - qatt's schema is not "
           "confirmed, and naming a column it lacks is a hard q error",
           "select from qatt" in ticks_q(), True)
-    check("so the time column does not reach the query, and asking for "
-          "another changes nothing",
+    check("so without a column list the time column does not reach the "
+          "query, and asking for another changes nothing",
           ticks_q("srcTime"), ticks_q("tradeTime"))
     check("the two predicates that matter are both there",
           "where date=d, sym in s" in ticks_q(), True)
@@ -825,14 +929,53 @@ def self_test() -> int:
     cols = select_columns(HAVE, "tradeTime")
     check("the six the file uses, and nothing of the standing quote",
           cols, ["sym", "tradeTime", "price", "size", "cond", "ex"])
-    check("and the query names exactly those",
+
+    print("\ncondensing in q: one line per second, price, cond and ex")
+    check("with all six the read is condensed",
+          (condensed(cols, "tradeTime"), condense_note(cols, "tradeTime")),
+          (True, ""))
+    check("and the query sums size by sym, second, price, cond and ex, "
+          "unkeyed with 0! - a keyed `by` answer is what broke pykx before",
           ticks_q("tradeTime", cols),
-          "{[d;s] select sym,tradeTime,price,size,cond,ex from qatt "
+          "{[d;s] 0!select size:sum size by sym, "
+          "tradeTime:tradeTime.second, price, cond, ex from qatt "
           "where date=d, sym in s}")
     check("so does today's",
           live_ticks_q("tradeTime", cols),
-          "{[s] select sym,tradeTime,price,size,cond,ex from qatt "
+          "{[s] 0!select size:sum size by sym, "
+          "tradeTime:tradeTime.second, price, cond, ex from qatt "
           "where sym in s}")
+    check("the time column it groups on is the one asked for, under its "
+          "own name, so shape() finds it where it always did",
+          "srcTime:srcTime.second" in ticks_q(
+              "srcTime", select_columns(HAVE, "srcTime")), True)
+    check("TIME_FIELD by default",
+          ticks_q(None, cols), ticks_q(TIME_FIELD, cols))
+    check("and the dated and undated condensed reads differ only in the date",
+          live_ticks_q("tradeTime", cols).replace("{[s]", "{[d;s]")
+          .replace("where sym in s", "where date=d, sym in s"),
+          ticks_q("tradeTime", cols))
+    check("a condensed read's bare-integer time counts seconds; any other "
+          "read's, milliseconds",
+          (time_unit(cols, "tradeTime"), time_unit(None),
+           time_unit(["sym", "tradeTime", "price"], "tradeTime")),
+          ("s", "ms", "ms"))
+    for gone in TICK_FIELDS:
+        less = [c for c in cols if c != gone]
+        check(f"no {gone} column: not condensed, the plain select instead",
+              (condensed(less, "tradeTime"), ticks_q("tradeTime", less),
+               live_ticks_q("tradeTime", less)),
+              (False, "{[d;s] select " + ",".join(less) +
+               " from qatt where date=d, sym in s}",
+               "{[s] select " + ",".join(less) + " from qatt where sym in s}"))
+        check(f"  and the note for the log names {gone} as why",
+              gone in condense_note(less, "tradeTime")
+              and "not guessed" in condense_note(less, "tradeTime"), True)
+    check("no column list at all is not condensed either, and says so",
+          (condensed(None), "no column list" in condense_note(None)),
+          (False, True))
+    check("a column list without the time asked for is not condensed",
+          condensed(cols, "srcTime"), False)
     check("a column qatt lacks is left out rather than a q error",
           select_columns(["sym", "tradeTime", "price", "size", "ex"],
                          "tradeTime"),
@@ -899,7 +1042,11 @@ def self_test() -> int:
           "argument, which is what makes pykx apply it",
           [q for q in (MAXDATE_CLIENT_Q, MAXDATE_SERVER_Q, MASTER_BPIPE_Q,
                        MASTER_MBPIPE_Q, MASTER_SYM_Q, ticks_q(),
-                       live_ticks_q(), probe_q(), ANY_ON_DATE_Q,
+                       live_ticks_q(), ticks_q(None, list(("sym", TIME_FIELD)
+                                                          + TICK_FIELDS)),
+                       live_ticks_q(None, list(("sym", TIME_FIELD)
+                                               + TICK_FIELDS)),
+                       probe_q(), ANY_ON_DATE_Q,
                        SAMPLE_SYMS_Q, ANY_SYM_Q)
            if not q.startswith("{[")], [])
 
@@ -1009,6 +1156,56 @@ def self_test() -> int:
     check("nor is None", to_time(None), None)
     check("nor a bool", to_time(True), None)
 
+    print("\na condensed read's q second, in every shape pykx uses")
+
+    class Atom:
+        """A pykx atom as far as to_time looks: .t and .py()."""
+
+        def __init__(self, t, py):
+            self.t, self._v = t, py
+
+        def py(self):
+            return self._v
+
+    NINE = 9 * 3600 + 31 * 60 + 33
+    check("a SecondAtom, whose .py() is a timedelta",
+          to_time(Atom(-18, dt.timedelta(seconds=NINE))), T(9, 31, 33))
+    check("a SecondAtom that hands back a bare count is read as seconds, "
+          "because it says it is a second - whatever int_unit claims",
+          to_time(Atom(-18, NINE)), T(9, 31, 33))
+    check("and a TimeAtom's bare count as milliseconds, likewise",
+          to_time(Atom(-19, NINE * 1000), "s"), T(9, 31, 33))
+    check("its .py() form, a datetime.timedelta of whole seconds",
+          to_time(dt.timedelta(seconds=NINE), "s"), T(9, 31, 33))
+    check("a bare integer number of seconds, when the read was condensed",
+          to_time(NINE, "s"), T(9, 31, 33))
+    check("the same integer as a q time is milliseconds - unchanged",
+          to_time(NINE), T(0, 0, 34, 293_000))
+    check("the last second of the day", to_time(86_399, "s"), T(23, 59, 59))
+    check("a whole day of seconds is past midnight", to_time(86_400, "s"),
+          None)
+    check("0Nv, a null second, as a raw int is no time",
+          to_time(-2147483648, "s"), None)
+    check("and as a SecondAtom whose .py() is None", to_time(Atom(-18, None)),
+          None)
+    check("seconds of day, and the clock, from each of them",
+          ([_seconds_of(v, "s") for v in (dt.timedelta(seconds=NINE), NINE,
+                                          Atom(-18, NINE), None,
+                                          -2147483648)],
+           clock(NINE, 3600, "s"), clock(-2147483648, 0, "s")),
+          ([NINE, NINE, NINE, None, None], "10:31:33", ""))
+    try:
+        import pandas as _pd
+        check("a pandas Timedelta, what .pd() boxes a second as",
+              (to_time(_pd.Timedelta(seconds=NINE), "s"),
+               _seconds_of(_pd.Timedelta(seconds=NINE), "s")),
+              (T(9, 31, 33), NINE))
+        check("and NaT, what .pd() makes of 0Nv, is no time",
+              (to_time(_pd.NaT, "s"), _seconds_of(_pd.NaT, "s"),
+               clock(_pd.NaT, 0, "s")), (None, None, ""))
+    except ImportError:
+        pass
+
     print("\nthe clock the CSV writes")
     check("zero padded, to the second", clock(T(9, 31, 33)), "09:31:33")
     check("milliseconds are dropped, as the sample file has them",
@@ -1112,6 +1309,38 @@ def self_test() -> int:
     check("no syms means no round trip",
           fetch_ticks(tc, dt.date(2026, 9, 4), []), {})
     check("and no extra call", len(tc.calls), 1)
+
+    class SecondConn:
+        """A condensed answer as raw pykx would give it: the time a bare
+        count of seconds, the size already summed, 0Nv as a raw null."""
+
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, q, *args):
+            self.calls.append((q, args))
+            return [{"sym": "7203.JP", "tradeTime": 34_293, "price": 2500.0,
+                     "size": 300, "cond": "T", "ex": "T"},
+                    {"sym": "7203.JP", "tradeTime": -2147483648,
+                     "price": 2501.0, "size": 5, "cond": "", "ex": "T"}]
+
+    full = ["sym", "tradeTime", "price", "size", "cond", "ex"]
+    sc = SecondConn()
+    got = fetch_ticks(sc, dt.date(2026, 9, 4), ["7203.JP"], cols=full,
+                      shift=3600)
+    check("a condensed read asks the condensed query",
+          sc.calls[0][0], ticks_q(None, full))
+    check("and reads its bare-integer time as seconds, shifted, with 0Nv "
+          "blank", [r["time"] for r in got["7203.JP"]], ["10:31:33", ""])
+    got = fetch_live_ticks(sc, ["7203.JP"], cols=full)
+    check("so does today's", (sc.calls[-1][0],
+                              [r["time"] for r in got["7203.JP"]]),
+          (live_ticks_q(None, full), ["09:31:33", ""]))
+    check("shape() with the read's columns reads the same seconds",
+          [r[0] for r in shape(sc(None), cols=full)["7203.JP"]],
+          [34_293, None])
+    check("and without them - an uncondensed read - milliseconds, as before",
+          [r[0] for r in shape(sc(None))["7203.JP"]], [34, None])
 
     print("\nthe partitions that cap a backfill")
 
@@ -1262,6 +1491,51 @@ def self_test() -> int:
                   times(base.astype(f"timedelta64[{unit}]")), want)
             check(f"a kdb timestamp as datetime64[{unit}]",
                   times(stamps.astype(f"datetime64[{unit}]")), want)
+        full = ["sym", F, "price", "size", "cond", "ex"]
+
+        def secs(col, cols=None):
+            return [r[0] for r in shape(Table(pd.DataFrame(
+                {"sym": ["A"] * 3, F: col, "price": [1.0] * 3,
+                 "size": [1] * 3, "cond": [""] * 3, "ex": [""] * 3})),
+                cols=cols)["A"]]
+
+        print("\na condensed read's q second, through pandas")
+        want_s = [33_300, 43_200, None]
+        check("a SecondVector's .pd(): timedelta64[s], 0Nv as NaT",
+              secs(base.astype("timedelta64[s]"), full), want_s)
+        check("the same in pandas' default nanoseconds",
+              secs(base, full), want_s)
+        check("an object column of pandas Timedeltas and a NaT",
+              secs(pd.Series([pd.Timedelta(seconds=33_300),
+                              pd.Timedelta(seconds=43_200), pd.NaT],
+                             dtype=object), full), want_s)
+        check("an object column of datetime.timedeltas and a None",
+              secs(pd.Series([dt.timedelta(seconds=33_300),
+                              dt.timedelta(seconds=43_200), None],
+                             dtype=object), full), want_s)
+        check("an integer column, raw seconds, when the read was condensed",
+              secs([33_300, 43_200, -2147483648], full), want_s)
+        check("the same integers from an uncondensed read are a q time's "
+              "milliseconds, as they always were",
+              secs([33_300_000, 43_200_000, -2147483648]), want_s)
+
+        #  THE ORDER A `by` GIVES: sym, second, price, cond, ex.  Each sym
+        #  together, and in a shared second the higher price last.
+        by_rows = pd.DataFrame(
+            {"sym": ["A", "A", "A", "B", "B"],
+             F: np.array([36_000, 57_600, 57_600, 36_000, 36_001],
+                         dtype="int64").astype("timedelta64[s]"),
+             "price": [10.0, 11.0, 12.0, 5.0, 5.0],
+             "cond": ["", "C", "C", "", ""], "ex": ["T"] * 5,
+             "size": [300, 100, 200, 5, 7]})
+        got = shape(Table(by_rows), cols=full)
+        check("a condensed answer shapes one line per row, in kdb's order, "
+              "each sym's lines together",
+              {k: [(r[0], r[1], r[2]) for r in v] for k, v in got.items()},
+              {"A": [(36_000, "10.0", "300"), (57_600, "11.0", "100"),
+                     (57_600, "12.0", "200")],
+               "B": [(36_000, "5.0", "5"), (36_001, "5.0", "7")]})
+
         print("\nkdb's clock moved into the market's")
         check("Hong Kong to Tokyo is an hour on", times(base, 3600),
               ["10:15:00", "13:00:00", ""])

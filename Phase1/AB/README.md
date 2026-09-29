@@ -241,9 +241,9 @@ smaller size is kept for the rest of the run, across markets.
 
 | member | columns | what |
 |---|---|---|
-| `manifest.csv` | `key,value` | `date`, `source` (`rdb`/`hdb`), `equity_master date`, `time column`, `kdb timezone`, `syms asked`, `prints`, `syms with prints`, `quote only`, `closes from qatt`, `closes from equity_master`, `no close`, `exported at` |
+| `manifest.csv` | `key,value` | `date`, `source` (`rdb`/`hdb`), `equity_master date`, `time column`, `kdb timezone`, `syms asked`, `prints` (condensed `ticks.csv` lines), `syms with prints`, `quote only`, `closes from qatt`, `closes from equity_master`, `no close`, `exported at` |
 | `master.csv` | `BloombergCode,sym,EQY_PRIM_EXCH_SHRT,COMPOSITE_EXCH_CODE,ID_MIC_PRIM_EXCH` | each CrossCode code's equity_master row: the link from `7203 JT` to the qatt sym `7203.JP` |
-| `ticks.csv` | `sym,time,price,size,cond,ex` | every qatt print, each sym's prints together, time `HH:MM:SS` in **kdb's clock**; several conditions are joined with `@`, an empty one is `#N/A N.A.` |
+| `ticks.csv` | `sym,time,price,size,cond,ex` | one line per sym, second, price, cond and ex, with the volume of every qatt print behind it summed (see below); each sym's lines together, in time order, time `HH:MM:SS` in **kdb's clock**; several conditions are joined with `@`, an empty one is `#N/A N.A.` |
 | `closes.csv` | `sym,close,source,reason` | one row per sym asked; see below |
 | `quote_only.csv` | `sym,time,bid,ask,cond` | a sym with no print but a quote: its last quote, `cond` the first close code of its market |
 | `equity.csv` | `BloombergCode,sym,PX_LAST,EQY_BETA,volatility,REL_INDEX,CUR_MKT_CAP,fx_last,ID_ISIN,INDUSTRY_SECTOR,LONG_COMP_NAME` | equity_master's fields per CrossCode code |
@@ -253,6 +253,18 @@ For `equity.csv` and `ladders.csv` each code tries, in order, India's
 suffixes (`.IS` then `.IN` for NSE, `.IN` for BSE), `ticker.ext`,
 `ticker.composite`, then the sym equity_master resolved it to. The `sym`
 column says which one was found. A code none of them finds has no row.
+
+**Ticks are condensed in q.** A `ticks.csv` line is not one print: the read is
+
+```
+0!select size:sum size by sym, tradeTime:tradeTime.second, price, cond, ex from qatt where ...
+```
+
+(with the configured time column), so every print in one second at one
+price, condition and exchange is one line, `size` summed. The time comes
+back as a q `second` and is written exactly as before. The manifest's
+`prints` counts these lines. If qatt lacks `price`, `size`, `cond` or `ex`,
+the read falls back to one line per print, and step 2 of the log says why.
 
 `ticks.csv`, `closes.csv` and `quote_only.csv` are the markets' files joined
 under one header, in market order, and each sym's prints are still
@@ -266,7 +278,9 @@ A sym's close is the price of its **last** qatt print whose condition carries
 one of its market's close codes, from `config/close_conditions.csv`. The
 market is the Bloomberg exchange code of each CrossCode row that resolves to
 the sym, so `7203 JT` and `7203 JE` pool their codes. It is the last match
-because Japan's `e` also marks the morning close.
+because Japan's `e` also marks the morning close. Lines run in time
+order; if two close-code lines share the day's last second, the one sorted
+last (the higher price) is the close.
 
 Without such a print, the close is equity_master's `PX_LAST`, and
 `closes.csv` says why:
@@ -299,7 +313,7 @@ the zip. A market's step looks like this:
 
 ```
 ..  --- 5.3. market NZ, 1 syms -----------------------------------
-..  read 1  1/1 syms  2 prints  0.0s
+..  read 1  1/1 syms  2 lines  0.0s
 ..  no print                0   0 with a quote
 !!  close  AIA.NZ  NZ  no-closing-trade  -> equity_master 6.13
 ..  NZ done                 1 syms   2 prints, qatt 0, equity_master 1, no close 0, quote-only 0

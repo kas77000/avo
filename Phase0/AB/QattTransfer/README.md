@@ -31,9 +31,16 @@ python qatt_export.py --log export.log
 
   | member | holds |
   |---|---|
-  | `ticks.csv` | `sym,time,price,size,cond,ex`, every print, in **kdb's clock** |
+  | `ticks.csv` | `sym,time,price,size,cond,ex`, condensed prints, in **kdb's clock** |
   | `master.csv` | the `equity_master` rows for the crosscode codes |
   | `manifest.csv` | the day, kdb's time zone, the time column, counts |
+
+  A tick line is **condensed in q**: one sym, second, price, cond and ex,
+  with the volume of every print behind it summed
+  (`0!select size:sum size by sym, tradeTime:tradeTime.second, price, cond, ex`).
+  The manifest's `prints` counts those condensed lines. If qatt lacks price,
+  size, cond or ex the read falls back to one line per print, and the log
+  says why.
 
   `master.csv` makes the trip because the other machine has no kdb.
   qatt is keyed on the composite (`7203.JP`) and the crosscode on the

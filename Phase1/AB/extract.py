@@ -4,7 +4,7 @@
     EXPORT_DIR/phase1-20260925.zip
         manifest.csv    key,value               what, when, how many
         master.csv      BloombergCode,sym,...   the crosscode's equity_master rows
-        ticks.csv       sym,time,price,size,cond,ex   every print, kdb's clock
+        ticks.csv       sym,time,price,size,cond,ex   condensed prints, kdb's clock
         closes.csv      sym,close,source,reason one row per sym asked
         quote_only.csv  sym,time,bid,ask,cond   a sym with no print, its quote
         equity.csv      BloombergCode,sym,PX_LAST,...   equity_master fields
@@ -27,7 +27,13 @@ Type.  The kept rows are resolved to qatt syms exactly
 as qatt_export.py did (equity_master in three passes, config/markets.csv as
 the fallback).
 
-THE CLOSE is closes.py's rule: the last print carrying one of its market's
+TICKS ARE CONDENSED IN q.  A ticks.csv line is one sym, second, price, cond
+and ex, with the size of every print behind it summed - see
+qattsource.ticks_q, which falls back to one line per print (and says why in
+the log) only when qatt lacks one of those columns.  The manifest's
+`prints` counts those lines.
+
+THE CLOSE is closes.py's rule: the last line carrying one of its market's
 close codes (config/close_conditions.csv), else equity_master's PX_LAST with
 a reason, else no close at all.  It is worked out while the ticks stream,
 one chunk of syms at a time, and only the answer is kept - a day of prints
@@ -273,12 +279,12 @@ def fetch_chunks(conn, date, syms, cols, size, reconnect, log):
                      f"and asking {size} at a time from here on")
             conn = reconnect()
             continue
-        by_sym = qattsource.shape(raw)
+        by_sym = qattsource.shape(raw, cols=cols)
         del raw
         pos += len(group)
         reads += 1
         log.info(f"read {reads}  {pos:,}/{len(syms):,} syms  "
-                 f"{sum(len(v) for v in by_sym.values()):,} prints  "
+                 f"{sum(len(v) for v in by_sym.values()):,} lines  "
                  f"{time.monotonic() - t0:.1f}s")
         yield by_sym
         by_sym = None           # one chunk alive at a time
@@ -433,7 +439,9 @@ def write_ticks(fh, chunks, seen) -> dict:
     the counts.
 
     `chunks` is fetch_chunks' answer.  One sym is only ever in one chunk,
-    which keeps each sym's prints CONTIGUOUS.  `seen(sym, rows)` is called
+    which keeps each sym's prints CONTIGUOUS.  A row is a condensed line -
+    one second, price, cond and ex, its size summed (qattsource.ticks_q) -
+    and `prints` counts those lines.  `seen(sym, rows)` is called
     once per sym with prints, while its rows are still in hand - that is
     where the close is worked out - and the rows are dropped with the
     chunk."""
@@ -669,6 +677,12 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     except ValueError as e:
         raise ExtractError(str(e)) from e
     log.kv("columns asked for", ", ".join(cols))
+    note = qattsource.condense_note(cols)
+    if note:
+        log.warn(f"ticks NOT condensed: {note}")
+    else:
+        log.kv("ticks condensed", "one line per sym, second, price, cond, "
+               "ex; size summed")
 
     log.step(3, "equity_master")
     #  days_back bounds the server-side fallback (.z.D-n) at the trade day

@@ -92,10 +92,24 @@ def main(argv) -> int:
             s = set(args[-1])
             #  A blank condition is what kdb has; the extract writes it as
             #  #N/A N.A.
-            return [{"sym": r["sym"], T: dt.time.fromisoformat(r["time"]),
-                     "price": Decimal(r["price"]), "size": int(r["size"]),
-                     "cond": "" if r["cond"] == fx.NA else r["cond"],
-                     "ex": r["ex"]} for r in ticks if r["sym"] in s]
+            got = [{"sym": r["sym"], T: dt.time.fromisoformat(r["time"]),
+                    "price": Decimal(r["price"]), "size": int(r["size"]),
+                    "cond": "" if r["cond"] == fx.NA else r["cond"],
+                    "ex": r["ex"]} for r in ticks if r["sym"] in s]
+            if "0!select size:sum size by" not in q:
+                return got
+            #  CONDENSED, as kdb answers qattsource.ticks_q: size summed by
+            #  sym, second, price, cond, ex, in that sort order, the time a
+            #  q second - which pykx's .py() hands back as a timedelta.
+            summed = {}
+            for r in got:
+                t = r[T]
+                key = (r["sym"], t.hour * 3600 + t.minute * 60 + t.second,
+                       r["price"], r["cond"], r["ex"])
+                summed[key] = summed.get(key, 0) + r["size"]
+            return [{"sym": k[0], T: dt.timedelta(seconds=k[1]),
+                     "price": k[2], "cond": k[3], "ex": k[4], "size": v}
+                    for k, v in sorted(summed.items())]
         raise AssertionError(f"qatt was asked {q}")
 
     def quote(q, *args):

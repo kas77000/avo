@@ -27,7 +27,8 @@ last price is not a price - so resolve() only has to ask whether one
 survived, not what shape it is in.
 
 Consumes qattsource.shape()'s rows: {sym: [(secs|None, price_str, size_str,
-cond_str, ex_str)]}.  cond is ticksfile.condition()'s cell - empty becomes
+cond_str, ex_str)]} - condensed lines, one per second, price, cond and ex,
+in time order (see pick for two in one second).  cond is ticksfile.condition()'s cell - empty becomes
 "#N/A N.A.", several codes are joined with "@" - so pick() splits on "@"
 rather than assuming one code per row.
 
@@ -96,7 +97,13 @@ def pick(rows, codes):
     None if none does.
 
     cond is qattsource.shape()'s formatted cell, so it is split on "@" -
-    ticksfile.CONDITION_SEP - before matching, never compared whole."""
+    ticksfile.CONDITION_SEP - before matching, never compared whole.
+
+    LAST IS STILL LATEST.  The rows are condensed lines in the order
+    qattsource.ticks_q's `by` sorts them: second, then price, cond, ex.  So
+    the last match is in the day's last second with a close code - and if
+    two such lines share that second, the one sorted last, the HIGHER
+    price, is taken."""
     wanted = set(codes)
     if not wanted:
         return None
@@ -149,6 +156,9 @@ def self_test() -> int:
     check("no codes at all is not a match against anything",
           pick(rows, []), None)
     check("no rows at all is nothing to pick from", pick([], ["CA"]), None)
+    check("two condensed close lines in the day's last second: the one the "
+          "`by` sorts last, the higher price",
+          pick(rows + [(54002, "104", "3", "CA", "T")], ["CA"]), "104")
 
     print("\nresolving the close, with the fallback and its reason")
     check("a qatt close", resolve("A", rows, ["CA"], "99"),

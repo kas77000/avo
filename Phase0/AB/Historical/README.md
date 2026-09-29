@@ -28,6 +28,13 @@ That store already holds what the request was asking for:
 | `Exchange` | `ex` |
 | `MicCode` | not in qatt — `equity_master.ID_MIC_PRIM_EXCH` |
 
+**A line is condensed in q**: one second, price, condition and exchange,
+with the volume of every print behind it summed —
+`0!select size:sum size by sym, tradeTime:tradeTime.second, price, cond, ex`.
+The time comes back as a q `second`, read as the same clock as before. If
+qatt lacks price, size, cond or ex the read falls back to one line per
+print, and the log says why. `--trace` still reads uncondensed.
+
 `price>0, size>0` is the whole test for "this row is a print": every qatt row
 is a transaction carrying the quote that stood at the time, so there are no
 quote-only rows to exclude. That is `kdb-queries/queries/liquidity_profile`'s
@@ -263,6 +270,9 @@ Byte equality is not the bar — these files came from Bloomberg and ours come
 from qatt. So `3833` and `3833.0` are one price, and the order of prints
 *inside a single second* is not a difference, because the two sources have no
 reason to sequence a second the same way. Everything else is.
+Our lines are condensed (one per second, price, condition and exchange,
+volume summed), so a second where the old file has several prints at one
+price and condition shows as a difference against it.
 
 **Compressed old files are read as they are.** The old process gzips a file
 once it is old enough: the folder keeps its name, and inside it

@@ -3,7 +3,7 @@
 carried to another machine.
 
     EXPORT_DIR/qatt-20260924.zip
-        ticks.csv      sym,time,price,size,cond,ex     every print, kdb's clock
+        ticks.csv      sym,time,price,size,cond,ex     condensed prints, kdb's clock
         master.csv     BloombergCode,sym,EQY_PRIM_EXCH_SHRT,...
         manifest.csv   key,value                        what, when, how many
 
@@ -16,6 +16,11 @@ links them.  Without it no file could be named.
 THE UNIVERSE IS THE CROSSCODE.  Every crosscode code is resolved to a qatt
 sym exactly as historical_ticks.py does it - equity_master in three passes,
 config/markets.csv as the fallback - and only those syms are asked for.
+
+CONDENSED IN q.  A ticks.csv line is one sym, second, price, cond and ex,
+with the size of every print behind it summed - see qattsource.ticks_q,
+which falls back to one line per print (and says why in the log) only when
+qatt lacks one of those columns.  The manifest's `prints` counts lines.
 
 THE PREVIOUS DAY IS THE NEWEST PARTITION BEFORE TODAY, not today-1: a
 Monday run exports Friday, and a run after a holiday exports the last day
@@ -107,6 +112,8 @@ def write_bundle(path, manifest: dict, master: dict, chunks) -> dict:
     qattsource.shape's answer, one chunk of syms at a time - so a whole day
     is never held at once.  One sym is only ever in one chunk, which keeps
     each sym's prints CONTIGUOUS in ticks.csv; the dispatch relies on that.
+    A row is a condensed line (qattsource.ticks_q), and `prints` counts
+    those lines.
 
     Written as .part and renamed into place, so a zip under its real name
     is always a finished one."""
@@ -168,12 +175,12 @@ def fetch_chunks(conn, date, syms, cols, size, reconnect, log):
                      f"and asking {size} at a time from here on")
             conn = reconnect()
             continue
-        by_sym = qattsource.shape(raw)
+        by_sym = qattsource.shape(raw, cols=cols)
         del raw
         pos += len(group)
         reads += 1
         log.info(f"read {reads}  {pos:,}/{len(syms):,} syms  "
-                 f"{sum(len(v) for v in by_sym.values()):,} prints  "
+                 f"{sum(len(v) for v in by_sym.values()):,} lines  "
                  f"{time.monotonic() - t0:.1f}s")
         yield by_sym
 
@@ -264,6 +271,12 @@ def main(argv=None) -> int:
         log.fail(str(e))
         return 1
     log.kv("columns asked for", ", ".join(cols))
+    note = qattsource.condense_note(cols)
+    if note:
+        log.warn(f"ticks NOT condensed: {note}")
+    else:
+        log.kv("ticks condensed", "one line per sym, second, price, cond, "
+               "ex; size summed")
 
     out = Path(cfg["EXPORT_DIR"]) / bundle_name(day)
     manifest = {"date": day, "equity_master date": master_date,
