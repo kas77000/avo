@@ -1,6 +1,7 @@
-# Point the Reading .cmd files at AbaqueBcore: in every *.cmd file under
-# CMD_DIR (at any depth) whose name contains "Reading", each "\Abaque\" becomes
-# "\AbaqueBcore\" and each "\Abaque" ending a path becomes "\AbaqueBcore".
+# Point the Reading .cmd files at AbaqueBcore: in every *.cmd file directly in
+# CMD_DIR (not its sub folders) whose name contains "Reading", each
+# "\Abaque\" becomes "\AbaqueBcore\" and each "\Abaque" ending a path becomes
+# "\AbaqueBcore".
 #
 # Only a "\Abaque" that the path ends at, or goes on from with a "\", is
 # changed: one followed by a letter, digit, "_", "-" or "." is another name
@@ -23,8 +24,8 @@ say <- function(...) {                # a timestamped line, shown at once
 ABAQUE <- "\\\\Abaque(?![A-Za-z0-9_.-])"
 BCORE  <- "\\\\AbaqueBcore"
 
-files <- list.files(CMD_DIR, pattern = "Reading.*\\.cmd$", recursive = TRUE,
-                    full.names = TRUE)
+say("Listing", CMD_DIR, "...")
+files <- list.files(CMD_DIR, pattern = "Reading.*\\.cmd$", full.names = TRUE)
 say(length(files), "Reading .cmd file(s) under", CMD_DIR)
 
 changed <- 0; failed <- 0
