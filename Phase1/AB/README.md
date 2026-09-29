@@ -84,10 +84,13 @@ python extract.py --market "NZ|HK"           only those markets, read again
   `rdb`, so a later `--date` run of the same day (HDB) starts that day
   fresh, and a rerun of the same `--date --rdb` resumes.
 - **`--rdb` alone** is the same as no argument.
-- **`--market CODES`:** one Bloomberg exchange code, or several joined by
-  `|` (quote it: `--market "NZ|HK"`), upper-cased, as in Nova's
-  `historical.r --market`. Each must be a code of `close_conditions.csv`,
-  or the run stops with `XX` before asking kdb anything. Only those markets
+- **`--market NAMES`:** one market, or several joined by `|` (quote it:
+  `--market "TYO-MAIN|HK"`), in any case, as in Nova's
+  `historical.r --market`. A name is a Bloomberg exchange code of
+  `close_conditions.csv` (`NZ`), or a FidessaMarket (`NZE-MAIN`), which
+  stands for the exchange codes of the universe's CrossCode rows on that
+  market. A name that is neither stops the run with `XX` before kdb is
+  asked anything, and the message says both were tried. Only those markets
   are read, and each is **read again** even if already staged: its three
   files are set aside first (the ticks file first, so a crash leaves the
   market "not done"). The other markets are not touched. Everything before
@@ -95,10 +98,11 @@ python extract.py --market "NZ|HK"           only those markets, read again
   still covers the full universe, so `--market` never restarts a staged
   day. It combines with `--date`, `--rdb` and `--fresh`. With `--fresh`,
   every market is reset and only the selected ones are read. Step 1 logs
-  the selection:
+  the selection, and what a FidessaMarket resolved to:
 
   ```
   ..  --market                NZ|HK   2 of 18 markets this run
+  ..  --market                NZE-MAIN -> NZ   1 of 18 markets this run
   ```
 
   **No zip until every market is staged.** After the markets, the zip is

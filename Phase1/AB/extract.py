@@ -383,6 +383,28 @@ def parse_markets(text) -> list:
     return out
 
 
+def resolve_markets(names, rows, conditions) -> tuple:
+    """(codes, unknown) for --market's names, upper-cased already.
+
+    A name that is a BBGCode of close_conditions.csv is that code; else a
+    FidessaMarket (Row.market, case-insensitive) stands for the Bloomberg
+    exchange codes of the universe rows on it - NZE-MAIN -> NZ.  A name that
+    is neither is `unknown`.  `codes` is first-seen order, each once."""
+    codes, unknown = [], []
+    for name in names:
+        if name in conditions:
+            found = [name]
+        else:
+            found = [r.bbg_ext for r in rows
+                     if (r.market or "").strip().upper() == name]
+        if not found:
+            unknown.append(name)
+        for c in found:
+            if c not in codes:
+                codes.append(c)
+    return codes, unknown
+
+
 def market_done(files) -> bool:
     return all(f.exists() for f in files)
 
@@ -603,7 +625,8 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     fetched; a market whose three files are there is skipped.  `fresh`
     deletes the folder first.
 
-    `only` (--market) is a list of exchange codes: only those markets are
+    `only` (--market) is a list of exchange codes or FidessaMarket names
+    (resolve_markets): only those markets are
     read, each REDONE even if staged; the rest are not touched.  Everything
     before the markets stays on the full universe.  The zip is written only
     once every market is staged; until then build returns None.  Raises ExtractError, or whatever kdb raised,
@@ -616,11 +639,6 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
             HERE / "config" / "close_conditions.csv")
     q_name, source = qatt_server(date, rdb)
     em = conns["em"]
-    if only:
-        unknown = [c for c in only if c not in conditions]
-        if unknown:
-            raise ExtractError(f"--market {'|'.join(unknown)}: not an "
-                               f"exchange code of close_conditions.csv")
     #  How each connection is named in an error: the setting, and in a real
     #  run its host:port.  Quote is qatt's unless a quote server is set.
     names = {"qatt": q_name, "quote": q_name, **conns.get("names", {})}
@@ -648,8 +666,20 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         raise ExtractError("no CrossCode row is ours: none has an exchange "
                            "code of close_conditions.csv")
     if only:
-        log.kv("--market", "|".join(only),
-               f"{len(only)} of {len(conditions)} markets this run")
+        #  Before kdb is asked anything: codes, or FidessaMarket names
+        #  resolved on the universe's rows.
+        codes, unknown = resolve_markets(only, rows, conditions)
+        if unknown:
+            raise ExtractError(
+                f"--market {'|'.join(unknown)}: neither an exchange code of "
+                f"close_conditions.csv nor a FidessaMarket of the universe's "
+                f"CrossCode rows")
+        said = "|".join(only)
+        if codes != only:
+            said += " -> " + "|".join(codes)
+        log.kv("--market", said,
+               f"{len(codes)} of {len(conditions)} markets this run")
+        only = codes
 
     log.step(2, f"qatt, from the {source.upper()}")
     require_table(conns["qatt"], "qatt", names["qatt"],
@@ -995,9 +1025,11 @@ def main(argv=None, today=None) -> int:
                         "RDB still holds it); alone, the same as no "
                         "argument")
     p.add_argument("--market", default="",
-                   help="only these exchange codes this run, joined by | "
-                        "(e.g. \"NZ|HK\"): each is read again; the zip is "
-                        "written once every market is staged")
+                   help="only these markets this run: Bloomberg exchange "
+                        "codes or FidessaMarket names, joined by | (e.g. "
+                        "\"NZ|HKG-MAIN\"), any case; each is read again, "
+                        "and the zip is written once every market is "
+                        "staged")
     p.add_argument("--log", default="", help="tee the log to this file")
     p.add_argument("--fresh", action="store_true",
                    help="delete the day's staging folder and start over")
@@ -1741,12 +1773,34 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         em, qatt = FakeEm(), FakeQatt()
         err = attempt(lambda: run(tmp, D(2026, 9, 25), em=em, qatt=qatt,
-                                  only=["NZ", "ZZ"]))
-        check("a code not in close_conditions.csv stops the run, before "
-              "kdb is asked anything",
+                                  only=parse_markets("NZ|zzz-main")))
+        check("a name that is neither a code nor a FidessaMarket stops the "
+              "run, before kdb is asked anything, saying both were tried",
               (str(err), em.asked, qatt.asked),
-              ("--market ZZ: not an exchange code of close_conditions.csv",
-               [], []))
+              ("--market ZZZ-MAIN: neither an exchange code of "
+               "close_conditions.csv nor a FidessaMarket of the universe's "
+               "CrossCode rows", [], []))
+
+    for names, want_ticks, want_syms, want_log in (
+            ("NZE-MAIN", ["ticks-NZ.csv"], ["AIA.NZ"],
+             "..  --market                NZE-MAIN -> NZ   1 of 5 markets "
+             "this run"),
+            ("NZ", ["ticks-NZ.csv"], ["AIA.NZ"],
+             "..  --market                NZ   1 of 5 markets this run"),
+            ("tyo-main|hk", ["ticks-HK.csv", "ticks-JT.csv"],
+             ["7203.JP", "8888.HK", "8889.HK"],
+             "..  --market                TYO-MAIN|HK -> JT|HK   2 of 5 "
+             "markets this run")):
+        with tempfile.TemporaryDirectory() as tmp:
+            qatt, log = FakeQatt(), Caught()
+            run(tmp, D(2026, 9, 25), qatt=qatt, log=log,
+                only=parse_markets(names))
+            stage = Path(tmp) / "out" / "phase1-20260925"
+            check(f"--market {names}: its markets, and the resolution logged",
+                  (sorted(p.name for p in stage.glob("ticks-*.csv")),
+                   sorted(set(qatt.syms)),
+                   [ln for ln in log.lines if ln.startswith("..  --market")]),
+                  (want_ticks, want_syms, [want_log]))
 
     with tempfile.TemporaryDirectory() as tmp:
         outdir = Path(tmp) / "out"
