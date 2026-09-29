@@ -144,17 +144,19 @@ Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip
 
 ### One market only
 
-`historical.r` takes `--market=` with one Bloomberg exchange code, or several
-joined by `|`, to redo just those markets, for example after fixing a venue's
+`historical.r` takes `--market=` with one market, or several joined by `|`,
+each named by its FidessaMarket (`NZE-MAIN`) or its Bloomberg exchange code
+(`NZ`), to redo just those markets, for example after fixing a venue's
 TimeZone in `config/hist_markets.csv`:
 
 ```
-Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip --market=NZ
-Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip "--market=NZ|HK"
+Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip --market=NZE-MAIN
+Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip "--market=NZE-MAIN|HKG-MAIN"
 ```
 
 Every other name is left out of that run: no file, no NoTradingDay row.
-Files already there are still skipped. A code not in
+Files already there are still skipped. A name that is neither a
+FidessaMarket of the CrossCode's rows nor a code in
 `config/close_conditions.csv` stops the run.
 
 ## What each job writes

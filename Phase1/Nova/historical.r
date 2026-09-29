@@ -407,17 +407,22 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
     if (f$dropped[[k]]) log$info(paste(f$dropped[[k]], "rows dropped:", k))
   }
   log$kv("kept", paste(nrow(cc), "rows"), "the extract's universe")
-  # --market=NZ|HK: redo those exchange codes only. Every other name is
-  # left out of this run entirely - no file, no NoTradingDay row.
+  # --market=NZE-MAIN|HK: redo those markets only, each named by its
+  # FidessaMarket or its Bloomberg exchange code. Every other name is left
+  # out of this run entirely - no file, no NoTradingDay row.
   if (length(only)) {
-    unknown <- setdiff(only, trimws(countries$BBGCode))
+    fidessa <- toupper(trimws(cc$FidessaMarket))
+    unknown <- setdiff(only, c(trimws(countries$BBGCode), fidessa))
     if (length(unknown)) {
-      stop("--market: ", paste(unknown, collapse = ", "), " not in ",
+      stop("--market: ", paste(unknown, collapse = ", "), " is neither a ",
+           "FidessaMarket of the CrossCode's rows nor a code in ",
            "close_conditions.csv", call. = FALSE)
     }
-    cc <- cc[trimws(cc$ext) %in% only, , drop = FALSE]
+    cc <- cc[trimws(cc$ext) %in% only | fidessa %in% only, , drop = FALSE]
     log$kv("--market", paste(only, collapse = "|"),
-           paste(nrow(cc), "rows in this run"))
+           paste0(nrow(cc), " rows in this run (",
+                  paste(sort(unique(cc$FidessaMarket)), collapse = ", "),
+                  ")"))
   }
   u <- h_universe(cc, p1_read(z$dir, "master.csv"), markets, composites)
   for (k in names(u$dropped)) {
@@ -1124,9 +1129,20 @@ h_self_test <- function() {
         list(identical(bytes(s8$OUTPUT_DIR), bytes(s$OUTPUT_DIR)),
              identical(bytes(s8b$OUTPUT_DIR), bytes(s$OUTPUT_DIR))),
         list(TRUE, TRUE))
+  s8c <- s8
+  s8c$OUTPUT_DIR <- file.path(d, "out8c")
+  s8c$NOTRADINGDAY_DIR <- file.path(d, "ntd8c")
+  tryCatch(h_run(z, s8c, h_quiet_log(), only = h_market_arg("--market=nzx-main")),
+           error = function(e) {
+    cat("  h_run failed: ", conditionMessage(e), "\n", sep = "")
+  })
+  check("--market= takes a FidessaMarket too, any case: the same file",
+        list(list.files(s8c$OUTPUT_DIR),
+             identical(bytes(s8c$OUTPUT_DIR), bytes(s$OUTPUT_DIR))),
+        list("AIA NZ", TRUE))
   check("--market= with a code we do not cover stops",
         tryCatch({h_run(z, s8, h_quiet_log(), only = "XX"); "ran"},
-                 error = function(e) grepl("XX not in", conditionMessage(e))),
+                 error = function(e) grepl("XX is neither", conditionMessage(e))),
         TRUE)
   s9 <- s
   s9$OUTPUT_DIR <- file.path(d, "out9")
