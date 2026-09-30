@@ -1106,6 +1106,7 @@ l_main <- function() {
   if (identical(a[1], "--self-test")) return(l_self_test())
   s <- p1_settings(required = L_REQUIRED)
   envs <- l_envs(a[2])
+  p1_require_use(a[1], "luld", "limit_up_down.r")
   z <- p1_unzip(a[1], L_MEMBERS)
   log <- p1_log_open(s$LOG_DIR, z$date)
   log$info(paste("limit_up_down.r", a[1], paste(envs, collapse = "|")))

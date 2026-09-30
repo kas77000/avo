@@ -1227,6 +1227,7 @@ h_main <- function() {
     early <<- c(early, txt)
   }
   say(paste("historical.r", a[1]))
+  p1_require_use(a[1], "ticks", "historical.r")
   z <- p1_unzip(a[1], H_MEMBERS, say = say)
   log <- p1_log_open(s$LOG_DIR, z$date)
   log$file_only(early)

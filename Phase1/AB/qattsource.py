@@ -267,6 +267,68 @@ def live_ticks_q(time_field: str = None, cols=None) -> str:
     return "{[s] select " + _col_list(cols) + "from qatt where sym in s}"
 
 
+#  What marks the fast close query, for a fake connection to recognise.
+LAST_MARK = "price:max price by sym, cond"
+
+
+def last_q(time_field: str = None, dated: bool = True) -> str:
+    """THE CLOSES WITHOUT THE TICKS: per sym and cond, the highest price
+    in that cond's latest second - one short row each, instead of a day of
+    prints.
+
+        {[d;s] select from (0!select price:max price by sym, cond,
+               tradeTime:tradeTime.second from qatt where date=d, sym in s)
+               where tradeTime=(max;tradeTime) fby ([]sym;cond)}
+
+    WHY max price AND NOT last price.  closes.resolve on the condensed
+    ticks takes the LAST condensed line - the `by` sorts a second's lines
+    by price, so of two prices in the last second it is the higher.  The
+    same rule here keeps the two paths giving the same close.  The inner
+    select is ticks_q's grouping (cond included); the `fby` runs on its
+    small answer, not on the partitioned table.  `max` skips a null second,
+    so a null-time group survives only when its cond has no timed print -
+    as last_trade treats a null time.  `dated` False is the RDB's form."""
+    f = time_field or TIME_FIELD
+    args, where = (("[d;s]", "date=d, sym in s") if dated
+                   else ("[s]", "sym in s"))
+    return ("{" + args + " select from (0!select " + LAST_MARK + ", " + f +
+            ":" + f + ".second from qatt where " + where + ") where " + f +
+            "=(max;" + f + ") fby ([]sym;cond)}")
+
+
+def fetch_last_raw(conn, date, syms):
+    """EXTRACT the fast close rows; `date` None asks the RDB."""
+    if not syms:
+        return []
+    if date is None:
+        return conn(last_q(None, dated=False), list(syms))
+    return conn(last_q(None), date, list(syms))
+
+
+def shape_last(result, time_field: str = None) -> dict:
+    """TRANSFORM last_q's answer into what closes.resolve takes:
+    {sym: [(seconds of day | None, price, "", cond, "")]}, each sym's rows
+    in the condensed ticks' order - a null second first, then by second,
+    price, cond - with price and cond formatted as shape() formats them, so
+    closes.pick matches the same codes and the same last line wins."""
+    from decimal import Decimal as _D
+    from ticksfile import _num, condition
+    field = time_field or TIME_FIELD
+    src = _frame(result)
+    c = _columns_of(src, ("sym", "price", "cond"))
+    seconds = _second_column(src, field, "s")
+    del src
+    out = {}
+    for sym, secs, price, cond in zip(c["sym"], seconds, c["price"],
+                                      c["cond"]):
+        out.setdefault(text(sym), []).append(
+            (secs, _num(to_decimal(price)), "", condition(text(cond)), ""))
+    for rows in out.values():
+        rows.sort(key=lambda r: (r[0] is not None, r[0] or 0,
+                                 _D(r[1]) if r[1] else _D(0), r[3]))
+    return out
+
+
 def probe_q() -> str:
     """Every time column at once, for one name on one day."""
     return ("{[d;s] select " + ",".join(TIME_FIELDS) + "," +
@@ -1602,6 +1664,31 @@ def self_test() -> int:
     m = _memo(repr)
     check("the memo tells 1 from 1.0", (m(1), m(1.0), m(1)),
           ("1", "1.0", "1"))
+
+    print("\nthe fast close query")
+    check("dated, for the HDB",
+          last_q("tradeTime"),
+          "{[d;s] select from (0!select price:max price by sym, cond, "
+          "tradeTime:tradeTime.second from qatt where date=d, sym in s) "
+          "where tradeTime=(max;tradeTime) fby ([]sym;cond)}")
+    check("undated, for the RDB", last_q("tradeTime", dated=False)
+          .startswith("{[s] select from (0!select price:max price by sym, "
+                      "cond, tradeTime:tradeTime.second from qatt where "
+                      "sym in s)"), True)
+    got = shape_last([
+        {"sym": "A", "cond": "", "tradeTime": dt.time(9, 0, 5),
+         "price": 10.5},
+        {"sym": "A", "cond": "R,S", "tradeTime": dt.time(9, 0, 5),
+         "price": 10.25},
+        {"sym": "A", "cond": "CA", "tradeTime": None, "price": 11},
+        {"sym": "B", "cond": "CA", "tradeTime": dt.time(9, 0, 1),
+         "price": 3}], "tradeTime")
+    check("shaped as condensed lines: a null second first, then second and "
+          "price; cond formatted as shape() does",
+          got["A"], [(None, "11", "", "CA", ""),
+                     (32405, "10.25", "", "R@S", ""),
+                     (32405, "10.5", "", "#N/A N.A.", "")])
+    check("each sym apart", list(got), ["A", "B"])
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

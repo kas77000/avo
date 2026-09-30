@@ -52,6 +52,8 @@ python extract.py --date 2026-09-25 --rdb    that day, read from the RDB
 python extract.py --log C:\path\to\logs\extract.log
 python extract.py --fresh                    the day again, from scratch
 python extract.py --market "NZ|HK"           only those markets, read again
+python extract.py --for "luld|td"            only what limit_up_down.r and
+                                             trading_data.r read: no ticks
 ```
 
 - **No argument:** the trade date is today, and qatt and quote are read from
@@ -116,6 +118,43 @@ python extract.py --market "NZ|HK"           only those markets, read again
   and a run without `--market` reads just those and writes the zip. On a
   fully staged day, `--market` re-reads those markets and rebuilds the
   zip, replacing the day's zip.
+- **`--for USES`:** what the zip is for, one or more of `luld`
+  (`limit_up_down.r`), `td` (`trading_data.r`) and `ticks`
+  (`historical.r`), joined by `|` (quote it), in any case. Without it, all
+  three, as before. The zip holds only what those jobs read, plus
+  `manifest.csv`:
+
+  | use | members |
+  |---|---|
+  | `luld` | `master.csv`, `closes.csv`, `equity.csv`, `ladders.csv` |
+  | `td` | `master.csv`, `closes.csv`, `equity.csv` |
+  | `ticks` | `master.csv`, `ticks.csv`, `closes.csv`, `quote_only.csv` |
+
+  It is named for them, in the order luld, td, ticks:
+  `phase1-YYYYMMDD-luld.zip`, `phase1-YYYYMMDD-luld-td.zip`,
+  `phase1-YYYYMMDD-td-ticks.zip`; with all three it stays
+  `phase1-YYYYMMDD.zip`. The manifest's `for` says which (`luld|td`), and
+  step 1 logs it:
+
+  ```
+  ..  --for                   luld|td   -> phase1-YYYYMMDD-luld-td.zip
+  ```
+
+  **Without `ticks`, no print is read and no quote.** Each market's closes
+  come from one short query per chunk of syms, a row per sym and
+  condition: the highest price in that condition's latest second.
+  The close rule then picks from those rows exactly as it does from the
+  ticks, so the closes are the same as a full run's. Ladders are fetched
+  only for `luld`. `equity.csv` and `px.csv` come from the same
+  equity_master query as always, since the `no-trades` closes need
+  `PX_LAST`. A market is done for `luld`/`td` once its `closes-<MKT>.csv`
+  is staged, and for `ticks` once all three of its files are. So a
+  `luld|td` run after a full run reuses its closes and reads nothing. A
+  `ticks` run after a `luld|td` run reads, the full way, the markets that
+  lack ticks, and rewrites their closes. `--market` redoes only what this
+  run's uses need; with `--for luld` it rewrites `closes-<MKT>.csv` and
+  leaves that market's ticks alone. The zip is built once every market is
+  done for the uses asked.
 - **`--log FILE`:** also appends the log to FILE. Each run starts with a
   `=== YYYY-MM-DD HH:MM:SS ===` line.
 - **`--fresh`:** moves the day's staging folder aside first, so everything
@@ -241,11 +280,13 @@ smaller size is kept for the rest of the run, across markets.
 
 ## What the zip contains
 
-`EXPORT_DIR/phase1-YYYYMMDD.zip`. Every member is CSV, UTF-8, with a header.
+`EXPORT_DIR/phase1-YYYYMMDD.zip`, or `phase1-YYYYMMDD-<uses>.zip` for a
+`--for` zip, which holds only its uses' members (see `--for`). Every member
+is CSV, UTF-8, with a header.
 
 | member | columns | what |
 |---|---|---|
-| `manifest.csv` | `key,value` | `date`, `source` (`rdb`/`hdb`), `equity_master date`, `time column`, `kdb timezone`, `syms asked`, `prints` (condensed `ticks.csv` lines), `syms with prints`, `quote only`, `closes from qatt` (closing prints), `closes from last trade`, `closes from equity_master`, `no close` (the four add up to `syms asked`), `exported at` |
+| `manifest.csv` | `key,value` | `date`, `source` (`rdb`/`hdb`), `for` (`luld\|td\|ticks`, or what `--for` asked), `equity_master date`, `time column`, `kdb timezone`, `syms asked`, `prints` (condensed `ticks.csv` lines; blank without ticks), `syms with prints`, `quote only` (blank without ticks), `closes from qatt` (closing prints), `closes from last trade`, `closes from equity_master`, `no close` (the four add up to `syms asked`), `exported at` |
 | `master.csv` | `BloombergCode,sym,EQY_PRIM_EXCH_SHRT,COMPOSITE_EXCH_CODE,ID_MIC_PRIM_EXCH` | each CrossCode code's equity_master row: the link from `7203 JT` to the qatt sym `7203.JP` |
 | `ticks.csv` | `sym,time,price,size,cond,ex` | one line per sym, second, price, cond and ex, with the volume of every qatt print behind it summed (see below); each sym's lines together, in time order, time `HH:MM:SS` in **kdb's clock**; several conditions are joined with `@`, an empty one is `#N/A N.A.` |
 | `closes.csv` | `sym,close,source,reason` | one row per sym asked; see below |

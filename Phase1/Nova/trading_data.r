@@ -1116,6 +1116,7 @@ t_main <- function() {
   a <- p1_args()
   if (identical(a[1], "--self-test")) return(t_self_test())
   s <- p1_settings(required = T_REQUIRED)
+  p1_require_use(a[1], "td", "trading_data.r")
   z <- p1_unzip(a[1], T_MEMBERS)
   log <- p1_log_open(s$LOG_DIR, z$date)
   log$info(paste("trading_data.r", a[1]))

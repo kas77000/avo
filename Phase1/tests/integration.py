@@ -15,6 +15,9 @@ from a temp copy of Phase1/Nova with its own settings.r.
 
     1  condensed vs raw         the same day, zip A condensed, zip B raw
     2  time representations     int, timedelta, pandas, numpy, a frame, null
+    1c --for luld|td            the closes without the ticks, through
+                                limit_up_down.r, trading_data.r and
+                                run_phase1.cmd, against scenario 1
     3  workflow                 AB resume and --market, run_phase1.cmd,
                                 historical.r --market=NZE-MAIN and a rerun
     4  --big                    timings only, no pass/fail on them
@@ -373,6 +376,9 @@ class FakeKdb:
         if "from qatt" not in q:
             raise AssertionError(f"qatt was asked {q}")
         syms = list(args[-1])
+        if qattsource.LAST_MARK in q:
+            self.asked.append(("fast", syms, q))
+            return self.last_rows(syms)
         condensed = CONDENSED_MARK in q
         self.asked.append(("condensed" if condensed else "raw", syms, q))
         if self.fail_syms & set(syms):
@@ -402,6 +408,22 @@ class FakeKdb:
             "ex": pd.Series([r["ex"] for r in rows], dtype=object),
             "size": pd.Series([r["size"] for r in rows], dtype="int64")})
         return FakeTable(df)
+
+    def last_rows(self, syms):
+        """What kdb answers qattsource.last_q with: per sym and cond, the
+        highest price in that cond's latest second."""
+        best = {}
+        for sym in syms:
+            for r in self.day.raw.get(sym, []):
+                t = r[T]
+                k = (sym, r["cond"], t.hour * 3600 + t.minute * 60 + t.second)
+                best[k] = max(best.get(k, r["price"]), r["price"])
+        out = []
+        for sym, cond in sorted({k[:2] for k in best}):
+            last = max(k[2] for k in best if k[:2] == (sym, cond))
+            out.append({"sym": sym, "cond": cond, T: self.time_rep(last),
+                        "price": best[(sym, cond, last)]})
+        return out
 
     def quote(self, q, *args):
         if q == extract.TABLES_Q:
@@ -445,14 +467,14 @@ def uncondensed():
         qattsource.condensed = was
 
 
-def ab_build(export, cc, kdb, only=None, fresh=False, chunk=2):
+def ab_build(export, cc, kdb, only=None, fresh=False, chunk=2, uses=None):
     cfg = dict(settings.DEFAULTS, CROSSCODE_PATH=str(cc),
                EXPORT_DIR=str(export), SYM_CHUNK=chunk)
     Path(export).mkdir(parents=True, exist_ok=True)
     log = FileLog(Path(export) / "extract.log")
     try:
         return extract.build(cfg, DAY, kdb.conns(), log, today=TODAY,
-                             fresh=fresh, only=only), log
+                             fresh=fresh, only=only, uses=uses), log
     finally:
         log.close()
 
@@ -719,6 +741,70 @@ def flip_probe(tmp):
 
 
 # -- scenario 2 -------------------------------------------------------------
+
+def run_cmd(env, zip_path):
+    """run_phase1.cmd from the env's copy, with this PC's Rscript."""
+    cmd = env.dir / "run_phase1.cmd"
+    text = cmd.read_text(encoding="utf-8", errors="replace")
+    win_r = str(Path(RSCRIPT))
+    cmd.write_text(re.sub(r'^set "RSCRIPT=[^\r\n]*"', lambda m:
+                          f'set "RSCRIPT={win_r}"', text, flags=re.M),
+                   encoding="utf-8", newline="")
+    line = f'cmd /s /c "echo.| "{cmd}" "{zip_path}""'
+    p = subprocess.run(line, capture_output=True)
+    return p.returncode, (p.stdout + p.stderr).decode("utf-8",
+                                                      errors="replace")
+
+
+# -- scenario 1c ------------------------------------------------------------
+
+def scenario_for(tmp, s1):
+    tmp.mkdir(parents=True, exist_ok=True)
+    section("1c. --for luld|td")
+    k = FakeKdb(s1.day)
+    z, _ = ab_build(tmp / "ab", s1.cc, k, uses=("luld", "td"))
+    check(f"AB writes phase1-{YMD}-luld-td.zip",
+          z and z.name == f"phase1-{YMD}-luld-td.zip", str(z))
+    check("reading no tick: only the fast close query",
+          {kind for kind, _, _ in k.asked} == {"fast"},
+          str({kind for kind, _, _ in k.asked}))
+    mz, mA = members(z), members(s1.zA)
+    check("its members: the full zip's less ticks and quote_only",
+          sorted(mz) == ["closes.csv", "equity.csv", "ladders.csv",
+                         "manifest.csv", "master.csv"], str(sorted(mz)))
+    same = [m for m in ("closes.csv", "master.csv", "equity.csv",
+                        "ladders.csv") if mz.get(m) != mA.get(m)]
+    check("closes, master, equity and ladders byte-identical to the full "
+          "zip's", not same, f"differ: {same}")
+    check("the manifest says luld|td", manifest(z).get("for") == "luld|td")
+
+    env = nova_env(tmp / "nova", s1.cc)
+    for job in ("limit_up_down.r", "trading_data.r"):
+        ran(f"luld|td: {job}", rjob(env, job, z))
+    check("limitUpDown.csv byte-identical to the full zip's",
+          env.luld["temp"].exists() and env.luld["temp"].read_bytes()
+          == s1.eA.luld["temp"].read_bytes())
+    check("TradingData.csv byte-identical to the full zip's",
+          env.td.exists() and env.td.read_bytes() == s1.eA.td.read_bytes())
+    r = rjob(env, "historical.r", z)
+    check("historical.r refuses it, saying what to run",
+          r.code == 1 and "XX  this zip was made for luld|td; historical.r "
+          "needs a zip made with --for ticks" in r.out,
+          f"exit {r.code}:\n" + "\n".join(r.out.splitlines()[-5:]))
+
+    env2 = nova_env(tmp / "nova2", s1.cc)
+    code, out = run_cmd(env2, z)
+    check("run_phase1.cmd on it exits 0, skipping historical.r",
+          code == 0 and "historical.r skipped: this zip was not made for "
+          "ticks" in out and "skipped, not in this zip: historical.r" in out,
+          f"exit {code}:\n" + "\n".join(out.splitlines()[-12:]))
+    check("run_phase1.cmd: no tick file, the same limitUpDown.csv and "
+          "TradingData.csv",
+          not tree(env2.hist)
+          and env2.luld["temp"].read_bytes()
+          == s1.eA.luld["temp"].read_bytes()
+          and env2.td.read_bytes() == s1.eA.td.read_bytes())
+
 
 def scenario2(tmp, s1):
     tmp.mkdir(parents=True, exist_ok=True)
@@ -1073,6 +1159,7 @@ def main(argv=None) -> int:
     print(f"Phase1 integration, trade day {DAY} (today {TODAY}), in {tmp}")
     try:
         s1 = scenario1(tmp / "s1")
+        scenario_for(tmp / "s1c", s1)
         scenario2(tmp / "s2", s1)
         scenario3(tmp / "s3", s1)
         if a.big:

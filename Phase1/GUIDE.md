@@ -136,6 +136,13 @@ Other ways to run it:
 | `python extract.py --date 2026-09-25 --rdb` | that day, from the RDB (e.g. just after midnight, while the RDB still holds it). Check the `RDB date` line in the log: if it differs from the date asked, do not use that zip |
 | `python extract.py --market=NZE-MAIN` | redo only those markets (FidessaMarket names or Bloomberg codes, e.g. `"NZ\|HKG-MAIN"`, in quotes). The zip is rebuilt once every market is done |
 | `python extract.py --fresh` | forget the day's working folder and start over |
+| `python extract.py --for "luld\|td"` | a zip for `limit_up_down.r` and `trading_data.r` only: no ticks read, so much faster. `luld`, `td`, `ticks` in any mix; all three without `--for` |
+
+The zip is named for what it is for: `phase1-YYYYMMDD.zip` for all three
+jobs, else `phase1-YYYYMMDD-luld.zip`, `phase1-YYYYMMDD-luld-td.zip`,
+`phase1-YYYYMMDD-td-ticks.zip` and so on. Its closes are the same either
+way. A `--for ticks` run after a `--for "luld|td"` run of the same day
+reads only the ticks it still lacks.
 
 A no-date run on a weekend stops (use `--date`). A day with no prints at all
 stops without a zip.
@@ -152,7 +159,9 @@ Copy `EXPORT_DIR\phase1-YYYYMMDD.zip` from AB to Nova, anywhere, e.g.
 X:\path\to\phase1\run_phase1.cmd X:\path\to\phase1\exports\phase1-YYYYMMDD.zip
 ```
 
-or drag the zip onto `run_phase1.cmd`. It runs, in order:
+or drag the zip onto `run_phase1.cmd`. It runs, in order, each job the
+zip was made for (all three for `phase1-YYYYMMDD.zip`; for a `--for` zip
+the others are skipped and the window says so):
 
 | Job | Writes |
 |---|---|
@@ -234,6 +243,7 @@ run `historical.r` alone.
 | Nova `settings.r does not exist` | step 2.3 not done | copy `settings.r.example` to `settings.r` |
 | Nova `!! ... no TimeZone for <venue>` | the CrossCode's FidessaMarket is not in `config\hist_markets.csv` | add the venue there, then `historical.r <zip> --market=<venue>` |
 | Nova `XX` on a zip count or unzip | the zip is damaged or incomplete | copy it again from AB |
+| Nova `XX this zip was made for luld\|td; historical.r needs a zip made with --for ticks` | the zip was made with `--for` without that job's use | on AB, `extract.py --for ticks` (with the same `--date`), and run that zip |
 | Nova `XX` from `limit_up_down.r` about a blank environment path | an environment asked for has no path in `settings.r` | fill the path, or pass only the environments you have |
 
 ## 7. Tests

@@ -5,6 +5,7 @@
 #     source(file.path(p1_here(), "common.r"))
 #
 #     Rscript common.r --self-test
+#     Rscript common.r --zip-has ticks phase1-YYYYMMDD.zip   (exit 0 or 3)
 
 P1_MEMBERS <- c("manifest.csv", "master.csv", "ticks.csv", "closes.csv",
                 "quote_only.csv", "equity.csv", "ladders.csv")
@@ -204,6 +205,49 @@ p1_unzip <- function(zip, members = P1_MEMBERS,
   p1_check_counts(dir, manifest, members, say)
   list(dir = dir, manifest = manifest, date = as.Date(manifest[["date"]]),
        checked = intersect(members, names(P1_COUNTS)))
+}
+
+# -- what the zip is for -------------------------------------------------
+
+# AB's extract.py --for: a zip is made for some of these, and its manifest
+# says which under "for". A zip with no "for" predates --for: all three.
+# historical.r needs ticks, limit_up_down.r luld, trading_data.r td.
+P1_USES <- c("luld", "td", "ticks")
+
+p1_uses <- function(manifest) {
+  f <- if ("for" %in% names(manifest)) manifest[["for"]] else ""
+  u <- tolower(trimws(unlist(strsplit(f, "|", fixed = TRUE))))
+  u <- u[nzchar(u)]
+  if (!length(u)) P1_USES else P1_USES[P1_USES %in% u]
+}
+
+# The uses of a zip, from its manifest alone.
+p1_zip_uses <- function(zip) {
+  dir <- tempfile("phase1-for-")
+  on.exit(unlink(dir, recursive = TRUE))
+  suppressWarnings(utils::unzip(zip, files = "manifest.csv", exdir = dir))
+  f <- file.path(dir, "manifest.csv")
+  if (!file.exists(f)) stop(zip, " has no manifest.csv", call. = FALSE)
+  m <- p1_csv(f)
+  p1_uses(setNames(m$value, m$key))
+}
+
+# NULL when `use` is among the zip's `uses`, else why the job cannot run.
+p1_use_refusal <- function(uses, use, job) {
+  if (use %in% uses) return(NULL)
+  paste0("this zip was made for ", paste(uses, collapse = "|"), "; ", job,
+         " needs a zip made with --for ", use)
+}
+
+# Before a job unzips: a zip not made for its use stops it, with an XX
+# line. A zip whose manifest cannot be read is left to p1_unzip to report.
+p1_require_use <- function(zip, use, job) {
+  uses <- tryCatch(p1_zip_uses(zip), error = function(e) NULL)
+  msg <- if (is.null(uses)) NULL else p1_use_refusal(uses, use, job)
+  if (!is.null(msg)) {
+    cat("XX  ", msg, "\n", sep = "")
+    quit(save = "no", status = 1)
+  }
 }
 
 # -- the crosscode ------------------------------------------------------
@@ -592,12 +636,42 @@ p1_common_self_test <- function() {
   check("a second run appends, a blank line between the runs",
         c(lines[7], substr(lines[8], 1, 4)), c("", "=== "))
 
+  cat("\nwhat the zip is for\n")
+  check("a manifest with no 'for' is an old zip: all three uses",
+        p1_uses(c(date = "2026-09-25")), c("luld", "td", "ticks"))
+  check("'for' is split on |, any case, in the fixed order",
+        p1_uses(c("for" = "TD|luld")), c("luld", "td"))
+  check("the fixture zip, made before --for, is for everything",
+        p1_zip_uses(file.path(here, "tests", "fixture",
+                              "phase1-20260925.zip")),
+        c("luld", "td", "ticks"))
+  check("a job whose use is in the zip goes on",
+        is.null(p1_use_refusal(c("luld", "td"), "td", "trading_data.r")),
+        TRUE)
+  check("one whose use is not is refused, saying what to run",
+        p1_use_refusal(c("luld", "td"), "ticks", "historical.r"),
+        paste0("this zip was made for luld|td; historical.r needs a zip ",
+               "made with --for ticks"))
+
   t$done()
+}
+
+# Rscript common.r --zip-has USE ZIP: exit 0 when the zip is made for USE,
+# 3 when it is not, 1 when its manifest cannot be read - for
+# run_phase1.cmd, which runs only the jobs the zip is for.
+p1_zip_has_main <- function(use, zip) {
+  uses <- tryCatch(p1_zip_uses(zip), error = function(e) {
+    cat("XX  ", conditionMessage(e), "\n", sep = "")
+    quit(save = "no", status = 1)
+  })
+  quit(save = "no", status = if (use %in% uses) 0 else 3)
 }
 
 if (identical(basename(sub("^--file=", "",
                            grep("^--file=", commandArgs(FALSE),
-                                value = TRUE)[1])), "common.r") &&
-    identical(commandArgs(TRUE)[1], "--self-test")) {
-  p1_common_self_test()
+                                value = TRUE)[1])), "common.r")) {
+  if (identical(commandArgs(TRUE)[1], "--self-test")) p1_common_self_test()
+  if (identical(commandArgs(TRUE)[1], "--zip-has")) {
+    p1_zip_has_main(commandArgs(TRUE)[2], commandArgs(TRUE)[3])
+  }
 }

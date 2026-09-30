@@ -10,7 +10,8 @@ B-PIPE; these three R jobs turn the zip into the files B-PIPE used to feed:
 | `limit_up_down.r` | `limitUpDown.csv` for the first cutoff (Japan and Korea), copied to Test, Pilot and Prod |
 | `trading_data.r` | `TradingData.csv` |
 
-`run_phase1.cmd` runs all three, in that order.
+`run_phase1.cmd` runs all three, in that order - or, for a zip AB made
+with `--for`, only the jobs it was made for (see below).
 
 All three cover the same universe as AB's extract: the CrossCode rows whose
 Bloomberg exchange code (`7203 JT` -> `JT`) is one of the 18 codes in
@@ -94,6 +95,21 @@ window stays open until a key is pressed, whatever happened.
 
 A job can be run on its own the same way:
 `Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip`.
+
+**A zip made for some jobs only.** AB's `extract.py --for` makes a zip for
+some of `luld` (`limit_up_down.r`), `td` (`trading_data.r`) and `ticks`
+(`historical.r`), e.g. `phase1-YYYYMMDD-luld-td.zip`, and its manifest says
+which under `for`. A zip with no `for` (every zip made before `--for`) is
+for all three. `run_phase1.cmd` asks each zip first
+(`Rscript common.r --zip-has <use> <zip>`) and runs only its jobs; the
+others are skipped, a `..  historical.r skipped: this zip was not made for
+ticks` line each, and the run ends `ok  jobs done; skipped, not in this
+zip: historical.r`. A skipped job is not a failure. A job run by hand on a
+zip not made for it stops before unzipping, with
+
+```
+XX  this zip was made for luld|td; historical.r needs a zip made with --for ticks
+```
 
 Running the same zip again is safe. `historical.r` leaves a tick file that
 already exists alone and does not repeat a NoTradingDay row;
@@ -231,6 +247,7 @@ What stops a job with `XX` (or an R `Error`, before the log is open):
 | Job | Why |
 |-----|-----|
 | all | The zip does not unzip cleanly, or a member's rows are not the manifest's count. Copy the zip again. |
+| all | `this zip was made for <uses>; <job> needs a zip made with --for <use>`: make that zip on AB. |
 | historical | The manifest's `kdb timezone` is not `KDB_TIMEZONE`. Nothing is written. |
 | historical | `ticks.csv is not grouped by sym`: a sym's rows are split. AB never writes that; the zip is not one it wrote. |
 | limit_up_down | `<env>: LULD_OUT_<ENV> is blank`: an environment asked for has no path. The others still get the file. |
