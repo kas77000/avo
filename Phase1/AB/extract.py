@@ -120,7 +120,7 @@ LADDER_COLUMNS = ["BloombergCode", "sym", "price", "ticksize"]
 
 #  The reasons closes.resolve gives short of a closing print, in the
 #  summary's order: the last trade (source qatt), PX_LAST (equity_master).
-REASONS = ("last-trade", "no-trades")
+REASONS = ("last-trade", "no-trades", "none-before-cutoff")
 
 #  What "too big" looks like from here - see historical_ticks.run.
 TOO_BIG = ("wsfull", "limit", "abort")
@@ -230,6 +230,22 @@ def safe_code(code) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", code or "") or "NONE"
 
 
+#  LastTradeBefore is written in HKT, the clock kdb stamps qatt in.
+HKT = "China Standard Time"
+
+
+def cut_seconds(date, hkt, kdb_tz) -> int:
+    """A LastTradeBefore, HH:MM or HH:MM:SS in HKT, as seconds of day in
+    kdb's clock (KDB_TIMEZONE) on that date: itself when kdb is on HKT,
+    else shifted by marketcfg's one offset per day, taken at noon.  A
+    malformed time is a ValueError."""
+    m = re.fullmatch(r"(\d\d?):(\d\d)(?::(\d\d))?", (hkt or "").strip())
+    if not m or int(m[1]) > 23 or int(m[2]) > 59 or int(m[3] or 0) > 59:
+        raise ValueError(f"{hkt!r} is not HH:MM or HH:MM:SS")
+    secs = int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3] or 0)
+    return (secs + marketcfg.shift_seconds(date, HKT, kdb_tz)) % 86_400
+
+
 def px_or_none(value):
     """PX_LAST as closes.resolve wants it: the text, or None when it is
     blank, not a number, or <= 0 - a zero last price is not a price."""
@@ -290,7 +306,8 @@ def too_big(e) -> bool:
             or any(k in str(e) for k in TOO_BIG))
 
 
-def fetch_chunks(conn, date, syms, cols, size, reconnect, log, last=False):
+def fetch_chunks(conn, date, syms, cols, size, reconnect, log, last=False,
+                 cut=None):
     """{sym: rows} per chunk of syms, in order.  `date` None reads the RDB.
     A read that is too big is halved and asked again on a fresh connection,
     and the smaller size is kept - as in historical_ticks.run.  `size` is a
@@ -299,7 +316,8 @@ def fetch_chunks(conn, date, syms, cols, size, reconnect, log, last=False):
     export: a zip missing a name would look exactly like a quiet day.
 
     `last` reads qattsource.last_q instead of the ticks - the closes
-    without the prints - shaped by shape_last into the same {sym: rows}."""
+    without the prints - shaped by shape_last into the same {sym: rows};
+    `cut` (seconds, kdb's clock) its rows at or before a cutoff."""
     state = size if isinstance(size, dict) else {"n": size}
     size, pos, reads = max(1, int(state["n"])), 0, 0
     while pos < len(syms):
@@ -307,7 +325,7 @@ def fetch_chunks(conn, date, syms, cols, size, reconnect, log, last=False):
         t0 = time.monotonic()
         try:
             if last:
-                raw = qattsource.fetch_last_raw(conn, date, group)
+                raw = qattsource.fetch_last_raw(conn, date, group, cut)
             elif date is None:
                 raw = qattsource.fetch_live_raw(conn, group, cols)
             else:
@@ -639,7 +657,8 @@ def assemble(stage, out, mkts, head, uses=USES) -> tuple:
                 #  a closing print, the last trade, PX_LAST, nothing.
                 "closes from qatt": total("qatt"),
                 "closes from last trade": total("last-trade"),
-                "closes from equity_master": total("no-trades"),
+                "closes from equity_master": total("no-trades")
+                + total("none-before-cutoff"),
                 "no close": total("no-close"),
                 "exported at": f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}"})
             z.writestr(MANIFEST, _csv([["key", "value"]] + [
@@ -669,7 +688,7 @@ def read_quotes(conns, qday, syms, log) -> dict:
 
 
 def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
-          fresh=False, rdb=False, only=None, uses=None):
+          fresh=False, rdb=False, only=None, uses=None, cutoffs=None):
     """Stage the day market by market, then write
     EXPORT_DIR/phase1-YYYYMMDD.zip, and return its path.
 
@@ -698,7 +717,12 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     row per sym and cond, the same closes the ticks give; no quote either.
     A market is done for the uses when their files are staged (done_for),
     so a luld/td run reuses a ticks run's closes, and a ticks run after a
-    luld/td run reads, the full way, the markets that lack ticks."""
+    luld/td run reads, the full way, the markets that lack ticks.
+
+    `cutoffs` is closes.load_cutoffs': BBGCode -> LastTradeBefore, from
+    config/ with the conditions, none when the conditions are given.  The
+    market's last trade is then its last print at or before that time,
+    HKT, in kdb's clock for the day."""
     today = today or dt.date.today()
     uses = tuple(uses) if uses else USES
     if not uses or any(u not in USES for u in uses):
@@ -711,6 +735,10 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     if conditions is None:
         conditions = closes.load_conditions(
             HERE / "config" / "close_conditions.csv")
+        if cutoffs is None:
+            cutoffs = closes.load_cutoffs(
+                HERE / "config" / "close_conditions.csv")
+    cutoffs = cutoffs or {}
     q_name, source = qatt_server(date, rdb)
     em = conns["em"]
     #  How each connection is named in an error: the setting, and in a real
@@ -754,6 +782,13 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         log.kv("--market", said,
                f"{len(codes)} of {len(conditions)} markets this run")
         only = codes
+    #  Each cutoff must read as a time: checked before kdb is asked.
+    for code, hkt in sorted(cutoffs.items()):
+        try:
+            said = qattsource.hms(cut_seconds(today, hkt, HKT))
+        except ValueError as e:
+            raise ExtractError(f"LastTradeBefore of {code}: {e}") from e
+        log.kv("last trade before", f"{code} {said} HKT")
     log.kv("--for", "|".join(uses),
            "-> " + bundle_name(dt.date(1, 1, 1), uses).replace(
                "00010101", "YYYYMMDD"))
@@ -780,6 +815,17 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
             raise ExtractError(f"qatt has no partition on or before {date}")
         log.kv("day", str(day), f"newest partition on or before {date}")
     qday = None if source == "rdb" else day
+    #  The cutoffs in kdb's clock, for this day: HKT itself, normally.
+    try:
+        cut_kdb = {code: cut_seconds(day, hkt, cfg["KDB_TIMEZONE"])
+                   for code, hkt in cutoffs.items()}
+    except ValueError as e:
+        raise ExtractError(f"LastTradeBefore: {e}") from e
+    for code in sorted(cut_kdb):
+        if cut_kdb[code] != cut_seconds(day, cutoffs[code], HKT):
+            log.kv("last trade before", f"{code} = "
+                   f"{qattsource.hms(cut_kdb[code])} kdb",
+                   f"kdb's clock is {cfg['KDB_TIMEZONE']}")
     try:
         cols = qattsource.select_columns(qattsource.columns(conns["qatt"]))
     except ValueError as e:
@@ -861,6 +907,9 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         by_market.setdefault(safe_code(code), []).append(s)
     log.kv("syms to export", logs.thousands(len(syms)),
            f"in {len(by_market)} markets")
+    #  A sym's cutoff is its market's - the code it is filed under.
+    cut_of = {s: cut_kdb[m] for m, ms in by_market.items() if m in cut_kdb
+              for s in ms}
     if odd:
         log.warn(f"{len(odd)} odd exchange codes, filed under a safe name: "
                  + ", ".join(f"{c!r} ({b})" for c, b in
@@ -935,13 +984,17 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
 
     settled = {}
 
-    def settle(sym, prints):
+    def settle(sym, prints, ltp=None):
         """(Close, why): `why` is the fallback reason even for a sym that
-        ends with no close, so its log line can say it."""
-        c = closes.resolve(sym, prints, codes.get(sym, []), px_of(sym))
+        ends with no close, so its log line can say it.  `ltp` are the fast
+        path's rows at or before the cutoff, when the market has one."""
+        cut = cut_of.get(sym)
+        c = closes.resolve(sym, prints, codes.get(sym, []), px_of(sym),
+                           cut, ltp)
         why = c.reason
         if c.reason == "no-close":
-            why = closes.resolve(sym, prints, codes.get(sym, []), "?").reason
+            why = closes.resolve(sym, prints, codes.get(sym, []), "?",
+                                 cut, ltp).reason
         settled[sym] = (c, why)
 
     def reconnect():
@@ -989,6 +1042,22 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                         stats = write_ticks(fh, fetch_chunks(
                             conns["qatt"], qday, msyms, cols, size,
                             reconnect, log), settle)
+                elif fast and mkt in cut_kdb:
+                    #  The closes, then the last trades before the cut:
+                    #  two short reads, a sym's rows kept between them.
+                    day_rows, ltp = {}, {}
+                    for by_sym in fetch_chunks(
+                            conns["qatt"], qday, msyms, cols, size,
+                            reconnect, log, last=True):
+                        day_rows.update((k, v) for k, v in by_sym.items()
+                                        if v)
+                    for by_sym in fetch_chunks(
+                            conns["qatt"], qday, sorted(day_rows), cols,
+                            size, reconnect, log, last=True,
+                            cut=cut_kdb[mkt]):
+                        ltp.update(by_sym)
+                    for sym, rows in day_rows.items():
+                        settle(sym, rows, ltp.get(sym, []))
                 else:
                     for by_sym in fetch_chunks(
                             conns["qatt"], qday, msyms, cols, size,
@@ -1411,12 +1480,17 @@ def self_test() -> int:
                 for k, v in sorted(summed.items(), key=lambda kv:
                                    order(kv[0]))]
 
-    def fake_last(rows):
+    def fake_last(rows, cut=None):
         """What kdb answers qattsource.last_q with: per sym and cond, the
         highest price in that cond's latest second (a null second only
-        when the cond has no timed print)."""
+        when the cond has no timed print).  With a cut, only the seconds at
+        or before it - and a null second, which q sorts below every
+        second."""
         best = {}
         for r in rows:
+            if cut is not None and sec(r[T]) is not None \
+                    and sec(r[T]) > cut:
+                continue
             k = (r["sym"], r["cond"], sec(r[T]))
             best[k] = max(best.get(k, r["price"]), r["price"])
         out = []
@@ -1455,23 +1529,25 @@ def self_test() -> int:
             if q == qattsource.COLUMNS_Q:
                 return ["sym", "time", T, "price", "size", "cond", "ex"]
             if "from qatt" in q:
-                self.syms += list(args[-1])
-                self.sizes.append(len(args[-1]))
-                if self.max_syms and len(args[-1]) > self.max_syms:
+                cutq = "<=" in q            # last_q with a cut: [..;s;c]
+                syms = list(args[-2] if cutq else args[-1])
+                self.syms += syms
+                self.sizes.append(len(syms))
+                if self.max_syms and len(syms) > self.max_syms:
                     raise ConnectionResetError("dropped")
-                if self.fail or self.fail_on & set(args[-1]):
+                if self.fail or self.fail_on & set(syms):
                     raise RuntimeError("'type")
                 rows = [{"sym": s, T: None if t is None
                          else dt.time.fromisoformat(t), "price": p,
                          "size": n, "cond": c, "ex": "X"}
-                        for s in args[-1] for t, p, n, c in
+                        for s in syms for t, p, n, c in
                         ([] if self.empty or s in self.silent
                          else self.ticks.get(s, []))]
                 fast = qattsource.LAST_MARK in q
-                self.reads.append(("fast" if fast else "ticks",
-                                   list(args[-1])))
+                self.reads.append(("cut" if cutq else "fast" if fast
+                                   else "ticks", syms))
                 if fast:
-                    return fake_last(rows)
+                    return fake_last(rows, args[-1] if cutq else None)
                 if "size:sum size by" in q:
                     return fake_condense(rows)
                 return rows
@@ -1513,7 +1589,8 @@ def self_test() -> int:
 
     def run(tmp, date, em=None, qatt=None, quote=None, log=None,
             fresh=False, cc_text=CROSSCODE, extra=None, conds=None,
-            reconnect=None, rdb=False, only=None, uses=None):
+            reconnect=None, rdb=False, only=None, uses=None,
+            cutoffs=None, mk=None):
         cc = Path(tmp) / "CrossCode.csv"
         cc.write_text(cc_text, encoding="utf-8")
         cfg = dict(settings.DEFAULTS, CROSSCODE_PATH=str(cc),
@@ -1522,9 +1599,10 @@ def self_test() -> int:
                  "quote": quote or FakeQuote(),
                  "reconnect": reconnect or (lambda: FakeQatt())}
         return build(cfg, date, conns, log or Caught(), today=D(2026, 9, 28),
-                     markets=markets,
+                     markets=markets if mk is None else mk,
                      conditions=conditions if conds is None else conds,
-                     fresh=fresh, rdb=rdb, only=only, uses=uses)
+                     fresh=fresh, rdb=rdb, only=only, uses=uses,
+                     cutoffs=cutoffs)
 
     def members(path):
         with zipfile.ZipFile(path) as z:
@@ -1650,9 +1728,9 @@ def self_test() -> int:
               "fallbacks by reason, no-close, quote-only",
               [ln.split()[1:] for ln in table],
               [["market", "syms", "ticks", "qatt", "last-trade",
-                "no-trades", "no-close", "quote-only"],
-               ["HK", "2", "0", "0", "0", "1", "1", "1"],
-               ["JT", "1", "1", "1", "0", "0", "0", "0"]])
+                "no-trades", "none-before-cutoff", "no-close", "quote-only"],
+               ["HK", "2", "0", "0", "0", "1", "0", "1", "1"],
+               ["JT", "1", "1", "1", "0", "0", "0", "0", "0"]])
 
     print("\nthe RDB, when there is no --date")
     with tempfile.TemporaryDirectory() as tmp:
@@ -2246,6 +2324,73 @@ def self_test() -> int:
            "8889.HK,,,no-close", "7203.JP,2890,qatt,",
            "AIA.NZ,6.1,qatt,last-trade", "QQQ.XX,,,no-close",
            "ZZZ.XX,1.7,qatt,last-trade"])
+
+    print("\nthe last trade before a market's cutoff")
+    check("the time is HKT, kdb's own clock: 14:30 is 14:30:00",
+          cut_seconds(D(2026, 9, 25), "14:30", "China Standard Time"),
+          14 * 3600 + 1800)
+    check("and a kdb in another clock gets it converted",
+          cut_seconds(D(2026, 9, 25), "14:30:00", "Tokyo Standard Time"),
+          15 * 3600 + 1800)
+    check("a malformed time is refused",
+          type(attempt(lambda: cut_seconds(D(2026, 9, 25), "4pm",
+                                           "China Standard Time"))).__name__,
+          "ValueError")
+    mk = None
+    cuts = {"HK": "16:00:00", "XX": "10:00"}
+    CUTDAY = dict(TRICKY, **{
+        "8888.HK": [("16:05:00", 3.5, 100, "")],        # all after
+        "8889.HK": [("15:00:00", 3.55, 100, ""),
+                    ("16:10:00", 3.6, 100, "CA")],      # a close, after
+        "ZZZ.XX": [("09:00:00", 1.5, 100, ""), ("09:59:59", 1.6, 100, ""),
+                   ("10:00:00", 1.55, 100, ""),         # at the cut
+                   ("10:30:00", 1.9, 100, ""), (None, 1.95, 100, "")]})
+    got, logs_ = {}, {}
+    for u in (("ticks",), ("luld",)):
+        with tempfile.TemporaryDirectory() as tmp:
+            qatt, logs_[u] = FakeQatt(ticks=CUTDAY), Caught()
+            got[u] = members(run(tmp, D(2026, 9, 25), uses=u, qatt=qatt,
+                                 cutoffs=cuts, mk=mk,
+                                 log=logs_[u]))[CLOSES]
+            if u == ("luld",):
+                cut_reads = [(k, syms) for k, syms in qatt.reads
+                             if k == "cut"]
+    check("with cutoffs, the fast closes are the full path's",
+          got[("luld",)], got[("ticks",)])
+    check("the last trade at or before the cut; a close after it still "
+          "wins; all after is PX_LAST, none-before-cutoff",
+          got[("luld",)],
+          ["sym,close,source,reason",
+           "8888.HK,3.4,equity_master,none-before-cutoff",
+           "8889.HK,3.6,qatt,", "7203.JP,2890,qatt,",
+           "AIA.NZ,6.1,qatt,last-trade", "QQQ.XX,,,no-close",
+           "ZZZ.XX,1.55,qatt,last-trade"])
+    check("the fast path asks the cut query for the cutoff markets' syms "
+          "that traded, only",
+          sorted(s for _k, syms in cut_reads for s in syms),
+          ["8888.HK", "8889.HK", "ZZZ.XX"])
+    check("step 1 says each cutoff, in HKT",
+          [ln for ln in logs_[("ticks",)].lines
+           if ln.startswith("..  last trade before")],
+          ["..  last trade before       HK 16:00:00 HKT",
+           "..  last trade before       XX 10:00:00 HKT"])
+    check("a none-before-cutoff close is a !! line, and a summary column",
+          ([ln for ln in logs_[("ticks",)].lines
+            if "none-before-cutoff  ->" in ln],
+           "none-before-cutoff" in next(
+               ln for ln in logs_[("ticks",)].lines
+               if ln.startswith("..  market "))),
+          (["!!  close  8888.HK  HK  none-before-cutoff  -> equity_master "
+            "3.4"], True))
+    with tempfile.TemporaryDirectory() as tmp:
+        em = FakeEm()
+        err = attempt(lambda: run(tmp, D(2026, 9, 25), em=em,
+                                  cutoffs={"HK": "16h00"}))
+        check("a malformed LastTradeBefore stops the run, naming the code, "
+              "before kdb is asked",
+              (str(err), em.asked),
+              ("LastTradeBefore of HK: '16h00' is not HH:MM or HH:MM:SS",
+               []))
 
     with tempfile.TemporaryDirectory() as tmp:
         stage = Path(tmp) / "out" / "phase1-20260925"

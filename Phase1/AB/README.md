@@ -335,9 +335,21 @@ Without such a print, in this order:
    every line lacks one). Reason `last-trade`. This also covers a market
    with no close codes (no row in `close_conditions.csv`, or a blank
    `CloseCondCodes`): its names close at their last trade.
+
+   **`LastTradeBefore`.** A market whose row in `close_conditions.csv`
+   sets `LastTradeBefore`, a time in **HKT**, takes its last trade from
+   the prints **at or before** that time only. Today that is `KQ` at
+   `14:30:00` (15:30 in Seoul), so KOSDAQ's after-market prints are not
+   taken as a close. It bounds this step only: a closing print after the
+   time still wins (the step above). A print with no time is not "before"
+   it, unless every print of the name lacks a time. Blank: the day's last
+   print, as for every other market. The time is compared in kdb's clock
+   as it is; only if `KDB_TIMEZONE` is not HKT is it converted, for the
+   day. A malformed time stops the run with `XX`, naming the code.
 2. **No print at all** (the market was shut, or the name suspended):
-   equity_master's `PX_LAST`, reason `no-trades`. A `PX_LAST` that is null
-   or `<= 0` does not count.
+   equity_master's `PX_LAST`, reason `no-trades`. **Prints, but all after
+   the market's `LastTradeBefore`:** `PX_LAST` too, reason
+   `none-before-cutoff`. A `PX_LAST` that is null or `<= 0` does not count.
 3. **Neither:** `sym,,,no-close`.
 
 | `source` | `reason` | close |
@@ -345,6 +357,7 @@ Without such a print, in this order:
 | `qatt` | blank | the closing print |
 | `qatt` | `last-trade` | the last traded price |
 | `equity_master` | `no-trades` | `PX_LAST` |
+| `equity_master` | `none-before-cutoff` | `PX_LAST` |
 | blank | `no-close` | blank |
 
 Nova reads only the `close` column, whatever the source.
@@ -392,10 +405,10 @@ market, counted from the staged files, so it covers the markets a rerun
 skipped too:
 
 ```
-market      syms   ticks    qatt  last-trade  no-trades  no-close  quote-only
-HK             2       0       0           0          1         1           1
-JT             1       1       1           0          0         0           0
-all            3       1       1           0          1         1           1
+market      syms   ticks    qatt  last-trade  no-trades  none-before-cutoff  no-close  quote-only
+HK             2       0       0           0          1                   0         1           1
+JT             1       1       1           0          0                   0         0           0
+all            3       1       1           0          1                   0         1           1
 ```
 
 - `syms`: syms counted under that code (its primary exchange when the
@@ -405,6 +418,8 @@ all            3       1       1           0          1         1           1
 - `last-trade`: names that traded but had no closing print, closed at their
   last trade;
 - `no-trades`: names with no print, closed at equity_master's `PX_LAST`;
+- `none-before-cutoff`: names whose prints all came after their market's
+  `LastTradeBefore`, closed at `PX_LAST` too (one `!!  close` line each);
 - `no-close`: no close at all;
 - `quote-only`: syms written to `quote_only.csv`.
 

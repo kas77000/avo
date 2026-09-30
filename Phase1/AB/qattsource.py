@@ -271,7 +271,8 @@ def live_ticks_q(time_field: str = None, cols=None) -> str:
 LAST_MARK = "price:max price by sym, cond"
 
 
-def last_q(time_field: str = None, dated: bool = True) -> str:
+def last_q(time_field: str = None, dated: bool = True,
+           cut: bool = False) -> str:
     """THE CLOSES WITHOUT THE TICKS: per sym and cond, the highest price
     in that cond's latest second - one short row each, instead of a day of
     prints.
@@ -287,22 +288,33 @@ def last_q(time_field: str = None, dated: bool = True) -> str:
     select is ticks_q's grouping (cond included); the `fby` runs on its
     small answer, not on the partitioned table.  `max` skips a null second,
     so a null-time group survives only when its cond has no timed print -
-    as last_trade treats a null time.  `dated` False is the RDB's form."""
+    as last_trade treats a null time.  `dated` False is the RDB's form.
+
+    `cut` adds a last argument, c, seconds of day in kdb's clock, and
+    keeps only the seconds at or before it - the last trade before a
+    market's LastTradeBefore.  q sorts a null below every second, so a
+    null-time print passes the cut; closes.last_trade ignores it unless
+    the sym has no timed print at all, as without a cut.  c goes over the
+    wire as a long, which q compares with a second by its count."""
     f = time_field or TIME_FIELD
-    args, where = (("[d;s]", "date=d, sym in s") if dated
-                   else ("[s]", "sym in s"))
+    args, where = (("[d;s", "date=d, sym in s") if dated
+                   else ("[s", "sym in s"))
+    if cut:
+        args, where = args + ";c", where + ", " + f + ".second<=c"
+    args += "]"
     return ("{" + args + " select from (0!select " + LAST_MARK + ", " + f +
             ":" + f + ".second from qatt where " + where + ") where " + f +
             "=(max;" + f + ") fby ([]sym;cond)}")
 
 
-def fetch_last_raw(conn, date, syms):
-    """EXTRACT the fast close rows; `date` None asks the RDB."""
+def fetch_last_raw(conn, date, syms, cut=None):
+    """EXTRACT the fast close rows; `date` None asks the RDB, and `cut`
+    (seconds of day, kdb's clock) the last ones at or before it."""
     if not syms:
         return []
-    if date is None:
-        return conn(last_q(None, dated=False), list(syms))
-    return conn(last_q(None), date, list(syms))
+    q = last_q(None, dated=date is not None, cut=cut is not None)
+    args = ([] if date is None else [date]) + [list(syms)]
+    return conn(q, *(args + ([int(cut)] if cut is not None else [])))
 
 
 def shape_last(result, time_field: str = None) -> dict:
@@ -1671,6 +1683,16 @@ def self_test() -> int:
           "{[d;s] select from (0!select price:max price by sym, cond, "
           "tradeTime:tradeTime.second from qatt where date=d, sym in s) "
           "where tradeTime=(max;tradeTime) fby ([]sym;cond)}")
+    check("with a cut, a third argument bounds the second",
+          last_q("tradeTime", cut=True),
+          "{[d;s;c] select from (0!select price:max price by sym, cond, "
+          "tradeTime:tradeTime.second from qatt where date=d, sym in s, "
+          "tradeTime.second<=c) where tradeTime=(max;tradeTime) fby "
+          "([]sym;cond)}")
+    asked = []
+    fetch_last_raw(lambda q, *a: asked.append(a) or [], None, ["A"], 52200)
+    check("and the RDB form takes the syms, then the cut",
+          asked, [(["A"], 52200)])
     check("undated, for the RDB", last_q("tradeTime", dated=False)
           .startswith("{[s] select from (0!select price:max price by sym, "
                       "cond, tradeTime:tradeTime.second from qatt where "

@@ -22,6 +22,8 @@ THE ORDER (resolve):
   3. else - no print: the market was shut, or the name suspended -
      equity_master's PX_LAST                     source equity_master,
                                                  reason no-trades
+     (or none-before-cutoff: it traded, but only after its market's
+     LastTradeBefore - Korea's after-market - which bounds step 2 only)
   4. else no close at all                        sym,,,no-close
 A market with no close codes (not in this file, or a blank CloseCondCodes)
 simply never reaches 1: a name there that traded closes at its last trade,
@@ -122,28 +124,57 @@ def pick(rows, codes):
     return price
 
 
-def last_trade(rows):
+def load_cutoffs(path) -> dict:
+    """BBGCode -> LastTradeBefore, for the rows that set one: a time in
+    HKT (HH:MM or HH:MM:SS) after which a print is not a last trade -
+    Korea's after-market.  Blank, or a file without the column: none."""
+    out = {}
+    with Path(path).open(newline="", encoding="utf-8-sig") as fh:
+        for r in csv.DictReader(fh):
+            code = (r.get("BBGCode") or "").strip()
+            cut = (r.get("LastTradeBefore") or "").strip()
+            if code and cut:
+                out[code] = cut
+    return out
+
+
+def last_trade(rows, cut=None, all_null=None):
     """The last traded price: the price of the last row that has a time -
-    with condensed rows, the last line of the day's last second.  A row
-    with no time is never "the last" (kdb sorts a null time first, and it
-    says nothing about when), unless every row lacks one: then the last
-    row.  None for no rows."""
-    timed = [r for r in rows if r[0] is not None]
-    last = (timed or rows or [None])[-1]
-    return None if last is None else last[1]
+    with condensed rows, the last line of the day's last second - and, with
+    a `cut` (seconds of day, in the rows' own clock), the last one at or
+    before it.  A row with no time is never "the last" (kdb sorts a null
+    time first, and it says nothing about when), nor before a cutoff,
+    unless every row lacks one: then the last row.  `all_null` says so when
+    `rows` is not the sym's whole day (the fast path's cut rows).  None for
+    no rows, or when every timed print is after the cut."""
+    timed = [r for r in rows if r[0] is not None
+             and (cut is None or r[0] <= cut)]
+    if timed:
+        return timed[-1][1]
+    if all_null is None:
+        all_null = all(r[0] is None for r in rows)
+    return rows[-1][1] if rows and all_null else None
 
 
-def resolve(sym, rows, codes, px_last) -> Close:
+def resolve(sym, rows, codes, px_last, cut=None, ltp_rows=None) -> Close:
     """The close, and where it came from - the module docstring's order: a
-    closing print, the last trade, PX_LAST, nothing."""
+    closing print, the last trade, PX_LAST, nothing.
+
+    `cut` is the market's LastTradeBefore, in the rows' clock: it limits
+    the last trade only, never the closing print.  A sym that traded, but
+    only after it, takes PX_LAST with the reason none-before-cutoff.
+    `ltp_rows` are the rows the last trade is taken from, when they are not
+    `rows` - the fast path asks kdb for them apart."""
     price = pick(rows, codes)
     if price is not None:
         return Close(sym, price, "qatt", "")
-    price = last_trade(rows)
+    price = last_trade(rows if ltp_rows is None else ltp_rows, cut,
+                       all(r[0] is None for r in rows))
     if price is not None:
         return Close(sym, price, "qatt", "last-trade")
+    reason = "none-before-cutoff" if rows else "no-trades"
     if px_last:
-        return Close(sym, px_last, "equity_master", "no-trades")
+        return Close(sym, px_last, "equity_master", reason)
     return Close(sym, "", "", "no-close")
 
 
@@ -217,21 +248,62 @@ def self_test() -> int:
     check("one venue, one list", codes_for_sym(["IS"], {"IS": ["AUC", "ACB"]}),
           ["AUC", "ACB"])
 
+    print("\nthe last trade before a cutoff")
+    #  A cutoff of 54000 (15:00:00 in kdb's clock).
+    day = [(32400, "100", "1", "#N/A N.A.", "K"),
+           (53990, "101", "1", "#N/A N.A.", "K"),
+           (53990, "102", "1", "X", "K"),       # the last second before
+           (54000, "103", "1", "#N/A N.A.", "K"),   # at the cutoff: counts
+           (55000, "150", "1", "#N/A N.A.", "K")]   # after-market
+    check("the last print at or before the cutoff, inclusive",
+          last_trade(day, 54000), "103")
+    check("one second earlier, the last line of the last second before it",
+          last_trade(day, 53999), "102")
+    check("no cutoff: the day's last print", last_trade(day), "150")
+    check("a close-code print after the cutoff still wins",
+          resolve("A", day + [(56000, "160", "1", "GC", "K")], ["GC"], "99",
+                  cut=54000), Close("A", "160", "qatt", ""))
+    check("the last trade before the cutoff",
+          resolve("A", day, ["GC"], "99", cut=54000),
+          Close("A", "103", "qatt", "last-trade"))
+    after = [(55000, "150", "1", "", "K"), (56000, "151", "1", "", "K")]
+    check("every print after the cutoff: PX_LAST, a reason of its own",
+          resolve("A", after, ["GC"], "99", cut=54000),
+          Close("A", "99", "equity_master", "none-before-cutoff"))
+    check("and no PX_LAST either: no close",
+          resolve("A", after, ["GC"], None, cut=54000),
+          Close("A", "", "", "no-close"))
+    check("a null time is not before the cutoff when another print has a "
+          "time", resolve("A", [(None, "7", "1", "", "K")] + after, ["GC"],
+                          "99", cut=54000).reason, "none-before-cutoff")
+    check("but every print null: the last of them, as without a cutoff",
+          resolve("A", [(None, "7", "1", "", "K"), (None, "8", "1", "", "K")],
+                  ["GC"], "99", cut=54000),
+          Close("A", "8", "qatt", "last-trade"))
+    check("the last trade may come from other rows than the close codes "
+          "(the fast path's cut query)",
+          resolve("A", after, ["GC"], "99", cut=54000,
+                  ltp_rows=[(53000, "98", "", "", "")]),
+          Close("A", "98", "qatt", "last-trade"))
+
     print("\nreading close_conditions.csv")
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "close_conditions.csv"
         p.write_text(
-            "BBGCode,Country,Venue,CloseCondCodes\n"
-            "IS,India,NSI-MAIN,AUC|ACB\n"
-            "JT,Japan,TYO-MAIN,e|ES\n"
-            "AT,Australia,ASX-MAIN,CA\n"
-            "NA,Namibia,NAM-MAIN,NA\n",
+            "BBGCode,Country,Venue,CloseCondCodes,LastTradeBefore\n"
+            "IS,India,NSI-MAIN,AUC|ACB,\n"
+            "JT,Japan,TYO-MAIN,e|ES,\n"
+            "AT,Australia,ASX-MAIN,CA,\n"
+            "NA,Namibia,NAM-MAIN,NA,\n"
+            "KQ,Korea,KOE-MAIN,GC,14:30:00\n",
             encoding="utf-8")
+        check("the cutoffs: code -> the HKT time, the blank ones out",
+              load_cutoffs(p), {"KQ": "14:30:00"})
         conditions = load_conditions(p)
         check("split on the pipe", conditions["IS"], ["AUC", "ACB"])
         check("a single code is a one-element list", conditions["AT"], ["CA"])
         check("file order is kept, not sorted",
-              list(conditions), ["IS", "JT", "AT", "NA"])
+              list(conditions), ["IS", "JT", "AT", "NA", "KQ"])
         check("csv reads plain text - an NA-LOOKING code is neither dropped "
               "nor turned into a null", conditions["NA"], ["NA"])
         countries = country_of(p)

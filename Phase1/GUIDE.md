@@ -121,7 +121,13 @@ EXPORT_DIR\phase1-YYYYMMDD.zip
 The log ends with a table per market: stocks, stocks with ticks, closes
 from a closing print (`qatt`), closes from the last trade (`last-trade`: it
 traded, but no print carried a close code), closes from equity_master
-(`no-trades`: it did not trade), and quote-only names. A market with mostly
+(`no-trades`: it did not trade; `none-before-cutoff`: it traded only after
+its market's `LastTradeBefore`), and quote-only names. For Korea's KOSDAQ
+(`KQ`) the last trade is the last print at or before 14:30:00 HKT (15:30 in
+Seoul), so after-market prints are not a close; that time is the
+`LastTradeBefore` column of `Phase1\AB\config\close_conditions.csv`, in HKT,
+settable for any market (blank = the day's last print). A closing print
+always wins over it. A market with mostly
 `last-trade` means its close condition codes are wrong, so look at it
 before using the zip.
 

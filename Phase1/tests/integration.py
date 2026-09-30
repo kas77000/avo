@@ -123,6 +123,7 @@ KR_ETF_LADDER = [("2000", "1"), ("999999999", "5")]
 SESSIONS = {
     "JT": (8 * 3600, 14 * 3600 + 1800, "e", ["T"], "JPY"),
     "KP": (8 * 3600, 14 * 3600 + 1800, "GC", ["K"], "KRW"),
+    "KQ": (8 * 3600, 14 * 3600 + 1800, "GC", ["Q"], "KRW"),
     "HK": (9 * 3600 + 1800, 16 * 3600 + 480, "CA", ["H"], "HKD"),
     "NZ": (5 * 3600, 11 * 3600 + 2700, "CA", ["N"], "NZD"),
     "IS": (11 * 3600 + 2700, 18 * 3600 + 1800, "AUC", ["N", "B"], "INR"),
@@ -195,6 +196,17 @@ LTP = N("9984 JT", "TYO-MAIN", "Equity", "9984.JP", "JT", "JP", "XTKS",
         code="9984 JP", kind="ltp")
 LTP_LAST, LTP_UP, LTP_DOWN = "8215", "9715", "6715"
 
+#  A KOSDAQ name with after-market prints and no closing print. KQ's
+#  LastTradeBefore is 14:30:00 HKT (config/close_conditions.csv), so its
+#  close is the last print at or before it, 8430 at 14:30:00 exactly - not
+#  the after-market 8650, not the day's high 8450, not PX_LAST 8300. KRX,
+#  30% truncated on the tick of 10: 10950 / 5910 (8650 would give
+#  11240 / 6060, PX_LAST 10790 / 5810).
+KQAM = N("123450 KQ", "KOE-MAIN", "Equity", "123450.KS", "KQ", "KS", "XKOS",
+         "8300", ladder=KR_LADDER, long="FIXTURE KOSDAQ AFTER MARKET",
+         kind="kqam", tick="10")
+KQAM_CLOSE, KQAM_UP, KQAM_DOWN = "8430", "10950", "5910"
+
 
 def ms_time(sec, ms):
     return dt.time(sec // 3600, sec // 60 % 60, sec % 60, ms * 1000)
@@ -253,6 +265,8 @@ class Day:
                 self.raw[sym] = raw_prints(n)
             elif n.kind == "ltp":
                 self.raw[sym] = ltp_prints(n)
+            elif n.kind == "kqam":
+                self.raw[sym] = kqam_prints(n)
             elif n.kind == "quote":
                 self.quotes[sym] = (dt.time(16, 8, 2), Decimal("3.41"),
                                     Decimal("3.43"))
@@ -280,6 +294,18 @@ def ltp_prints(name):
     return [{"sym": sym, T: ms_time(sec, 100 + i), "price": Decimal(p),
              "size": 100 * (i + 1), "cond": cond, "ex": ex}
             for i, (sec, p, cond) in enumerate(plan)]
+
+
+def kqam_prints(name):
+    """KOSDAQ: prints through the session and after it, none on a close
+    code; the last before the 14:30:00 cutoff is AT it."""
+    start, end, _close, exs, _ = SESSIONS[name.ext]
+    plan = [(start + 60, "8410"), (13 * 3600, "8450"),
+            (end - 10, "8420"), (end, "8430"),            # at the cutoff
+            (end + 600, "8600"), (end + 2400, "8650")]    # after-market
+    return [{"sym": name.sym, T: ms_time(sec, 200 + i), "price": Decimal(p),
+             "size": 100, "cond": "", "ex": exs[0]}
+            for i, (sec, p) in enumerate(plan)]
 
 
 def condense(rows, rep=lambda s: dt.timedelta(seconds=s)):
@@ -375,10 +401,11 @@ class FakeKdb:
             return list(COLS)
         if "from qatt" not in q:
             raise AssertionError(f"qatt was asked {q}")
-        syms = list(args[-1])
+        cutq = "<=" in q                    # last_q with a cut: [..;s;c]
+        syms = list(args[-2] if cutq else args[-1])
         if qattsource.LAST_MARK in q:
             self.asked.append(("fast", syms, q))
-            return self.last_rows(syms)
+            return self.last_rows(syms, args[-1] if cutq else None)
         condensed = CONDENSED_MARK in q
         self.asked.append(("condensed" if condensed else "raw", syms, q))
         if self.fail_syms & set(syms):
@@ -409,14 +436,17 @@ class FakeKdb:
             "size": pd.Series([r["size"] for r in rows], dtype="int64")})
         return FakeTable(df)
 
-    def last_rows(self, syms):
+    def last_rows(self, syms, cut=None):
         """What kdb answers qattsource.last_q with: per sym and cond, the
-        highest price in that cond's latest second."""
+        highest price in that cond's latest second - at or before `cut`,
+        when there is one."""
         best = {}
         for sym in syms:
             for r in self.day.raw.get(sym, []):
                 t = r[T]
                 k = (sym, r["cond"], t.hour * 3600 + t.minute * 60 + t.second)
+                if cut is not None and k[2] > cut:
+                    continue
                 best[k] = max(best.get(k, r["price"]), r["price"])
         out = []
         for sym, cond in sorted({k[:2] for k in best}):
@@ -593,7 +623,7 @@ def first(pattern, text, cast=str):
 def scenario1(tmp):
     tmp.mkdir(parents=True, exist_ok=True)
     section("1. condensed vs raw")
-    day = Day(small_names(), extra=[NOMAS, LTP])
+    day = Day(small_names(), extra=[NOMAS, LTP, KQAM])
     cc = day.write_crosscode(tmp / "CrossCode.csv")
     kA, kB = FakeKdb(day), FakeKdb(day)
     zA, _ = ab_build(tmp / "abA", cc, kA)
@@ -640,7 +670,7 @@ def scenario1(tmp):
         if times != sorted(times):
             bad_order.append(f)
         n = by_code.get(f.split("/")[0])
-        if n and n.kind in ("trade", "ltp"):
+        if n and n.kind in ("trade", "ltp", "kqam"):
             raw = day.raw[n.sym or NOMAS_SYM]
             if (len(lB) != len(raw) or sum(int(l[2]) for l in lB)
                     != sum(r["size"] for r in raw)):
@@ -696,6 +726,16 @@ def scenario1(tmp):
           f"{LTP_UP} / {LTP_DOWN}, not PX_LAST's 9650 / 6650",
           (row.get("LimitUpPrice"), row.get("LimitDownPrice"))
           == (LTP_UP, LTP_DOWN), str(row))
+    got = closes.get(KQAM.sym, {})
+    check(f"a KOSDAQ name with after-market prints closes at its last print "
+          f"at or before 14:30:00 HKT ({KQAM_CLOSE}), not after-market 8650",
+          (got.get("close"), got.get("source"), got.get("reason"))
+          == (KQAM_CLOSE, "qatt", "last-trade"), str(got))
+    row = luld.get(KQAM.bbg, {})
+    check(f"and its limitUpDown row is {KQAM_UP} / {KQAM_DOWN} (8650 would "
+          f"give 11240 / 6060)",
+          (row.get("LimitUpPrice"), row.get("LimitDownPrice"))
+          == (KQAM_UP, KQAM_DOWN), str(row))
 
     section("1b. probes")
     check("an NZE-MAIN name with no equity_master row is asked of kdb, as "

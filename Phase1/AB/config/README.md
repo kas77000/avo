@@ -22,9 +22,13 @@ situation can be traced afterwards.
 | `BBGCode` | the XML's `BBGName`, the Bloomberg exchange code |
 | `Country`, `Venue` | as in the XML |
 | `CloseCondCodes` | the codes that mark the close, pipe-separated |
+| `LastTradeBefore` | optional, a time in **HKT** (`HH:MM` or `HH:MM:SS`): a name with no closing print closes at its last print at or before this time, not the day's last. Blank: the day's last print. Set only for `KQ`, `14:30:00` (15:30 in Seoul), so that KOSDAQ's after-market prints are not taken as the close |
 
-The condition code alone decides the close. The XML's phase times are not
-carried over.
+The condition code alone decides the close; the XML's phase times are not
+carried over. `LastTradeBefore` only bounds the fallback when no print
+carries a close code: a closing print after it still wins. A name whose
+prints all come after it takes equity_master's `PX_LAST`, with the reason
+`none-before-cutoff`. A malformed time stops the extract, naming the code.
 
 Only codes that mark the close are kept. A code that also appears in the
 same market's continuous phase is dropped:
