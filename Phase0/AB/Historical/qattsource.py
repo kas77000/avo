@@ -20,8 +20,10 @@ THREE UNCERTAINTIES, ALL REPORTED RATHER THAN ASSUMED.
               so it is two hours out for Australia and one for Tokyo.  Which
               column carries the exchange's own stamp is not settled here:
               run qatt_time_probe.py, read the answer, then set TIME_FIELD.
-              It ships as tradeTime because the name says so, NOT because it
-              has been checked.
+              It is `time`, the plant's own clock (HKT), by decision on
+              2026-09-30: every print carries it, and the files are shifted
+              from kdb's clock (KDB_TIMEZONE) to each market's own
+              downstream, so one known clock is what is wanted.
 
   the sym     equity_master is asked, never guessed.  A crosscode row's
               `7203 JT` is matched on sym_bpipe (`7203.JT`), then on
@@ -59,9 +61,9 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal, InvalidOperation
 
-#  SET THIS FROM THE PROBE.  See the module docstring: it is a placeholder
-#  with a plausible name, not a checked answer.
-TIME_FIELD = "tradeTime"
+#  qatt's `time`, the plant's clock (HKT) - see the module docstring.  The
+#  probe (qatt_time_probe.py) lays the other time columns beside it.
+TIME_FIELD = "time"
 
 #  Every time column qatt carries, for the probe to lay side by side.
 TIME_FIELDS = ("time", "tradeTime", "srcTime", "lineTime", "activityTime")
@@ -213,7 +215,7 @@ def ticks_q(time_field: str = None, cols=None) -> str:
     field, price, cond and ex, with size summed.
 
         {[d;s] 0!select size:sum size by sym,
-               tradeTime:"i"$tradeTime.second, price, cond, ex from qatt
+               time:"i"$time.second, price, cond, ex from qatt
                where date=d, sym in s}
 
     WHY IN q.  The file carries the time to the second, so every print in
@@ -950,7 +952,7 @@ def self_test() -> int:
           "select from qatt" in ticks_q(), True)
     check("so without a column list the time column does not reach the "
           "query, and asking for another changes nothing",
-          ticks_q("srcTime"), ticks_q("tradeTime"))
+          ticks_q("srcTime"), ticks_q("time"))
     check("the two predicates that matter are both there",
           "where date=d, sym in s" in ticks_q(), True)
     check("it does NOT cast the sym list - pykx sends symbols already, "
@@ -975,24 +977,24 @@ def self_test() -> int:
     print("\nnaming the columns, so the answer stays small")
     HAVE = ["date", "sym", "time", "tradeTime", "price", "size", "cond", "ex",
             "bid", "ask", "bsize", "asize", "srcTime", "lineTime"]
-    cols = select_columns(HAVE, "tradeTime")
+    cols = select_columns(HAVE, "time")
     check("the six the file uses, and nothing of the standing quote",
-          cols, ["sym", "tradeTime", "price", "size", "cond", "ex"])
+          cols, ["sym", "time", "price", "size", "cond", "ex"])
 
     print("\ncondensing in q: one line per second, price, cond and ex")
     check("with all six the read is condensed",
-          (condensed(cols, "tradeTime"), condense_note(cols, "tradeTime")),
+          (condensed(cols, "time"), condense_note(cols, "time")),
           (True, ""))
     check("and the query sums size by sym, second, price, cond and ex, "
           "unkeyed with 0! - a keyed `by` answer is what broke pykx before",
-          ticks_q("tradeTime", cols),
+          ticks_q("time", cols),
           "{[d;s] 0!select size:sum size by sym, "
-          "tradeTime:\"i\"$tradeTime.second, price, cond, ex from qatt "
+          "time:\"i\"$time.second, price, cond, ex from qatt "
           "where date=d, sym in s}")
     check("so does today's",
-          live_ticks_q("tradeTime", cols),
+          live_ticks_q("time", cols),
           "{[s] 0!select size:sum size by sym, "
-          "tradeTime:\"i\"$tradeTime.second, price, cond, ex from qatt "
+          "time:\"i\"$time.second, price, cond, ex from qatt "
           "where sym in s}")
     check("the time column it groups on is the one asked for, under its "
           "own name, so shape() finds it where it always did",
@@ -1001,32 +1003,32 @@ def self_test() -> int:
     check("TIME_FIELD by default",
           ticks_q(None, cols), ticks_q(TIME_FIELD, cols))
     check("and the dated and undated condensed reads differ only in the date",
-          live_ticks_q("tradeTime", cols).replace("{[s]", "{[d;s]")
+          live_ticks_q("time", cols).replace("{[s]", "{[d;s]")
           .replace("where sym in s", "where date=d, sym in s"),
-          ticks_q("tradeTime", cols))
+          ticks_q("time", cols))
     check("a condensed read's bare-integer time counts seconds; any other "
           "read's, milliseconds",
-          (time_unit(cols, "tradeTime"), time_unit(None),
-           time_unit(["sym", "tradeTime", "price"], "tradeTime")),
+          (time_unit(cols, "time"), time_unit(None),
+           time_unit(["sym", "time", "price"], "time")),
           ("s", "ms", "ms"))
     import numpy as np
     import pandas as pd
     check("a condensed read's int seconds, with kdb's 0Ni (the int32 "
           "minimum): the seconds, and None for the null",
-          _second_column(pd.DataFrame({"tradeTime": np.array(
+          _second_column(pd.DataFrame({"time": np.array(
               [32401, -2147483648, 0, 86399], dtype="int32")}),
-              "tradeTime", "s"), [32401, None, 0, 86399])
+              "time", "s"), [32401, None, 0, 86399])
     check("and where pandas made the null a NaN in a float column",
-          _second_column(pd.DataFrame({"tradeTime": [32401.0, float("nan")]}),
-                         "tradeTime", "s"), [32401, None])
+          _second_column(pd.DataFrame({"time": [32401.0, float("nan")]}),
+                         "time", "s"), [32401, None])
     check("a row list of numpy timedelta64 seconds is still read as times",
-          _second_column([{"tradeTime": np.timedelta64(32401, "s")}],
-                         "tradeTime", "s"), [32401])
+          _second_column([{"time": np.timedelta64(32401, "s")}],
+                         "time", "s"), [32401])
     check("a row list: None, NaN, 0Ni and a value outside a day are None",
-          _second_column([{"tradeTime": 5}, {"tradeTime": None},
-                          {"tradeTime": float("nan")},
-                          {"tradeTime": -2147483648},
-                          {"tradeTime": 86400}], "tradeTime", "s"),
+          _second_column([{"time": 5}, {"time": None},
+                          {"time": float("nan")},
+                          {"time": -2147483648},
+                          {"time": 86400}], "time", "s"),
           [5, None, None, None, None])
     class _Table:                   # a pykx table: one .pd()
         def __init__(self, df):
@@ -1036,32 +1038,32 @@ def self_test() -> int:
             return self.df
 
     check("shape() reads a condensed frame's int column as those seconds",
-          shape(_Table(pd.DataFrame({"sym": ["A", "A"], "tradeTime": np.array(
+          shape(_Table(pd.DataFrame({"sym": ["A", "A"], "time": np.array(
               [32401, -2147483648], dtype="int32"), "price": [1.5, 1.6],
               "size": [100, 200], "cond": ["", ""], "ex": ["T", "T"]})),
-              "tradeTime", cols)["A"],
+              "time", cols)["A"],
           [(32401, "1.5", "100", "#N/A N.A.", "T"),
            (None, "1.6", "200", "#N/A N.A.", "T")])
     for gone in TICK_FIELDS:
         less = [c for c in cols if c != gone]
         check(f"no {gone} column: not condensed, the plain select instead",
-              (condensed(less, "tradeTime"), ticks_q("tradeTime", less),
-               live_ticks_q("tradeTime", less)),
+              (condensed(less, "time"), ticks_q("time", less),
+               live_ticks_q("time", less)),
               (False, "{[d;s] select " + ",".join(less) +
                " from qatt where date=d, sym in s}",
                "{[s] select " + ",".join(less) + " from qatt where sym in s}"))
         check(f"  and the note for the log names {gone} as why",
-              gone in condense_note(less, "tradeTime")
-              and "not guessed" in condense_note(less, "tradeTime"), True)
+              gone in condense_note(less, "time")
+              and "not guessed" in condense_note(less, "time"), True)
     check("no column list at all is not condensed either, and says so",
           (condensed(None), "no column list" in condense_note(None)),
           (False, True))
     check("a column list without the time asked for is not condensed",
           condensed(cols, "srcTime"), False)
     check("a column qatt lacks is left out rather than a q error",
-          select_columns(["sym", "tradeTime", "price", "size", "ex"],
-                         "tradeTime"),
-          ["sym", "tradeTime", "price", "size", "ex"])
+          select_columns(["sym", "time", "price", "size", "ex"],
+                         "time"),
+          ["sym", "time", "price", "size", "ex"])
     try:
         select_columns(["sym", "time", "price"], "tradeTime")
         check("no time column raised", False, True)
@@ -1070,7 +1072,7 @@ def self_test() -> int:
               "there is", ("tradeTime" in str(e), "time" in str(e)),
               (True, True))
     check("`cols qatt` is read as plain names",
-          columns(lambda q: ["sym", "tradeTime"]), ["sym", "tradeTime"])
+          columns(lambda q: ["sym", "time"]), ["sym", "time"])
 
     check("the probe asks for all five time columns at once",
           all(f in probe_q() for f in TIME_FIELDS), True)
@@ -1136,7 +1138,7 @@ def self_test() -> int:
 
     class OneRow:
         def __call__(self, q, *args):
-            return [{"sym": "7203.JP", "tradeTime": 1, "price": 2,
+            return [{"sym": "7203.JP", "time": 1, "price": 2,
                      "size": 3, "cond": "T", "ex": "T"}]
 
     class NoRow:
@@ -1146,7 +1148,7 @@ def self_test() -> int:
     cols = sample_columns(OneRow(), dt.date(2026, 9, 4))
     check("the names come back in order, so a placeholder can be checked "
           "against them", cols,
-          ["sym", "tradeTime", "price", "size", "cond", "ex"])
+          ["sym", "time", "price", "size", "cond", "ex"])
     check("the ones this module assumes are all there, in this sample",
           [f for f in (TIME_FIELD,) + TICK_FIELDS if f not in cols], [])
     check("an empty partition names nothing rather than raising",
@@ -1395,11 +1397,11 @@ def self_test() -> int:
 
         def __call__(self, q, *args):
             self.calls.append((q, args))
-            return [{"sym": "7203.JP", "tradeTime": T(9, 31, 33),
+            return [{"sym": "7203.JP", "time": T(9, 31, 33),
                      "price": 2500.0, "size": 100, "cond": "T", "ex": "T"},
-                    {"sym": "7203.JP", "tradeTime": T(9, 31, 34),
+                    {"sym": "7203.JP", "time": T(9, 31, 34),
                      "price": 2501.0, "size": 200, "cond": "", "ex": "H"},
-                    {"sym": "BHP.AU", "tradeTime": T(10, 0, 0),
+                    {"sym": "BHP.AU", "time": T(10, 0, 0),
                      "price": 40.5, "size": 300, "cond": "OA", "ex": "T"}]
 
     tc = TickConn()
@@ -1428,12 +1430,12 @@ def self_test() -> int:
 
         def __call__(self, q, *args):
             self.calls.append((q, args))
-            return [{"sym": "7203.JP", "tradeTime": 34_293, "price": 2500.0,
+            return [{"sym": "7203.JP", "time": 34_293, "price": 2500.0,
                      "size": 300, "cond": "T", "ex": "T"},
-                    {"sym": "7203.JP", "tradeTime": -2147483648,
+                    {"sym": "7203.JP", "time": -2147483648,
                      "price": 2501.0, "size": 5, "cond": "", "ex": "T"}]
 
-    full = ["sym", "tradeTime", "price", "size", "cond", "ex"]
+    full = ["sym", "time", "price", "size", "cond", "ex"]
     sc = SecondConn()
     got = fetch_ticks(sc, dt.date(2026, 9, 4), ["7203.JP"], cols=full,
                       shift=3600)

@@ -37,7 +37,7 @@ python qatt_export.py --log export.log
 
   A tick line is **condensed in q**: one sym, second, price, cond and ex,
   with the volume of every print behind it summed
-  (`0!select size:sum size by sym, tradeTime:"i"$tradeTime.second, price, cond, ex`).
+  (`0!select size:sum size by sym, time:"i"$time.second, price, cond, ex`).
   The manifest's `prints` counts those condensed lines. If qatt lacks price,
   size, cond or ex the read falls back to one line per print, and the log
   says why.

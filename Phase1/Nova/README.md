@@ -359,7 +359,8 @@ These are assumptions nobody has checked against the live systems yet.
 Check them on the first real days.
 
 - **TIME_FIELD.** AB reads each print's time from the kdb column named in
-  `qattsource.TIME_FIELD` (`tradeTime`). The zip's manifest shows it as
+  `qattsource.TIME_FIELD` (`time`, qatt's plant clock, HKT). The zip's
+  manifest shows it as
   `time column`. If it is the wrong column, every tick file's times are
   wrong by the same rule, and nothing fails.
 - **Close codes present in qatt.** The close is the last print carrying one

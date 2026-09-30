@@ -235,15 +235,17 @@ run `historical.r` alone.
 
 ## 5. What to check on the first real days
 
-1. **The clock of qatt's `tradeTime`.** Phase1 assumes kdb stamps
-   `tradeTime` in `KDB_TIMEZONE` (HKT) and shifts each market to its own
-   clock on Nova. If `tradeTime` turns out to be the exchange's local time,
-   every non-HK market would be shifted twice. Check one Tokyo stock: its
-   first print in `raw-7203 JP-YYYYMMDD.csv` should be at 09:00:00, the
-   Tokyo open. If it shows 10:00:00, tell the developer before using the
-   files.
+1. **The clock of qatt's `time`.** Phase1 reads each print's time from
+   qatt's `time` column and assumes it is in kdb's clock, `KDB_TIMEZONE`
+   (HKT); Nova then shifts each market to its own clock. Check one Tokyo
+   stock: in the zip's `ticks.csv`, `7203.JP`'s first print should be at
+   08:00:00 (HKT), and in `raw-7203 JP-YYYYMMDD.csv` at 09:00:00, the Tokyo
+   open. If the zip shows 09:00:00 (the file would then show 10:00:00),
+   `time` is not HKT: tell the developer before using the files.
 2. **The time column.** `TIME_FIELD` in `Phase1/AB/qattsource.py` is
-   `tradeTime`. Phase0's `qatt_time_probe.py` confirms it on a real day.
+   `time`; the zip's manifest shows it as `time column`. Phase0's
+   `qatt_time_probe.py` lays qatt's time columns side by side if in
+   doubt.
 3. **Close codes.** In the AB log's summary table, most of each market's
    stocks with ticks should be under `qatt` (a closing print). A market
    with mostly `last-trade` needs its codes fixed in

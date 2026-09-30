@@ -1219,18 +1219,18 @@ def demo() -> int:
             out = []
             for sym in syms:
                 if sym == "7203.JP":
-                    out += [{"sym": sym, "tradeTime": dt.time(9, 0, 1),
+                    out += [{"sym": sym, qattsource.TIME_FIELD: dt.time(9, 0, 1),
                              "price": 2500.0, "size": 100, "cond": "OA",
                              "ex": "T"},
-                            {"sym": sym, "tradeTime": dt.time(14, 59, 58),
+                            {"sym": sym, qattsource.TIME_FIELD: dt.time(14, 59, 58),
                              "price": 2530.0, "size": 900, "cond": "",
                              "ex": "H"}]
                 elif sym == "BHP.AU":
-                    out += [{"sym": sym, "tradeTime": dt.time(10, 0, 0),
+                    out += [{"sym": sym, qattsource.TIME_FIELD: dt.time(10, 0, 0),
                              "price": 40.5, "size": 300, "cond": "T",
                              "ex": "T"}]
                 elif sym == "600000.CH":
-                    out += [{"sym": sym, "tradeTime": dt.time(9, 30, 0),
+                    out += [{"sym": sym, qattsource.TIME_FIELD: dt.time(9, 30, 0),
                              "price": 12.34, "size": 500, "cond": "T",
                              "ex": "S"}]
             return out

@@ -174,7 +174,7 @@ MANIFEST = [
     ["date", DATE],
     ["source", "hdb"],
     ["equity_master date", DATE],
-    ["time column", "tradeTime"],
+    ["time column", "time"],
     ["kdb timezone", "China Standard Time"],
     ["syms asked", str(_count(CLOSES))],
     ["prints", str(_count(TICKS))],

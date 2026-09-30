@@ -30,7 +30,7 @@ That store already holds what the request was asking for:
 
 **A line is condensed in q**: one second, price, condition and exchange,
 with the volume of every print behind it summed —
-`0!select size:sum size by sym, tradeTime:"i"$tradeTime.second, price, cond, ex`.
+`0!select size:sum size by sym, time:"i"$time.second, price, cond, ex`.
 The time comes back as a plain int of seconds (`"i"$`; pykx converting a q
 `second` column crashed python on a live day), read as the same clock. If
 qatt lacks price, size, cond or ex the read falls back to one line per
@@ -163,8 +163,10 @@ here takes a host or a port on the command line. The probe needs only
 It pulls one name for one day, lays all five columns side by side, and
 compares each one's span against the session hours you give it. The
 exchange's clock is the column that lands on the session; the others are off
-by whole hours. Then set `qattsource.TIME_FIELD` — it ships as `tradeTime`
-because the name says so, **not because it has been checked**.
+by whole hours. `qattsource.TIME_FIELD` is `time`, the plant's clock
+(HKT), by decision on 2026-09-30: each file is shifted from kdb's clock
+(`KDB_TIMEZONE`) to its own market's, so one known clock is what is
+wanted.
 
 Pick a liquid name, and one *outside* Hong Kong: a HK name cannot separate
 the plant's clock from the exchange's, because there they are the same clock.

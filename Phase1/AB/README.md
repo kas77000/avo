@@ -334,7 +334,7 @@ column says which one was found. A code none of them finds has no row.
 **Ticks are condensed in q.** A `ticks.csv` line is not one print: the read is
 
 ```
-0!select size:sum size by sym, tradeTime:"i"$tradeTime.second, price, cond, ex from qatt where ...
+0!select size:sum size by sym, time:"i"$time.second, price, cond, ex from qatt where ...
 ```
 
 (with the configured time column), so every print in one second at one
@@ -496,21 +496,23 @@ Those usually come from a malformed BloombergCode in the CrossCode.
 
 ## Before the first live run
 
-1. **The time column.** `qattsource.TIME_FIELD` ships as `tradeTime`, a
-   guess from its name. Check it with Phase0's probe,
-   `Phase0/AB/Historical/qatt_time_probe.py` (it is not copied here; it
-   reads `QATT_SERVER` from its own `local_settings.py`):
+1. **The time column.** `qattsource.TIME_FIELD` is `time`, qatt's plant
+   clock, which should be HKT (`KDB_TIMEZONE`); Nova shifts each market
+   from it to its own clock. Check it on the first zip: Toyota's first
+   print (`7203.JP`) should be at `08:00:00` in `ticks.csv` (09:00:00 in
+   Tokyo). Phase0's probe, `Phase0/AB/Historical/qatt_time_probe.py` (not
+   copied here; it reads `QATT_SERVER` from its own `local_settings.py`),
+   lays qatt's time columns side by side if in doubt:
 
    ```
    python qatt_time_probe.py 7203.JP --session 09:00-15:00
    ```
 
-   If it names another column, set `TIME_FIELD` in `Phase1/AB/qattsource.py`
-   to it. The manifest's `time column` records what each zip used.
+   The manifest's `time column` records what each zip used.
 
 2. **The quote-only time.** A quote-only line takes its time from the
-   `quote` table's `time` column, while the ticks use `TIME_FIELD`
-   (`tradeTime`). On the first live day, check that both are in the same
+   `quote` table's `time` column, and the ticks qatt's `time`
+   (`TIME_FIELD`). On the first live day, check that both are in the same
    clock: compare a quote-only sym's time with the ticks of a sym that
    traded around then.
 

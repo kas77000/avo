@@ -147,7 +147,7 @@ One query per date per `SYM_CHUNK` syms (`--chunk`), naming only the columns
 the file uses — chosen once per run from `cols qatt`:
 
 ```q
-{[d;s] select sym,tradeTime,price,size,cond,ex from qatt where date=d, sym in s}
+{[d;s] 0!select size:sum size by sym, time:"i"$time.second, price, cond, ex from qatt where date=d, sym in s}
 ```
 
 Every column would bring the standing quote with every print; on 2026-09-22
@@ -181,11 +181,12 @@ run, and nothing is cached for it.
 holds the two together — at about 8× the speed: each distinct price is
 formatted once, and the time column is cut to whole seconds in numpy.
 
-> **`tradeTime` is a placeholder.** qatt has five time columns and `qatt.time`
-> is the *plant's* clock (HKT), not the exchange's. Run `qatt_time_probe.py`
-> and set `qattsource.TIME_FIELD`. A wrong answer here produces files of the
-> right length, with the right prices and volumes, and **every timestamp
-> shifted by hours**.
+> **The time column is `time`**, qatt's *plant* clock (HKT), not the
+> exchange's (decision of 2026-09-30). Each file is shifted from
+> `KDB_TIMEZONE` to its own market's clock on the way out, so `time` must
+> really be HKT: `qatt_time_probe.py` lays the five time columns side by
+> side. A wrong clock here produces files of the right length, with the
+> right prices and volumes, and **every timestamp shifted by hours**.
 
 **The clock is converted on the way out.** kdb stamps every print in one zone
 — `KDB_TIMEZONE`, the plant's Hong Kong clock — and each file carries its own

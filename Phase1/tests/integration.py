@@ -7,7 +7,7 @@
 
 AB's REAL extract.build() runs on fake connections that answer the queries
 the way kdb would: the condensed read (`0!select size:sum size by sym,
-tradeTime:tradeTime.second, price, cond, ex ...`) is answered by actually
+time:"i"$time.second, price, cond, ex ...`) is answered by actually
 grouping the day's raw prints and summing their size, and the uncondensed
 read with the raw prints themselves. Nova's REAL R jobs (historical.r,
 limit_up_down.r, trading_data.r, run_phase1.cmd) then run on the zips, each
@@ -335,7 +335,7 @@ class FakeKdb:
     """equity_master, qatt and quote for one Day.
 
     `time_rep` turns a condensed line's seconds into what the connection
-    hands back - by default the plain int kdb sends for "i"$tradeTime.second
+    hands back - by default the plain int kdb sends for "i"$time.second
     (see qattsource.ticks_q); `frame` answers with a pandas frame instead
     of rows, its time column timedelta64[s], or int32 when frame="int";
     `null_at` is (sym, index) of a condensed line whose time is null,
