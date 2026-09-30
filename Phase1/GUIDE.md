@@ -82,7 +82,7 @@ Nova runs R 3.2.2. Nothing is installed there beyond R and dplyr.
    | `KDB_TIMEZONE` | must match the zip's (default `China Standard Time`) |
    | `LULD_OUT_TEMP` | `limitUpDown.csv` is written here first |
    | `LULD_OUT_TEST`, `LULD_OUT_PILOT`, `LULD_OUT_PROD` | where each environment reads `limitUpDown.csv`. An environment asked for with a blank path fails the job |
-   | `TD_OUTPUT_PATH` | the full path of `TradingData.csv` |
+   | `TD_OUTPUT_PATH` | the full path of `TradingData.csv`, or several, e.g. `c("C:/path/to/pilot/TradingData.csv", "C:/path/to/prod/TradingData.csv")` |
    | `MSCI_MAPPING_PATH`, `OPEN_AUCTION_OVERRIDE_PATH`, `HKEX_CAS_LIST_PATH`, `INDIA_NSE_CAS_LIST_PATH`, `INDIA_BSE_CAS_LIST_PATH` | optional inputs to TradingData; `""` leaves those columns blank |
    | `WORKERS` | optional: R processes writing tick files (default: cores − 1, at most 4) |
    | `TICK_BLOCK` | optional: lines of ticks read at a time (default 500000) |

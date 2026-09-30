@@ -59,7 +59,9 @@ p1_settings <- function(path = file.path(p1_here(), "settings.r"),
   sys.source(path, envir = e)
   s <- as.list(e)
   missing <- required[!vapply(required, function(k) {
-    !is.null(s[[k]]) && nzchar(s[[k]])
+    # A setting may be a vector (TD_OUTPUT_PATH, EMAIL_TO): set when any of
+    # it is set.
+    !is.null(s[[k]]) && length(s[[k]]) > 0 && any(nzchar(s[[k]]))
   }, logical(1))]
   if (length(missing)) stop(path, ": missing setting(s) ",
                             paste(missing, collapse = ", "), call. = FALSE)

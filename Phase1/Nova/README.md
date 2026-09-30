@@ -47,7 +47,7 @@ ours` line; `limit_up_down.r` covers only the first cutoff's venues anyway.
    | `LULD_OUT_TEMP` | `limitUpDown.csv` is written here first, then copied to each environment. |
    | `LULD_OUT_TEST`, `LULD_OUT_PILOT`, `LULD_OUT_PROD` | Where each environment reads `limitUpDown.csv`. An environment the run asks for (all three by default) whose path is blank FAILS the job with `XX`; the others still get the file. Leave one blank only if you always name the environments, for example `"Test|Prod"`. |
    | `INDIA_NSE_STRA`, `INDIA_BSE_STRA` | Not read in Phase1 (India is not at the first cutoff). Leave them `""`. |
-   | `TD_OUTPUT_PATH` | The full path of `TradingData.csv`. |
+   | `TD_OUTPUT_PATH` | The full path of `TradingData.csv`, or several: `c("C:/path/to/pilot/TradingData.csv", "C:/path/to/prod/TradingData.csv")`; each gets the same file. One that cannot be written is `XX` and fails the job; the others are still written. |
    | `MSCI_MAPPING_PATH` | The MSCI mapping CSV. `""` leaves the four `Msci*` columns blank. |
    | `OPEN_AUCTION_OVERRIDE_PATH` | The open-auction override (`RicCode`, `OpenAggressivityPct`). `""` leaves `OpenAggressivityPct` blank. |
    | `HKEX_CAS_LIST_PATH` | HKEX's CAS list, one stock code a line. `""`: no Hong Kong row is marked `NO_CAS`. |

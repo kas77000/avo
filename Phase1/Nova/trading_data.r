@@ -458,6 +458,10 @@ t_lines <- function(out) {
 # its place, so the file under its real name is always a finished one.
 t_write <- function(path, lines) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  if (!dir.exists(dirname(path))) {
+    stop("could not write ", path, ": its folder cannot be created",
+         call. = FALSE)
+  }
   part <- paste0(path, ".part")
   con <- file(part, "wb")
   writeLines(enc2utf8(lines), con, sep = "\r\n", useBytes = TRUE)
@@ -576,10 +580,27 @@ t_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
     log$fail("output failed validation; nothing published")
     return(FALSE)
   }
-  t_write(s$TD_OUTPUT_PATH, t_lines(out))
+  # TD_OUTPUT_PATH may name several files, c("pilot/...", "prod/..."): each
+  # gets the same file. One that cannot be written is XX and fails the job,
+  # but the others are still written.
+  paths <- s$TD_OUTPUT_PATH[nzchar(s$TD_OUTPUT_PATH)]
+  lines <- t_lines(out)
+  written <- character(0)
+  for (path in paths) {
+    err <- tryCatch({
+      t_write(path, lines)
+      NULL
+    }, error = function(e) conditionMessage(e))
+    if (is.null(err)) {
+      written <- c(written, path)
+      log$ok(paste(nrow(out), "rows written to", path))
+    } else {
+      log$fail(paste0(path, ": ", err))
+    }
+  }
   p1_note(log, "rows written", nrow(out))
-  log$ok(paste(nrow(out), "rows written to", s$TD_OUTPUT_PATH))
-  TRUE
+  p1_note(log, "written to", paste(written, collapse = " | "))
+  length(written) == length(paths)
 }
 
 # -- self-test ----------------------------------------------------------
@@ -1110,6 +1131,35 @@ INE002A01018 1
         tryCatch(strsplit(readLines(s4$TD_OUTPUT_PATH)[2], ",")[[1]][13],
                  error = function(e) "no file"), "3133")
   unlink(zc$dir, recursive = TRUE)
+
+  cat("\nseveral outputs: Pilot and Prod\n")
+  s5 <- s
+  s5$TD_OUTPUT_PATH <- c(file.path(d, "pilot", "TradingData.csv"),
+                         file.path(d, "prod", "TradingData.csv"))
+  ok5 <- tryCatch(t_run(z, s5, t_quiet_log(), today = today),
+                  error = function(e) conditionMessage(e))
+  bytes5 <- lapply(s5$TD_OUTPUT_PATH, function(p) {
+    if (file.exists(p)) readBin(p, "raw", file.info(p)$size) else NULL
+  })
+  check("each path gets the same file",
+        list(ok5, !is.null(bytes5[[1]]), identical(bytes5[[1]], bytes5[[2]])),
+        list(TRUE, TRUE, TRUE))
+  blocker <- file.path(d, "blocker")
+  writeLines("a file, where a folder should be", blocker)
+  s6 <- s
+  s6$TD_OUTPUT_PATH <- c(file.path(blocker, "TradingData.csv"),
+                         file.path(d, "prod6", "TradingData.csv"))
+  log6 <- t_quiet_log()
+  ok6 <- tryCatch(t_run(z, s6, log6, today = today),
+                  error = function(e) conditionMessage(e))
+  check("one path that cannot be written is XX and fails the job; the others still get it",
+        list(ok6, length(log6$failed()) > 0, file.exists(s6$TD_OUTPUT_PATH[2])),
+        list(FALSE, TRUE, TRUE))
+  check("a vector of paths counts as set",
+        p1_settings(put("settings6.r", c(
+          'CROSSCODE_PATH <- "x"', 'LOG_DIR <- "x"',
+          'TD_OUTPUT_PATH <- c("a.csv", "b.csv")')),
+          required = T_REQUIRED)$TD_OUTPUT_PATH, c("a.csv", "b.csv"))
 
   cat("\nthe members it reads\n")
   check("ticks.csv is not among them",

@@ -31,6 +31,8 @@ INDIA_NSE_STRA   <- ""
 INDIA_BSE_STRA   <- ""
 
 # trading_data.r
+# One path, or several: each gets the same file, e.g.
+# c("C:/path/to/pilot/TradingData.csv", "C:/path/to/prod/TradingData.csv")
 TD_OUTPUT_PATH   <- "C:/path/to/TradingData.csv"
 
 # Optional inputs: read when set, skipped (and logged) when "".
