@@ -32,7 +32,7 @@ extract.py -> phase1-YYYYMMDD.zip  ---------------------->  run_phase1.cmd <zip>
    | `EXPORT_DIR` | where the zip is written, e.g. `C:\path\to\phase1_export` |
    | `CROSSCODE_PATH` | `NewCrosscode.csv` on this machine |
    | `KDB_TIMEZONE` | optional, default `China Standard Time`; the zone kdb stamps prints in, copied to the manifest |
-   | `SYM_CHUNK`, `MASTER_CHUNK` | optional, default 200 and 5000; syms per qatt read, codes per equity_master read |
+   | `SYM_CHUNK`, `MASTER_CHUNK` | optional, default 200 and 5000; syms per qatt read, codes per equity_master read. `SYM_CHUNK` is capped at 200: a larger value is a `!!` line and 200 is used |
    | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | optional: the SMTP host, the sender, and a **list** of recipients for the mail at the end of every run. Left out, no mail |
 
 3. Check that the install works, with no kdb:
@@ -334,12 +334,14 @@ column says which one was found. A code none of them finds has no row.
 **Ticks are condensed in q.** A `ticks.csv` line is not one print: the read is
 
 ```
-0!select size:sum size by sym, tradeTime:tradeTime.second, price, cond, ex from qatt where ...
+0!select size:sum size by sym, tradeTime:"i"$tradeTime.second, price, cond, ex from qatt where ...
 ```
 
 (with the configured time column), so every print in one second at one
 price, condition and exchange is one line, `size` summed. The time comes
-back as a q `second` and is written exactly as before. The manifest's
+back as a plain int of seconds (`"i"$`; pykx converting a q `second` column
+crashed python with an access violation on a live day) and is written
+exactly as before; kdb's null, `0Ni`, is a blank time. The manifest's
 `prints` counts these lines. If qatt lacks `price`, `size`, `cond` or `ex`,
 the read falls back to one line per print, and step 2 of the log says why.
 

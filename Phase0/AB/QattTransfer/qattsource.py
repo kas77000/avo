@@ -199,16 +199,22 @@ def _condensed_q(args: str, where: str, field: str) -> str:
     #  table is what broke pykx in Phase0 - see TradingData/equitymaster.py
     #  and LimitUpDown/kdbclose.py.  Unkeyed, it is a plain table with the
     #  same names as the uncondensed read, so shape() takes it unchanged.
+    #  "i"$ SENDS THE SECOND AS A PLAIN INT.  pykx's conversion of a q
+    #  `second` column killed python with a native access violation on a
+    #  live day (2026-09-30, markets of 2,000+ syms); an int column needs
+    #  no temporal conversion at all.  The null second is 0Ni.
     return ("{" + args + " 0!select size:sum size by sym, " + field + ":" +
-            field + ".second, price, cond, ex from qatt where " + where + "}")
+            '"i"$' + field + ".second, price, cond, ex from qatt where " +
+            where + "}")
 
 
 def ticks_q(time_field: str = None, cols=None) -> str:
     """The tick query, CONDENSED in q: one line per sym, second of the time
     field, price, cond and ex, with size summed.
 
-        {[d;s] 0!select size:sum size by sym, tradeTime:tradeTime.second,
-               price, cond, ex from qatt where date=d, sym in s}
+        {[d;s] 0!select size:sum size by sym,
+               tradeTime:"i"$tradeTime.second, price, cond, ex from qatt
+               where date=d, sym in s}
 
     WHY IN q.  The file carries the time to the second, so every print in
     one second at one price, with one condition on one venue, writes the
@@ -806,7 +812,18 @@ def _second_column(src, field, int_unit: str = "ms") -> list:
     col = (src[field] if not isinstance(src, list) and field in src.columns
            else None)
     kind = col.dtype.kind if col is not None else ""
-    one = _memo(lambda v: _seconds_of(v, int_unit))
+    if int_unit == "s" and kind in ("i", "u", "f"):
+        #  A CONDENSED READ'S TIME IS AN INT OF SECONDS ("i"$ in ticks_q).
+        #  Read in numpy, no temporal conversion: kdb's 0Ni (the int32
+        #  minimum), a NaN where pandas made the null a float, and anything
+        #  outside a day are all None.
+        import numpy as np
+        a = col.to_numpy(dtype="float64", na_value=np.nan)
+        good = np.isfinite(a) & (a >= 0) & (a < 86_400)
+        return [int(v) if g else None
+                for g, v in zip(good.tolist(), a.tolist())]
+    one = _memo(lambda v: _int_second(v) if int_unit == "s"
+                and _is_number(v) else _seconds_of(v, int_unit))
     if kind not in ("m", "M") or getattr(col.dt, "tz", None) is not None:
         return list(map(one, _columns_of(src, (field,))[field]))
     import numpy as np
@@ -831,6 +848,23 @@ def _second_column(src, field, int_unit: str = "ms") -> list:
         bad = null
     return [None if b else int(v)
             for b, v in zip(bad.tolist(), secs.tolist())]
+
+
+def _is_number(value) -> bool:
+    """A plain int or float (numpy's too), not a bool and not a time -
+    numpy's timedelta64 is an integer subclass, and is a time."""
+    import numbers
+    return (isinstance(value, numbers.Real) and not isinstance(value, bool)
+            and getattr(getattr(value, "dtype", None), "kind", "")
+            not in ("m", "M"))
+
+
+def _int_second(value):
+    """An int seconds-of-day cell: None for a null - 0Ni, NaN - or anything
+    outside one day."""
+    if value != value or not 0 <= value < 86_400:
+        return None
+    return int(value)
 
 
 def _seconds_of(value, int_unit: str = "ms"):
@@ -953,16 +987,16 @@ def self_test() -> int:
           "unkeyed with 0! - a keyed `by` answer is what broke pykx before",
           ticks_q("tradeTime", cols),
           "{[d;s] 0!select size:sum size by sym, "
-          "tradeTime:tradeTime.second, price, cond, ex from qatt "
+          "tradeTime:\"i\"$tradeTime.second, price, cond, ex from qatt "
           "where date=d, sym in s}")
     check("so does today's",
           live_ticks_q("tradeTime", cols),
           "{[s] 0!select size:sum size by sym, "
-          "tradeTime:tradeTime.second, price, cond, ex from qatt "
+          "tradeTime:\"i\"$tradeTime.second, price, cond, ex from qatt "
           "where sym in s}")
     check("the time column it groups on is the one asked for, under its "
           "own name, so shape() finds it where it always did",
-          "srcTime:srcTime.second" in ticks_q(
+          'srcTime:"i"$srcTime.second' in ticks_q(
               "srcTime", select_columns(HAVE, "srcTime")), True)
     check("TIME_FIELD by default",
           ticks_q(None, cols), ticks_q(TIME_FIELD, cols))
@@ -975,6 +1009,39 @@ def self_test() -> int:
           (time_unit(cols, "tradeTime"), time_unit(None),
            time_unit(["sym", "tradeTime", "price"], "tradeTime")),
           ("s", "ms", "ms"))
+    import numpy as np
+    import pandas as pd
+    check("a condensed read's int seconds, with kdb's 0Ni (the int32 "
+          "minimum): the seconds, and None for the null",
+          _second_column(pd.DataFrame({"tradeTime": np.array(
+              [32401, -2147483648, 0, 86399], dtype="int32")}),
+              "tradeTime", "s"), [32401, None, 0, 86399])
+    check("and where pandas made the null a NaN in a float column",
+          _second_column(pd.DataFrame({"tradeTime": [32401.0, float("nan")]}),
+                         "tradeTime", "s"), [32401, None])
+    check("a row list of numpy timedelta64 seconds is still read as times",
+          _second_column([{"tradeTime": np.timedelta64(32401, "s")}],
+                         "tradeTime", "s"), [32401])
+    check("a row list: None, NaN, 0Ni and a value outside a day are None",
+          _second_column([{"tradeTime": 5}, {"tradeTime": None},
+                          {"tradeTime": float("nan")},
+                          {"tradeTime": -2147483648},
+                          {"tradeTime": 86400}], "tradeTime", "s"),
+          [5, None, None, None, None])
+    class _Table:                   # a pykx table: one .pd()
+        def __init__(self, df):
+            self.df = df
+
+        def pd(self):
+            return self.df
+
+    check("shape() reads a condensed frame's int column as those seconds",
+          shape(_Table(pd.DataFrame({"sym": ["A", "A"], "tradeTime": np.array(
+              [32401, -2147483648], dtype="int32"), "price": [1.5, 1.6],
+              "size": [100, 200], "cond": ["", ""], "ex": ["T", "T"]})),
+              "tradeTime", cols)["A"],
+          [(32401, "1.5", "100", "#N/A N.A.", "T"),
+           (None, "1.6", "200", "#N/A N.A.", "T")])
     for gone in TICK_FIELDS:
         less = [c for c in cols if c != gone]
         check(f"no {gone} column: not condensed, the plain select instead",

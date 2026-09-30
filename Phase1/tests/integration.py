@@ -335,16 +335,20 @@ class FakeKdb:
     """equity_master, qatt and quote for one Day.
 
     `time_rep` turns a condensed line's seconds into what the connection
-    hands back; `frame` answers with a pandas frame instead of rows;
-    `null_at` is (sym, index) of a condensed line whose time is null;
+    hands back - by default the plain int kdb sends for "i"$tradeTime.second
+    (see qattsource.ticks_q); `frame` answers with a pandas frame instead
+    of rows, its time column timedelta64[s], or int32 when frame="int";
+    `null_at` is (sym, index) of a condensed line whose time is null,
+    `null_value` what that null is (None, or kdb's 0Ni);
     `fail_syms` makes a qatt read of any of them raise."""
 
     def __init__(self, day, time_rep=None, frame=False, null_at=None,
-                 fail_syms=()):
+                 fail_syms=(), null_value=None):
         self.day = day
-        self.time_rep = time_rep or (lambda s: dt.timedelta(seconds=s))
+        self.time_rep = time_rep or (lambda s: s)
         self.frame = frame
         self.null_at = null_at
+        self.null_value = null_value
         self.fail_syms = set(fail_syms)
         self.asked = []             # (kind, syms) per qatt tick read
         master = []
@@ -418,18 +422,25 @@ class FakeKdb:
             sym, i = self.null_at
             mine = [r for r in rows if r["sym"] == sym]
             if mine:
-                mine[i][T] = None
+                mine[i][T] = self.null_value
         if not self.frame:
             return rows
         import numpy as np
         import pandas as pd
-        secs = [None if r[T] is None else int(r[T].total_seconds())
+        secs = [None if r[T] is None or r[T] == -2147483648 else
+                r[T] if isinstance(r[T], int) else int(r[T].total_seconds())
                 for r in rows]
+        if self.frame == "int":         # kdb's "i"$: int32, 0Ni for null
+            tcol = pd.Series(np.array([-2147483648 if s is None else s
+                                       for s in secs], dtype="int32"))
+        else:
+            tcol = pd.Series(np.array([np.timedelta64("NaT") if s is None
+                                       else np.timedelta64(s, "s")
+                                       for s in secs],
+                                      dtype="timedelta64[s]"))
         df = pd.DataFrame({
             "sym": pd.Series([r["sym"] for r in rows], dtype=object),
-            T: pd.Series(np.array([np.timedelta64("NaT") if s is None else
-                                   np.timedelta64(s, "s") for s in secs],
-                                  dtype="timedelta64[s]")),
+            T: tcol,
             "price": pd.Series([r["price"] for r in rows], dtype=object),
             "cond": pd.Series([r["cond"] for r in rows], dtype=object),
             "ex": pd.Series([r["ex"] for r in rows], dtype=object),
@@ -869,7 +880,8 @@ def scenario2(tmp, s1):
     day = s1.day
     target = ("6758.JP", 1)
     variants = [
-        ("int seconds", dict(time_rep=lambda s: s)),
+        ("int seconds (kdb's \"i\"$, the default)", dict()),
+        ("a frame, int32 column", dict(frame="int")),
         ("datetime.timedelta", dict(time_rep=lambda s:
                                     dt.timedelta(seconds=s))),
         ("pandas.Timedelta", dict(time_rep=lambda s: pd.Timedelta(seconds=s))),
@@ -879,6 +891,9 @@ def scenario2(tmp, s1):
         ("null (None) on one line", dict(time_rep=lambda s: s,
                                          null_at=target)),
         ("null (NaT) in a frame", dict(frame=True, null_at=target)),
+        ("null (0Ni) on one line", dict(null_at=target,
+                                        null_value=-2147483648)),
+        ("null (0Ni) in an int32 frame", dict(frame="int", null_at=target)),
     ]
     base = None
     for i, (label, kw) in enumerate(variants):

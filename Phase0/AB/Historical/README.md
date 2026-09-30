@@ -30,8 +30,9 @@ That store already holds what the request was asking for:
 
 **A line is condensed in q**: one second, price, condition and exchange,
 with the volume of every print behind it summed —
-`0!select size:sum size by sym, tradeTime:tradeTime.second, price, cond, ex`.
-The time comes back as a q `second`, read as the same clock as before. If
+`0!select size:sum size by sym, tradeTime:"i"$tradeTime.second, price, cond, ex`.
+The time comes back as a plain int of seconds (`"i"$`; pykx converting a q
+`second` column crashed python on a live day), read as the same clock. If
 qatt lacks price, size, cond or ex the read falls back to one line per
 print, and the log says why. `--trace` still reads uncondensed.
 
