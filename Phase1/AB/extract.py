@@ -125,12 +125,6 @@ LADDER_COLUMNS = ["BloombergCode", "sym", "price", "ticksize"]
 #  summary's order: the last trade (source qatt), PX_LAST (equity_master).
 REASONS = ("last-trade", "no-trades", "none-before-cutoff")
 
-#  The most syms one qatt read asks for.  A bigger SYM_CHUNK is capped:
-#  the first live days crashed python inside pykx on markets of 2,000+
-#  syms read 500 at a time (a q `second` column, since sent as an int -
-#  see qattsource.ticks_q); 200 is Phase0's size, and the one proven live.
-MAX_SYM_CHUNK = 200
-
 #  What "too big" looks like from here - see historical_ticks.run.
 TOO_BIG = ("wsfull", "limit", "abort")
 
@@ -1033,12 +1027,7 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         conns["qatt"] = conns["reconnect"]()
         return conns["qatt"]
 
-    n = int(cfg["SYM_CHUNK"])
-    if n > MAX_SYM_CHUNK:
-        log.warn(f"SYM_CHUNK {n} is above {MAX_SYM_CHUNK}: reading "
-                 f"{MAX_SYM_CHUNK} syms at a time")
-        n = MAX_SYM_CHUNK
-    size = {"n": n}                 # the halved read size, for every market
+    size = {"n": int(cfg["SYM_CHUNK"])}     # the halved read size, for every market
     todo = [m for m in sorted(by_market) if not only or m in only]
     for c in only or []:
         if c not in by_market:
@@ -2401,9 +2390,8 @@ def self_test() -> int:
         qatt, log = FakeQatt(), Caught()
         run(tmp, D(2026, 9, 25), qatt=qatt, log=log,
             extra={"SYM_CHUNK": 500})
-        check("a SYM_CHUNK above 200 is a !! line, and 200 is used",
-              [ln for ln in log.lines if "SYM_CHUNK" in ln],
-              ["!!  SYM_CHUNK 500 is above 200: reading 200 syms at a time"])
+        check("SYM_CHUNK is taken as set, with no cap and no warning",
+              [ln for ln in log.lines if "SYM_CHUNK" in ln], [])
     with tempfile.TemporaryDirectory() as tmp:
         qatt = FakeQatt(max_syms=1)
         run(tmp, D(2026, 9, 25), qatt=qatt, extra={"SYM_CHUNK": 2},

@@ -32,7 +32,7 @@ extract.py -> phase1-YYYYMMDD.zip  ---------------------->  run_phase1.cmd <zip>
    | `EXPORT_DIR` | where the zip is written, e.g. `C:\path\to\phase1_export` |
    | `CROSSCODE_PATH` | `NewCrosscode.csv` on this machine |
    | `KDB_TIMEZONE` | optional, default `China Standard Time`; the zone kdb stamps prints in, copied to the manifest |
-   | `SYM_CHUNK`, `MASTER_CHUNK` | optional, default 200 and 5000; syms per qatt read, codes per equity_master read. `SYM_CHUNK` is capped at 200: a larger value is a `!!` line and 200 is used |
+   | `SYM_CHUNK`, `MASTER_CHUNK` | optional, default 200 and 5000; syms per qatt read, codes per equity_master read. A read that is too big for kdb is halved automatically |
    | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | optional: the SMTP host, the sender, and a **list** of recipients for the mail at the end of every run. Left out, no mail |
 
 3. Check that the install works, with no kdb:
