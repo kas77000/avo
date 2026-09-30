@@ -86,6 +86,7 @@ Nova runs R 3.2.2. Nothing is installed there beyond R and dplyr.
    | `MSCI_MAPPING_PATH`, `OPEN_AUCTION_OVERRIDE_PATH`, `HKEX_CAS_LIST_PATH`, `INDIA_NSE_CAS_LIST_PATH`, `INDIA_BSE_CAS_LIST_PATH` | optional inputs to TradingData; `""` leaves those columns blank |
    | `WORKERS` | optional: R processes writing tick files (default: cores − 1, at most 4) |
    | `TICK_BLOCK` | optional: lines of ticks read at a time (default 500000) |
+   | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | optional: the recap email at the end of `run_phase1.cmd` (`EMAIL_TO` is a vector, `c("a@...", "b@...")`). Blank: no email. Sent through Windows PowerShell, port 25, no login |
 
 4. **The launcher.** Open `run_phase1.cmd` in a text editor and set `RSCRIPT`
    on its first `set` line to R 3.2.2's `Rscript.exe`.
@@ -187,6 +188,12 @@ the others are skipped and the window says so):
 It stops at the first job that fails, and the window stays open. The log is
 `LOG_DIR\phase1-YYYYMMDD.log`: `..` is information, `ok` a step done, `!!`
 something to look at (the run goes on), `XX` a failure (the job stops).
+
+At the end, whatever happened, `run_phase1.cmd` sends a recap email (subject
+`[Phase1] Nova YYYY-MM-DD: OK`, `FAILED - <job>` or `OK (skipped: ...)`) with
+`LOG_DIR\phase1-YYYYMMDD-nova-report.html` attached: each job's figures and
+every `!!`/`XX` line of the run. To re-send it, or only write the HTML:
+`Rscript mail_report.r <zip>` / `Rscript mail_report.r <zip> --no-mail`.
 
 To publish `limitUpDown.csv` to some environments only, add them, quoted:
 
