@@ -453,6 +453,7 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
            "close_conditions.csv", call. = FALSE)
     }
     cc <- cc[trimws(cc$ext) %in% only | fidessa %in% only, , drop = FALSE]
+    p1_note(log, "market", paste(only, collapse = "|"))
     log$kv("--market", paste(only, collapse = "|"),
            paste0(nrow(cc), " rows in this run (",
                   paste(sort(unique(cc$FidessaMarket)), collapse = ", "),
@@ -463,14 +464,23 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
     if (u$dropped[[k]]) log$info(paste(u$dropped[[k]], "rows dropped:", k))
   }
   n_excluded <- 0
+  by_reason <- c()
   for (k in names(u$excluded)) {
     who <- u$excluded[[k]]
     n_excluded <- n_excluded + length(who)
+    r <- if (grepl("^same file on disk", k)) "same file on disk" else k
+    had <- if (r %in% names(by_reason)) by_reason[[r]] else 0
+    by_reason[r] <- had + length(who)
     log$warn(paste0(length(who), " excluded: ", k, " (",
                     paste(head(who, 5), collapse = ", "),
                     if (length(who) > 5) ", ..." else "", ")"))
   }
+  p1_note(log, "names excluded", n_excluded)
+  for (r in names(by_reason)) {
+    p1_note(log, paste("excluded:", r), by_reason[[r]])
+  }
   names_ <- u$names
+  p1_note(log, "names", nrow(names_))
   log$kv("names", nrow(names_))
   if (u$tally[["markets.csv"]]) {
     log$warn(paste(u$tally[["markets.csv"]], "names had no master row and",
@@ -616,6 +626,9 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
                    "files already there, skipped"))
   }
   log$kv("files written", h_n(st$written), paste(h_n(st$prints), "prints"))
+  p1_note(log, "files written", h_n(st$written))
+  p1_note(log, "prints", h_n(st$prints))
+  p1_note(log, "files skipped as existing", h_n(st$existing))
   log$kv("read and parse", sprintf("%.1f s", got$secs))
   log$kv("write", sprintf("%.1f s", t_write), paste(workers, "worker(s)"))
   log$kv("rows a second",
@@ -655,6 +668,9 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
                    "files already there, skipped"))
   }
   log$kv("quote-only files", st$quote_only)
+  p1_note(log, "quote-only files", st$quote_only)
+  p1_note(log, "files skipped as existing", h_n(st$existing))
+  p1_note(log, "no-TimeZone names", length(no_tz))
   st$no_timezone <- length(no_tz)
   h_warn_each(log, no_tz, function(k) {
     v <- names_$venue[no_tz[k]]
@@ -669,6 +685,7 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
   none <- which(!has_ticks & is.na(qi))
   asked <- names_$sym[none] %in% p1_read(z$dir, "closes.csv")$sym
   st$not_asked <- sum(!asked)
+  p1_note(log, "not-in-extract names", st$not_asked)
   gone <- none[!asked]
   h_warn_each(log, gone, function(k) {
     paste(names_$code[gone[k]], "not in the extract, nothing written")
@@ -689,10 +706,14 @@ h_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
                           names_$code[per[[k]]], ymd)
     st$per_country[[k]] <- n
     st$no_trading_day <- st$no_trading_day + n
+    p1_note(log, paste("NoTradingDay rows,", k), n)
     log$kv(paste("NoTradingDay", k), n,
            paste(length(per[[k]]) - n, "already there"))
   }
 
+  p1_note(log, "NoTradingDay rows", st$no_trading_day)
+  if (st$no_country) p1_note(log, "no-Country names", st$no_country)
+  if (st$quote_skipped) p1_note(log, "quotes with no price", st$quote_skipped)
   log$step(5, "result")
   log$kv("files written", h_n(st$written))
   log$kv("already there", h_n(st$existing), "left alone")
@@ -1228,8 +1249,12 @@ h_main <- function() {
   }
   say(paste("historical.r", a[1]))
   p1_require_use(a[1], "ticks", "historical.r")
-  z <- p1_unzip(a[1], H_MEMBERS, say = say)
-  log <- p1_log_open(s$LOG_DIR, z$date)
+  sm <- p1_summary_open(s$LOG_DIR, a[1], "historical")
+  z <- tryCatch(p1_unzip(a[1], H_MEMBERS, say = say), error = function(e) {
+    sm$write("failed", conditionMessage(e))
+    stop(e)
+  })
+  log <- p1_summary_log(p1_log_open(s$LOG_DIR, z$date), sm)
   log$file_only(early)
   only <- h_market_arg(a[-1])
   ok <- tryCatch({
@@ -1239,6 +1264,7 @@ h_main <- function() {
     log$fail(conditionMessage(e))
     FALSE
   })
+  p1_summary_close(sm, ok)
   unlink(z$dir, recursive = TRUE)
   quit(save = "no", status = if (ok) 0 else 1)
 }

@@ -221,15 +221,108 @@ p1_uses <- function(manifest) {
   if (!length(u)) P1_USES else P1_USES[P1_USES %in% u]
 }
 
-# The uses of a zip, from its manifest alone.
-p1_zip_uses <- function(zip) {
+# A zip's manifest alone, keyed by name, without unzipping the rest.
+p1_zip_manifest <- function(zip) {
   dir <- tempfile("phase1-for-")
   on.exit(unlink(dir, recursive = TRUE))
   suppressWarnings(utils::unzip(zip, files = "manifest.csv", exdir = dir))
   f <- file.path(dir, "manifest.csv")
   if (!file.exists(f)) stop(zip, " has no manifest.csv", call. = FALSE)
   m <- p1_csv(f)
-  p1_uses(setNames(m$value, m$key))
+  setNames(m$value, m$key)
+}
+
+# The uses of a zip, from its manifest alone.
+p1_zip_uses <- function(zip) p1_uses(p1_zip_manifest(zip))
+
+# -- the run's summary ---------------------------------------------------
+
+# Each job leaves LOG_DIR/phase1-YYYYMMDD-<job>.summary.csv (key,value) for
+# mail_report.r: its status, start and end, and its counts. It is written
+# as "running" before the unzip, so a job that dies leaves that, never an
+# older run's "ok", and again at the end.
+p1_summary_path <- function(dir, date, job) {
+  file.path(dir, sprintf("phase1-%s-%s.summary.csv", format(date, "%Y%m%d"),
+                         job))
+}
+
+# One CSV cell, quoted only when it must be.
+p1_cell <- function(x) {
+  x <- enc2utf8(as.character(x))
+  q <- grepl('[,"\r\n]', x)
+  x[q] <- paste0('"', gsub('"', '""', x[q], fixed = TRUE), '"')
+  x
+}
+
+# set(key, value) records a count (a later set of the key replaces it);
+# write(status, error) writes the file. The date comes from the zip's
+# manifest; no LOG_DIR or no readable manifest, and nothing is written.
+p1_summary_open <- function(dir, zip, job) {
+  e <- new.env()
+  e$keys <- character(0)
+  e$values <- character(0)
+  e$last_xx <- ""
+  now <- function() format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  e$started <- now()
+  date <- tryCatch(as.Date(p1_zip_manifest(zip)[["date"]]),
+                   error = function(err) NULL)
+  path <- if (!is.null(dir) && nzchar(dir) && length(date) == 1 &&
+              !is.na(date)) p1_summary_path(dir, date, job) else NULL
+  set <- function(key, value) {
+    value <- paste(as.character(value), collapse = "|")
+    i <- match(key, e$keys)
+    if (is.na(i)) {
+      e$keys <- c(e$keys, key)
+      e$values <- c(e$values, value)
+    } else e$values[i] <- value
+    invisible(NULL)
+  }
+  write <- function(status, error = "") {
+    if (is.null(path)) return(invisible(FALSE))
+    if (status == "failed" && !nzchar(error)) error <- e$last_xx
+    k <- c("status", "job", "zip", "started", "ended",
+           if (nzchar(error)) "error", e$keys)
+    v <- c(status, job, basename(zip), e$started,
+           if (status == "running") "" else now(),
+           if (nzchar(error)) error, e$values)
+    tryCatch({
+      dir.create(dir, recursive = TRUE, showWarnings = FALSE)
+      con <- file(path, "wb")
+      on.exit(close(con))
+      writeLines(c("key,value", paste(p1_cell(k), p1_cell(v), sep = ",")),
+                 con, sep = "\r\n", useBytes = TRUE)
+      invisible(TRUE)
+    }, error = function(err) invisible(FALSE))
+  }
+  write("running")
+  list(set = set, write = write, path = path,
+       xx = function(txt) e$last_xx <- txt)
+}
+
+# The log a job's run is given, with the summary behind it: log$note(key,
+# value) records a count, and the last XX line is the summary's error when
+# the job fails without an R error.
+p1_summary_log <- function(log, sm) {
+  fail <- log$fail
+  log$note <- sm$set
+  log$fail <- function(txt) {
+    sm$xx(txt)
+    fail(txt)
+  }
+  log
+}
+
+# log$note when the log has one: the self-tests' quiet logs have none. [[
+# ]], since $ would take a quiet log's "noted" for it.
+p1_note <- function(log, key, value) {
+  note <- log[["note"]]
+  if (is.function(note)) note(key, value)
+  invisible(NULL)
+}
+
+# The end of a job: the summary's status and, when it failed, why.
+p1_summary_close <- function(sm, ok, error = "") {
+  sm$write(if (ok) "ok" else "failed", error)
 }
 
 # NULL when `use` is among the zip's `uses`, else why the job cannot run.

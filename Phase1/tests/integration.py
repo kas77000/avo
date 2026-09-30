@@ -838,6 +838,21 @@ def scenario_for(tmp, s1):
           code == 0 and "historical.r skipped: this zip was not made for "
           "ticks" in out and "skipped, not in this zip: historical.r" in out,
           f"exit {code}:\n" + "\n".join(out.splitlines()[-12:]))
+    check("run_phase1.cmd: the recap's subject says historical was skipped",
+          "OK (skipped: historical - zip for luld|td)" in out,
+          "\n".join(out.splitlines()[-12:]))
+
+    env3 = nova_env(tmp / "nova3", s1.cc, LULD_OUT_PILOT="")
+    code, out = run_cmd(env3, z)
+    tail = [ln for ln in out.splitlines() if ln.strip()]
+    # out is stdout then stderr: the job's own XX lines come last.
+    subj = out.find("subject: [Phase1] Nova")
+    check("run_phase1.cmd, a job failing: the recap says FAILED, and the "
+          "run still ends with the job's XX and exit 1",
+          code == 1 and "FAILED - limit_up_down" in out
+          and 0 <= subj < out.find("XX  limit_up_down.r failed")
+          and (env3.logs / f"phase1-{YMD}-nova-report.html").exists(),
+          f"exit {code}:\n" + "\n".join(tail[-12:]))
     check("run_phase1.cmd: no tick file, the same limitUpDown.csv and "
           "TradingData.csv",
           not tree(env2.hist)
@@ -960,6 +975,23 @@ def scenario3(tmp, s1):
     check("run_phase1.cmd exits 0 and says all three jobs done",
           p.returncode == 0 and "all three jobs done" in out,
           f"exit {p.returncode}:\n" + "\n".join(out.splitlines()[-15:]))
+    report = env.logs / f"phase1-{YMD}-nova-report.html"
+    html = report.read_text(encoding="utf-8") if report.exists() else ""
+    sections = [f">{j}</h2>" for j in ("Run", "historical.r",
+                                        "limit_up_down.r", "trading_data.r",
+                                        "Warnings and errors")]
+    check("run_phase1.cmd: the recap is written, a section per job, no mail "
+          "without SMTP_HOST",
+          all(s in html for s in sections)
+          and "no mail: SMTP_HOST" in out,
+          f"{report} exists {report.exists()}; missing "
+          f"{[s for s in sections if s not in html]}")
+    sums = {j: env.logs / f"phase1-{YMD}-{j}.summary.csv"
+            for j in ("historical", "limit_up_down", "trading_data")}
+    check("run_phase1.cmd: each job leaves its summary, status ok",
+          all(p.exists() and "status,ok" in p.read_text(encoding="utf-8")
+              for p in sums.values()),
+          str({j: p.exists() for j, p in sums.items()}))
     check("run_phase1.cmd: tick files as historical.r alone wrote them",
           tree(env.hist) == s1.tA)
     luld = [env.luld[k] for k in ("temp", "test", "pilot", "prod")]

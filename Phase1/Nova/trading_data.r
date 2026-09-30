@@ -496,6 +496,7 @@ t_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
                     if (length(u$dropped) > 5) ", ..." else "", ")"))
   }
   log$kv("names", nrow(u$rows))
+  p1_note(log, "names", nrow(u$rows))
 
   log$step(2, "config and optional inputs")
   markets <- t_markets(file.path(cfg, "td_markets.csv"))
@@ -509,12 +510,15 @@ t_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
     p <- s[[key]]
     if (is.null(p) || !nzchar(trimws(p))) {
       log$info(paste0(key, " not supplied; ", off))
+      p1_note(log, paste("input", key), "skipped, not set")
       return("")
     }
     if (!file.exists(p)) {
       log$warn(paste0(key, " ", p, " does not exist; ", off))
+      p1_note(log, paste("input", key), "skipped, missing")
       return("")
     }
+    p1_note(log, paste("input", key), "used")
     p
   }
   mp <- optional("MSCI_MAPPING_PATH", "the four Msci* columns are blank")
@@ -559,6 +563,10 @@ t_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
   for (k in T_KEY_COLUMNS) {
     filled <- sum(nzchar(out[[k]]))
     log$kv(k, sprintf("%6d / %d  %3d%%", filled, nrow(out), (100 * filled) %/% n))
+    p1_note(log, paste("filled:", k), sprintf("%d / %d  %d%%", filled,
+                                               nrow(out),
+                                               (100 * filled) %/% n))
+    if (k == "Close") p1_note(log, "rows with Close", filled)
   }
 
   log$step(4, "publish")
@@ -569,6 +577,7 @@ t_run <- function(z, s, log, cfg = file.path(p1_here(), "config"),
     return(FALSE)
   }
   t_write(s$TD_OUTPUT_PATH, t_lines(out))
+  p1_note(log, "rows written", nrow(out))
   log$ok(paste(nrow(out), "rows written to", s$TD_OUTPUT_PATH))
   TRUE
 }
@@ -1117,13 +1126,18 @@ t_main <- function() {
   if (identical(a[1], "--self-test")) return(t_self_test())
   s <- p1_settings(required = T_REQUIRED)
   p1_require_use(a[1], "td", "trading_data.r")
-  z <- p1_unzip(a[1], T_MEMBERS)
-  log <- p1_log_open(s$LOG_DIR, z$date)
+  sm <- p1_summary_open(s$LOG_DIR, a[1], "trading_data")
+  z <- tryCatch(p1_unzip(a[1], T_MEMBERS), error = function(e) {
+    sm$write("failed", conditionMessage(e))
+    stop(e)
+  })
+  log <- p1_summary_log(p1_log_open(s$LOG_DIR, z$date), sm)
   log$info(paste("trading_data.r", a[1]))
   ok <- tryCatch(t_run(z, s, log), error = function(e) {
     log$fail(conditionMessage(e))
     FALSE
   })
+  p1_summary_close(sm, ok)
   unlink(z$dir, recursive = TRUE)
   quit(save = "no", status = if (ok) 0 else 1)
 }

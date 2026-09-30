@@ -12,6 +12,10 @@ rem Only the jobs the zip was made for run (AB's extract.py --for, in the
 rem zip's manifest): historical.r needs ticks, limit_up_down.r luld,
 rem trading_data.r td. The others are skipped, and said so; a skipped job
 rem is not a failure.
+rem
+rem Last, whatever the jobs did, mail_report.r writes the recap to LOG_DIR
+rem and mails it (when settings.r says where). Its own failure changes
+rem nothing: the last line and the exit code are the jobs'.
 setlocal
 
 rem R 3.2.2's Rscript on this machine.
@@ -21,6 +25,8 @@ set "HERE=%~dp0"
 set "ZIP=%~1"
 set "ENVS=%~2"
 set "SKIPPED="
+set "RAN="
+set "FAILED="
 
 rem No ( ) blocks below: a path with a ) in it would end one early.
 if "%ZIP%"=="" goto usage
@@ -36,6 +42,7 @@ echo.
 echo === historical.r ===
 "%RSCRIPT%" "%HERE%historical.r" "%ZIP%"
 if errorlevel 1 goto failed
+set "RAN=%RAN% %JOB%"
 goto after_historical
 :skip_historical
 call :skip
@@ -51,6 +58,7 @@ echo === limit_up_down.r ===
 if defined ENVS "%RSCRIPT%" "%HERE%limit_up_down.r" "%ZIP%" "%ENVS%"
 if not defined ENVS "%RSCRIPT%" "%HERE%limit_up_down.r" "%ZIP%"
 if errorlevel 1 goto failed
+set "RAN=%RAN% %JOB%"
 goto after_limit_up_down
 :skip_limit_up_down
 call :skip
@@ -65,11 +73,14 @@ echo.
 echo === trading_data.r ===
 "%RSCRIPT%" "%HERE%trading_data.r" "%ZIP%"
 if errorlevel 1 goto failed
+set "RAN=%RAN% %JOB%"
 goto after_trading_data
 :skip_trading_data
 call :skip
 :after_trading_data
 
+set "STATUS=ok"
+call :mail
 echo.
 if defined SKIPPED goto some_done
 echo ok  all three jobs done; the log is in LOG_DIR
@@ -93,6 +104,14 @@ echo ..  %JOB% skipped: this zip was not made for %USE%
 set "SKIPPED=%SKIPPED% %JOB%"
 exit /b 0
 
+rem The recap: what ran, what was skipped, what failed. Always exit 0.
+:mail
+echo.
+echo === mail_report.r ===
+"%RSCRIPT%" "%HERE%mail_report.r" "%ZIP%" "--status=%STATUS%" "--ran=%RAN%" "--skipped=%SKIPPED%" "--failed=%FAILED%"
+if errorlevel 1 echo !!  mail_report.r failed; no recap. The jobs' result is below.
+exit /b 0
+
 :usage
 echo usage: run_phase1.cmd C:\path\to\phase1-YYYYMMDD.zip ["Test|Pilot|Prod"]
 goto stop
@@ -111,8 +130,12 @@ echo XX  could not read the manifest of "%ZIP%"; no job was run after it.
 goto stop
 
 :failed
+set "CODE=%ERRORLEVEL%"
+set "FAILED=%JOB%"
+set "STATUS=failed"
+call :mail
 echo.
-echo XX  %JOB% failed, exit code %ERRORLEVEL%; the jobs after it were not run.
+echo XX  %JOB% failed, exit code %CODE%; the jobs after it were not run.
 echo     See the XX lines above, and LOG_DIR\phase1-YYYYMMDD.log.
 
 :stop

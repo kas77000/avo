@@ -529,6 +529,7 @@ l_run <- function(z, s, log, envs, cfg = file.path(p1_here(), "config"),
                     } else ""))
   }
   log$kv("names", nrow(u$rows))
+  p1_note(log, "names", nrow(u$rows))
 
   log$step(2, "closes, names and ladders")
   master <- p1_read(z$dir, "master.csv")
@@ -540,6 +541,7 @@ l_run <- function(z, s, log, envs, cfg = file.path(p1_here(), "config"),
   has <- !is.na(close)
   closes <- setNames(close[has], u$rows$bbg[has])
   log$kv("closes", sum(has), paste(sum(!has), "without"))
+  p1_note(log, "names with a close", sum(has))
   eq <- p1_read(z$dir, "equity.csv")
   nm <- eq$LONG_COMP_NAME[match(u$rows$bbg, eq$BloombergCode)]
   names_ <- setNames(ifelse(is.na(nm), "", nm), u$rows$bbg)
@@ -554,6 +556,10 @@ l_run <- function(z, s, log, envs, cfg = file.path(p1_here(), "config"),
   res <- l_price(u$rows, venues, bands, closes, ladders, names_)
   out <- res$out
   ex <- res$excluded
+  p1_note(log, "names excluded", nrow(ex))
+  for (k in unique(ex$token)) {
+    p1_note(log, paste("excluded:", k), sum(ex$token == k))
+  }
   for (k in unique(ex$reason)) {
     e <- ex[ex$reason == k, ]
     who <- paste0(e$bbg, " ", e$venue, ifelse(nzchar(e$detail),
@@ -578,7 +584,9 @@ l_run <- function(z, s, log, envs, cfg = file.path(p1_here(), "config"),
                    l_cell(out$fidessa), l_cell(out$venue), sep = ","))
   l_write(s$LULD_OUT_TEMP, lines)
   log$kv("rows", nrow(out), s$LULD_OUT_TEMP)
+  p1_note(log, "rows published", nrow(out))
   ok <- TRUE
+  copied <- character(0)
   for (env in envs) {
     key <- paste0("LULD_OUT_", toupper(env))
     target <- s[[key]]
@@ -590,11 +598,14 @@ l_run <- function(z, s, log, envs, cfg = file.path(p1_here(), "config"),
     dir.create(dirname(target), recursive = TRUE, showWarnings = FALSE)
     if (file.copy(s$LULD_OUT_TEMP, target, overwrite = TRUE)) {
       log$kv(env, target)
+      copied <- c(copied, env)
     } else {
       log$fail(paste0(env, ": could not copy to ", target))
       ok <- FALSE
     }
   }
+  p1_note(log, "environments copied", copied)
+  if (!ok) p1_note(log, "environments failed", setdiff(envs, copied))
   if (ok) log$ok(paste(nrow(out), "limits published")) else
     log$fail("not every environment was published")
   ok
@@ -1107,13 +1118,19 @@ l_main <- function() {
   s <- p1_settings(required = L_REQUIRED)
   envs <- l_envs(a[2])
   p1_require_use(a[1], "luld", "limit_up_down.r")
-  z <- p1_unzip(a[1], L_MEMBERS)
-  log <- p1_log_open(s$LOG_DIR, z$date)
+  sm <- p1_summary_open(s$LOG_DIR, a[1], "limit_up_down")
+  z <- tryCatch(p1_unzip(a[1], L_MEMBERS), error = function(e) {
+    sm$write("failed", conditionMessage(e))
+    stop(e)
+  })
+  log <- p1_summary_log(p1_log_open(s$LOG_DIR, z$date), sm)
   log$info(paste("limit_up_down.r", a[1], paste(envs, collapse = "|")))
+  sm$set("environments asked", envs)
   ok <- tryCatch(l_run(z, s, log, envs), error = function(e) {
     log$fail(conditionMessage(e))
     FALSE
   })
+  p1_summary_close(sm, ok)
   unlink(z$dir, recursive = TRUE)
   quit(save = "no", status = if (ok) 0 else 1)
 }

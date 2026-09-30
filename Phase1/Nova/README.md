@@ -52,6 +52,9 @@ ours` line; `limit_up_down.r` covers only the first cutoff's venues anyway.
    | `OPEN_AUCTION_OVERRIDE_PATH` | The open-auction override (`RicCode`, `OpenAggressivityPct`). `""` leaves `OpenAggressivityPct` blank. |
    | `HKEX_CAS_LIST_PATH` | HKEX's CAS list, one stock code a line. `""`: no Hong Kong row is marked `NO_CAS`. |
    | `INDIA_NSE_CAS_LIST_PATH`, `INDIA_BSE_CAS_LIST_PATH` | The NSE and BSE CAS lists of ISINs. `""`: no India row is marked `CAS`. |
+   | `SMTP_HOST` | Optional. The mail server the recap is sent through (port 25, no login), e.g. `"smtp.example.invalid"`. `""`: no mail. |
+   | `EMAIL_FROM` | Optional. The recap's sender. `""`: no mail. |
+   | `EMAIL_TO` | Optional. The recap's recipients, a character vector: `c("ops@example.invalid", "desk@example.invalid")`. `""`: no mail. |
 
    The optional paths are read when set and skipped when `""`, and the log
    says which. A path that is set but does not exist is skipped with `!!`.
@@ -68,6 +71,7 @@ ours` line; `limit_up_down.r` covers only the first cutoff's venues anyway.
    Rscript historical.r --self-test
    Rscript limit_up_down.r --self-test
    Rscript trading_data.r --self-test
+   Rscript mail_report.r --self-test
    ```
 
    Each ends with `all checks passed` or `SOME CHECKS FAILED`.
@@ -92,6 +96,12 @@ ours` line; `limit_up_down.r` covers only the first cutoff's venues anyway.
 The jobs run one after another. The first one that fails stops the run:
 the window says `XX  <job> failed` and the jobs after it are not run. The
 window stays open until a key is pressed, whatever happened.
+
+Last, once the zip was accepted (all done, a job failed, or jobs skipped),
+`run_phase1.cmd` runs `mail_report.r`, which writes the recap and mails it;
+see [The recap](#the-recap). If the recap itself fails, the window says
+`!!  mail_report.r failed; no recap.` and nothing else changes: the last
+line and the exit code are still the jobs'.
 
 A job can be run on its own the same way:
 `Rscript historical.r C:\path\to\phase1-YYYYMMDD.zip`.
@@ -291,6 +301,57 @@ that traded, its last traded price (reason `last-trade`); else
 equity_master's PX_LAST (`no-trades`). AB logs each PX_LAST close and each
 missing one as a `!!  close` line; the zip's `closes.csv` carries the source
 and reason for every sym. The Nova jobs read only its `close` column.
+
+## The recap
+
+Each job leaves a small summary beside the log,
+`LOG_DIR/phase1-YYYYMMDD-<job>.summary.csv` (`historical`,
+`limit_up_down`, `trading_data`), two columns `key,value`: `status`
+(`ok` or `failed`), `started`, `ended`, `error` when it failed, then its
+counts:
+
+| Job | Counts |
+|-----|--------|
+| historical | names, names excluded (and by reason), files written, prints, files skipped as existing, quote-only files, no-TimeZone names, not-in-extract names, NoTradingDay rows (and per country), `market` for a `--market=` run |
+| limit_up_down | environments asked, names, names with a close, names excluded (and by token), rows published, environments copied, environments failed |
+| trading_data | names, each optional input (used, skipped, not set, or skipped, missing), the fill rates, rows with Close, rows written |
+
+A job writes its summary as `running` before it unzips anything, so one
+that dies part way leaves `running` (read as failed), never an older
+run's `ok`.
+
+`mail_report.r` then builds the recap from the summaries and the day's log:
+
+- **Subject**: `[Phase1] Nova YYYY-MM-DD: OK`, `: FAILED - <job>`, or,
+  for a zip made for some jobs, `: OK (skipped: historical - zip for luld|td)`.
+- **Body**: a line per job with its state and main counts, the zip's name,
+  and how many `!!` and `XX` lines the run logged.
+- **Attached**: `LOG_DIR/phase1-YYYYMMDD-nova-report.html`, one page
+  with the Run (zip, the manifest's date, for and source, start and end,
+  the machine), a section per job with all its counts, and every `!!` and
+  `XX` line of this run.
+
+"This run" in the log: the log keeps every run of the day, each opening
+with `=== stamp ===` and, on its next line, the job's script name. For
+each job that ran, the recap takes the last section that names it. A job
+that failed before its log opened (a zip that does not unzip) has no
+section; its summary's `error` is shown as its `XX` line.
+
+The mail is sent with Windows PowerShell's `Send-MailMessage`, when
+`SMTP_HOST`, `EMAIL_FROM` and `EMAIL_TO` are all set. Otherwise nothing
+is sent and the log says `..  no mail: ... not set in settings.r`; the
+HTML is written all the same. A mail that cannot be sent is one line,
+`!!  mail not sent: <why>`, and changes no exit code.
+
+To send the recap again, or to see it without mailing it:
+
+```
+Rscript mail_report.r C:\path\to\phase1-YYYYMMDD.zip
+Rscript mail_report.r C:\path\to\phase1-YYYYMMDD.zip --no-mail
+```
+
+Run by hand, it goes by the summaries alone: a job with one is as it
+says, a job the zip was not made for is skipped, any other is `not run`.
 
 ## Known unverified items
 

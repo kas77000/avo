@@ -39,3 +39,14 @@ OPEN_AUCTION_OVERRIDE_PATH <- ""
 HKEX_CAS_LIST_PATH         <- ""
 INDIA_NSE_CAS_LIST_PATH    <- ""
 INDIA_BSE_CAS_LIST_PATH    <- ""
+
+# mail_report.r, run last by run_phase1.cmd: the recap mailed through
+# SMTP_HOST (Windows PowerShell's Send-MailMessage, port 25, no login) from
+# EMAIL_FROM to every address in EMAIL_TO. Any of them "", and no mail is
+# sent; the report is still written to LOG_DIR.
+SMTP_HOST        <- ""
+EMAIL_FROM       <- ""
+EMAIL_TO         <- c("")
+# e.g. SMTP_HOST <- "smtp.example.invalid"
+#      EMAIL_FROM <- "nova@example.invalid"
+#      EMAIL_TO <- c("ops@example.invalid", "desk@example.invalid")
