@@ -126,7 +126,7 @@ python extract.py --market "NZ|HK"           only those markets, read again
 **When:** after 18:30 HKT, once every market in the universe has closed and
 its closing trades are in qatt. The last is India, whose closing session
 runs 15:30-16:00 IST, 18:00-18:30 HKT. A run before a market closes finds no
-closing trade for it, and every name there falls back to equity_master.
+closing trade for it: every name there closes at its last trade so far.
 
 **A run that fails early still leaves its finished markets staged**, and a
 rerun the same evening reuses them as they are. If the first run was too
@@ -160,8 +160,8 @@ the ladders, the ticks, the closes and the quotes all cover only these rows,
 and there are at most 18 markets. Rows without a BloombergCode, and
 baskets, are dropped before that, as always. To cover another market, add
 its row to `close_conditions.csv`; a row with a blank `CloseCondCodes`
-brings the market in with every close from equity_master
-(`no-close-codes`).
+brings the market in with every close from its last trade
+(`last-trade`), or `PX_LAST` for a name that did not trade.
 
 Step 1 of the log says what was kept and why the rest was dropped:
 
@@ -245,7 +245,7 @@ smaller size is kept for the rest of the run, across markets.
 
 | member | columns | what |
 |---|---|---|
-| `manifest.csv` | `key,value` | `date`, `source` (`rdb`/`hdb`), `equity_master date`, `time column`, `kdb timezone`, `syms asked`, `prints` (condensed `ticks.csv` lines), `syms with prints`, `quote only`, `closes from qatt`, `closes from equity_master`, `no close`, `exported at` |
+| `manifest.csv` | `key,value` | `date`, `source` (`rdb`/`hdb`), `equity_master date`, `time column`, `kdb timezone`, `syms asked`, `prints` (condensed `ticks.csv` lines), `syms with prints`, `quote only`, `closes from qatt` (closing prints), `closes from last trade`, `closes from equity_master`, `no close` (the four add up to `syms asked`), `exported at` |
 | `master.csv` | `BloombergCode,sym,EQY_PRIM_EXCH_SHRT,COMPOSITE_EXCH_CODE,ID_MIC_PRIM_EXCH` | each CrossCode code's equity_master row: the link from `7203 JT` to the qatt sym `7203.JP` |
 | `ticks.csv` | `sym,time,price,size,cond,ex` | one line per sym, second, price, cond and ex, with the volume of every qatt print behind it summed (see below); each sym's lines together, in time order, time `HH:MM:SS` in **kdb's clock**; several conditions are joined with `@`, an empty one is `#N/A N.A.` |
 | `closes.csv` | `sym,close,source,reason` | one row per sym asked; see below |
@@ -286,23 +286,27 @@ because Japan's `e` also marks the morning close. Lines run in time
 order; if two close-code lines share the day's last second, the one sorted
 last (the higher price) is the close.
 
-Without such a print, the close is equity_master's `PX_LAST`, and
-`closes.csv` says why:
+Without such a print, in this order:
 
-| reason | meaning |
-|---|---|
-| `no-trades` | no qatt print at all that day |
-| `no-closing-trade` | prints, but none with a close code |
-| `no-close-codes` | the market has no row in `close_conditions.csv` |
-
-A `PX_LAST` that is null or `<= 0` does not count. A sym with neither kind of
-close is written `sym,,,no-close`.
+1. **It traded that day:** the close is its **last traded price**, the
+   price of its last print by time (with condensed lines, the last line of
+   its last second; a line with no time is never taken as the last unless
+   every line lacks one). Reason `last-trade`. This also covers a market
+   with no close codes (no row in `close_conditions.csv`, or a blank
+   `CloseCondCodes`): its names close at their last trade.
+2. **No print at all** (the market was shut, or the name suspended):
+   equity_master's `PX_LAST`, reason `no-trades`. A `PX_LAST` that is null
+   or `<= 0` does not count.
+3. **Neither:** `sym,,,no-close`.
 
 | `source` | `reason` | close |
 |---|---|---|
 | `qatt` | blank | the closing print |
-| `equity_master` | one of the three above | `PX_LAST` |
+| `qatt` | `last-trade` | the last traded price |
+| `equity_master` | `no-trades` | `PX_LAST` |
 | blank | `no-close` | blank |
+
+Nova reads only the `close` column, whatever the source.
 
 ## Reading the log
 
@@ -319,9 +323,11 @@ the zip. A market's step looks like this:
 ..  --- 5.3. market NZ, 1 syms -----------------------------------
 ..  read 1  1/1 syms  2 lines  0.0s
 ..  no print                0   0 with a quote
-!!  close  AIA.NZ  NZ  no-closing-trade  -> equity_master 6.13
-..  NZ done                 1 syms   2 prints, qatt 0, equity_master 1, no close 0, quote-only 0
+..  NZ done                 1 syms   2 prints, closing print 0, last trade 1, equity_master 0, no close 0, quote-only 0
 ```
+
+AIA.NZ traded but had no closing print, so it closed at its last trade:
+that is a count on the `done` line, not a `!!` line.
 
 A market finished by an earlier run shows `NZ done already, skipped`
 instead, and its `!!` lines are in that earlier run's log. On a rerun,
@@ -330,36 +336,40 @@ steps 3 and 4 say `read back from master.csv` / `equity.csv`.
 The `!!` lines to expect:
 
 ```
-!!  close  AIA.NZ  NZ  no-closing-trade  -> equity_master 6.13
+!!  close  8888.HK  HK  no-trades  -> equity_master 3.4
 !!  close  8889.HK  HK  no-trades  -> no close, PX_LAST null or <= 0
+!!  XX has no close codes in close_conditions.csv: a name that traded closes at its last trade
 !!  quote  QQQ.XX  XX  no close codes for its market, quote-only row skipped
 !!  no tick ladder for any of 41,208 codes (...); ladders.csv is empty
 !!  200 syms was too much for qatt (...); reconnecting and asking 100 at a time
 ```
 
-There is one `close` line per fallback: the sym, its exchange codes, the
-reason, and the price taken or `no close`. The run ends with a table per
+There is one `close` line per name that took `PX_LAST` or has no close:
+the sym, its exchange codes, the reason, and the price taken or
+`no close`. The run ends with a table per
 market, counted from the staged files, so it covers the markets a rerun
 skipped too:
 
 ```
-market      syms   ticks    qatt  no-trades  no-closing-trade  no-close-codes  no-close  quote-only
-HK             2       0       0          1                 0               0         1           1
-JT             1       1       1          0                 0               0         0           0
-all            3       1       1          1                 0               0         1           1
+market      syms   ticks    qatt  last-trade  no-trades  no-close  quote-only
+HK             2       0       0           0          1         1           1
+JT             1       1       1           0          0         0           0
+all            3       1       1           0          1         1           1
 ```
 
 - `syms`: syms counted under that code (its primary exchange when the
   CrossCode carries it);
 - `ticks`: syms with at least one print;
 - `qatt`: closes from a closing print;
-- `no-trades`, `no-closing-trade`, `no-close-codes`: closes taken from
-  equity_master, by reason;
+- `last-trade`: names that traded but had no closing print, closed at their
+  last trade;
+- `no-trades`: names with no print, closed at equity_master's `PX_LAST`;
 - `no-close`: no close at all;
 - `quote-only`: syms written to `quote_only.csv`.
 
-A market whose `no-closing-trade` equals its `ticks` has closing trades
-under a code that is not in `close_conditions.csv`.
+A market whose `last-trade` is most of its `ticks` has its closing trades
+under a code that is not in `close_conditions.csv`: its close codes are
+wrong.
 
 The run stops with `XX` and writes no zip when kdb fails, when qatt has no
 partition on or before `--date`, when equity_master returns no row at all
@@ -416,6 +426,7 @@ Those usually come from a malformed BloombergCode in the CrossCode.
 
 3. **The close codes.** Run once with `--date` on a normal trading day and
    read the summary. Every market should have most of its `ticks` in `qatt`.
-   A market with a large `no-closing-trade` count has closing trades whose
-   condition is not in `config/close_conditions.csv`: look at that market's
-   last prints in `ticks.csv` and compare their `cond` with the file.
+   A market with mostly `last-trade` has its close codes wrong: its
+   closing trades carry a condition that is not in
+   `config/close_conditions.csv`. Look at that market's last prints in
+   `ticks.csv` and compare their `cond` with the file.

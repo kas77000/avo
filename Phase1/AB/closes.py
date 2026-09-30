@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pick each stock's close: the last qatt trade carrying its market's close
-condition code, equity_master's PX_LAST as the fallback.
+condition code; else its last traded price; else equity_master's PX_LAST.
 
 WHAT "THE CLOSE" MEANS HERE.  config/close_conditions.csv (see its README)
 names the condition codes that mark a market's closing trade - transcribed
@@ -14,12 +14,20 @@ several CrossCode rows - Japan's primary board and an ATS, for instance -
 and codes_for_sym takes every venue's close codes together, because the
 day's closing trade can carry any one of them.
 
-FALLBACK, NEVER SILENCE.  A name with no trade carrying a close code did not
-necessarily sit out the day - AND a market this file has no row for is the
-same situation from the other side.  Either way the fallback is
-equity_master's PX_LAST, and `resolve` names the reason (no-close-codes,
-no-trades, no-closing-trade) so the run's log can say why every single
-fallback happened, per the README.
+THE ORDER (resolve):
+  1. the last print carrying a close code        source qatt, reason ""
+  2. else, if it traded that day, its LAST TRADED PRICE: the last print by
+     time (last_trade)                           source qatt, reason
+                                                 last-trade
+  3. else - no print: the market was shut, or the name suspended -
+     equity_master's PX_LAST                     source equity_master,
+                                                 reason no-trades
+  4. else no close at all                        sym,,,no-close
+A market with no close codes (not in this file, or a blank CloseCondCodes)
+simply never reaches 1: a name there that traded closes at its last trade,
+reason last-trade like any other - there is no separate reason for it; the
+extract says once per market that it has no codes.  A day's own last trade
+beats equity_master's PX_LAST, which may be yesterday's.
 
 px_last ARRIVES ALREADY FILTERED.  The caller (extract.py) turns a null or
 non-positive PX_LAST into None before calling resolve() - a zero or negative
@@ -80,8 +88,8 @@ def codes_for_sym(exts, conditions) -> list:
 
     `exts` is the BBG exchange codes of every CrossCode row that names this
     sym.  A market `conditions` has no row for simply contributes nothing -
-    that is not an error here, it is what makes the caller's reason
-    "no-close-codes" rather than a crash."""
+    that is not an error here: with no codes at all, resolve() goes
+    straight to the last trade."""
     seen = set()
     out = []
     for ext in exts:
@@ -114,26 +122,28 @@ def pick(rows, codes):
     return price
 
 
-def resolve(sym, rows, codes, px_last) -> Close:
-    """The close, and where it came from.
+def last_trade(rows):
+    """The last traded price: the price of the last row that has a time -
+    with condensed rows, the last line of the day's last second.  A row
+    with no time is never "the last" (kdb sorts a null time first, and it
+    says nothing about when), unless every row lacks one: then the last
+    row.  None for no rows."""
+    timed = [r for r in rows if r[0] is not None]
+    last = (timed or rows or [None])[-1]
+    return None if last is None else last[1]
 
-    A qatt hit wins outright.  Short of that, `pick` cannot tell an
-    unconfigured market from a quiet one from a name with no trades at all -
-    those are three different situations and the reason says which -  but
-    every one of them still falls back to equity_master when px_last
-    survived the caller's null/<=0 filter, and only "no-close" when nothing
-    did."""
+
+def resolve(sym, rows, codes, px_last) -> Close:
+    """The close, and where it came from - the module docstring's order: a
+    closing print, the last trade, PX_LAST, nothing."""
     price = pick(rows, codes)
     if price is not None:
         return Close(sym, price, "qatt", "")
-    if not codes:
-        reason = "no-close-codes"
-    elif not rows:
-        reason = "no-trades"
-    else:
-        reason = "no-closing-trade"
+    price = last_trade(rows)
+    if price is not None:
+        return Close(sym, price, "qatt", "last-trade")
     if px_last:
-        return Close(sym, px_last, "equity_master", reason)
+        return Close(sym, px_last, "equity_master", "no-trades")
     return Close(sym, "", "", "no-close")
 
 
@@ -160,21 +170,38 @@ def self_test() -> int:
           "`by` sorts last, the higher price",
           pick(rows + [(54002, "104", "3", "CA", "T")], ["CA"]), "104")
 
-    print("\nresolving the close, with the fallback and its reason")
-    check("a qatt close", resolve("A", rows, ["CA"], "99"),
+    print("\nthe last traded price")
+    check("the last line by time", last_trade(rows), "103")
+    check("with two lines in the last second, the last line of it",
+          last_trade(rows + [(54002, "104", "3", "", "T")]), "104")
+    check("a row with no time is never the last print",
+          last_trade(rows + [(None, "999", "1", "", "T")]), "103")
+    check("even when the null time sorts first, as kdb puts it",
+          last_trade([(None, "999", "1", "", "T")] + rows), "103")
+    check("but a row with no time is used when it is the only kind",
+          last_trade([(None, "7", "1", "", "T"), (None, "8", "1", "", "T")]),
+          "8")
+    check("no rows, no last trade", last_trade([]), None)
+
+    print("\nresolving the close, in order")
+    check("1. a closing print", resolve("A", rows, ["CA"], "99"),
           Close("A", "103", "qatt", ""))
-    check("traded, no close trade -> equity_master",
-          resolve("A", rows, ["GC"], "99"),
-          Close("A", "99", "equity_master", "no-closing-trade"))
-    check("no trades -> equity_master", resolve("A", [], ["CA"], "99").reason,
-          "no-trades")
-    check("market not in the file", resolve("A", rows, [], "99").reason,
-          "no-close-codes")
-    check("nothing at all", resolve("A", [], ["CA"], None),
+    check("2. traded, no closing print: the last traded price from qatt, "
+          "not PX_LAST", resolve("A", rows, ["GC"], "99"),
+          Close("A", "103", "qatt", "last-trade"))
+    check("2. a market with no close codes that traded: the last trade too",
+          resolve("A", rows, [], "99"), Close("A", "103", "qatt",
+                                              "last-trade"))
+    check("2. and it needs no PX_LAST", resolve("A", rows, ["GC"], None),
+          Close("A", "103", "qatt", "last-trade"))
+    check("3. no prints at all: equity_master's PX_LAST",
+          resolve("A", [], ["CA"], "99"),
+          Close("A", "99", "equity_master", "no-trades"))
+    check("3. whether or not the market has close codes",
+          resolve("A", [], [], "99"),
+          Close("A", "99", "equity_master", "no-trades"))
+    check("4. nothing at all", resolve("A", [], ["CA"], None),
           Close("A", "", "", "no-close"))
-    check("px_last already filtered to None by the caller behaves the same "
-          "whichever reason produced it",
-          resolve("A", rows, [], None), Close("A", "", "", "no-close"))
 
     print("\nthe union of a composite's venues")
     check("union of a composite's venues",

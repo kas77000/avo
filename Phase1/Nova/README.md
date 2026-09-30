@@ -262,16 +262,18 @@ The `limit_up_down.r` exclusion tokens:
 
 | Token | Why the name has no limit |
 |-------|---------------------------|
-| `close` | No close in the zip: no closing print, and equity_master's PX_LAST was blank or not positive. |
+| `close` | No close in the zip: no print at all that day, and equity_master's PX_LAST was blank or not positive. |
 | `ladder` | kdb has no tick ladder for it. |
 | `tick-tier` | Its tick ladder has no tier for its close. |
 | `band-tier` | `config/luld_bands.csv` has no tier for its close. |
 | `min-price` | The venue's MinPrice is at or above the computed up limit. |
 | `other` | Anything else, such as a close that is not positive; the reason is on the line. |
 
-The close fallbacks themselves (a close taken from equity_master rather than
-a closing print) are decided on AB and logged there, one `!!  close` line
-each; the zip's `closes.csv` carries the source and reason for every sym.
+The close itself is decided on AB: the closing print; else, for a name
+that traded, its last traded price (reason `last-trade`); else
+equity_master's PX_LAST (`no-trades`). AB logs each PX_LAST close and each
+missing one as a `!!  close` line; the zip's `closes.csv` carries the source
+and reason for every sym. The Nova jobs read only its `close` column.
 
 ## Known unverified items
 
@@ -285,8 +287,8 @@ Check them on the first real days.
 - **Close codes present in qatt.** The close is the last print carrying one
   of the market's codes in `close_conditions.csv` (`e`/`ES` for Japan, `GC`
   for Korea, `CA` for most others). If qatt does not carry those codes, every
-  close falls back to equity_master's PX_LAST, and AB's log fills with
-  `!!  close ... no-closing-trade`.
+  traded name closes at its last trade instead, and AB's summary table shows
+  the market with mostly `last-trade`.
 - **`volatility` and `CUR_MKT_CAP` units.** `trading_data.r` assumes
   equity_master's `volatility` is a fraction (0.24, written as
   `Volatility10D` 24) and `CUR_MKT_CAP` is in millions (multiplied by

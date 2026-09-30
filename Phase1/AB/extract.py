@@ -34,11 +34,13 @@ the log) only when qatt lacks one of those columns.  The manifest's
 `prints` counts those lines.
 
 THE CLOSE is closes.py's rule: the last line carrying one of its market's
-close codes (config/close_conditions.csv), else equity_master's PX_LAST with
-a reason, else no close at all.  It is worked out while the ticks stream,
+close codes (config/close_conditions.csv); else, if it traded, its last
+traded price (reason last-trade); else equity_master's PX_LAST (no-trades);
+else no close at all.  It is worked out while the ticks stream,
 one chunk of syms at a time, and only the answer is kept - a day of prints
-is never held at once.  Every fallback is one `!!` line in the log, and the
-run ends with a table per Bloomberg exchange code.
+is never held at once.  Every PX_LAST close and every missing close is one
+`!!` line in the log; last-trade closes are counted per market.  The run
+ends with a table per Bloomberg exchange code.
 
 MARKET BY MARKET, RESUMABLE.  Every file goes to the day's staging folder,
 EXPORT_DIR/phase1-YYYYMMDD/, as soon as it is ready: master.csv,
@@ -110,8 +112,9 @@ QUOTE_COLUMNS = ["sym", "time", "bid", "ask", "cond"]
 EQUITY_COLUMNS = ["BloombergCode", "sym"] + list(refdata.EQUITY_FIELDS)
 LADDER_COLUMNS = ["BloombergCode", "sym", "price", "ticksize"]
 
-#  The fallback reasons closes.resolve gives, in the summary's order.
-REASONS = ("no-trades", "no-closing-trade", "no-close-codes")
+#  The reasons closes.resolve gives short of a closing print, in the
+#  summary's order: the last trade (source qatt), PX_LAST (equity_master).
+REASONS = ("last-trade", "no-trades")
 
 #  What "too big" looks like from here - see historical_ticks.run.
 TOO_BIG = ("wsfull", "limit", "abort")
@@ -556,9 +559,9 @@ def assemble(stage, out, mkts, head) -> tuple:
 
             def count_close(row, r):
                 row["syms"] += 1
-                if r["source"] == "qatt":
-                    row["qatt"] += 1
-                elif r["source"] == "equity_master":
+                if r["source"] == "qatt" and not r["reason"]:
+                    row["qatt"] += 1            # a closing print
+                elif r["reason"] in REASONS:
                     row[r["reason"]] += 1
                 else:
                     row["no-close"] += 1
@@ -577,8 +580,11 @@ def assemble(stage, out, mkts, head) -> tuple:
                 "prints": prints,
                 "syms with prints": total("ticks"),
                 "quote only": total("quote-only"),
+                #  Four disjoint counts that add up to "syms asked":
+                #  a closing print, the last trade, PX_LAST, nothing.
                 "closes from qatt": total("qatt"),
-                "closes from equity_master": sum(total(r) for r in REASONS),
+                "closes from last trade": total("last-trade"),
+                "closes from equity_master": total("no-trades"),
                 "no close": total("no-close"),
                 "exported at": f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}"})
             z.writestr(MANIFEST, _csv([["key", "value"]] + [
@@ -920,6 +926,9 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                                        f"{type(e).__name__}: {e}") from e
             log.kv("no print", logs.thousands(len(quiet)),
                    f"{logs.thousands(len(quotes))} with a quote")
+            if not any(codes[s] for s in msyms):
+                log.warn(f"{mkt} has no close codes in close_conditions.csv: "
+                         f"a name that traded closes at its last trade")
             quote_rows = []
             for s in quiet:
                 settle(s, [])
@@ -961,7 +970,10 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
             raise
         log.kv(f"{mkt} done", f"{logs.thousands(len(msyms))} syms",
                f"{stats['prints']:,} prints, "
-               f"qatt {sum(c.source == 'qatt' for c in got):,}, "
+               f"closing print "
+               f"{sum(c.source == 'qatt' and not c.reason for c in got):,}, "
+               f"last trade "
+               f"{sum(c.reason == 'last-trade' for c in got):,}, "
                f"equity_master "
                f"{sum(c.source == 'equity_master' for c in got):,}, "
                f"no close {sum(c.reason == 'no-close' for c in got):,}, "
@@ -1004,7 +1016,9 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
            f"{logs.thousands(manifest['syms with prints'])} of "
            f"{logs.thousands(len(syms))}")
     log.kv("prints", logs.thousands(manifest["prints"]))
-    log.kv("closes", f"qatt {manifest['closes from qatt']:,}, equity_master "
+    log.kv("closes", f"closing print {manifest['closes from qatt']:,}, "
+                     f"last trade {manifest['closes from last trade']:,}, "
+                     f"equity_master "
                      f"{manifest['closes from equity_master']:,}, "
                      f"none {manifest['no close']:,}")
     log.kv("quote only", logs.thousands(manifest["quote only"]))
@@ -1274,10 +1288,11 @@ def self_test() -> int:
     class FakeQatt:
         def __init__(self, fail=False, fail_on=(), parts=None,
                      max_syms=None, tables=("qatt",), empty=False,
-                     zd=D(2026, 9, 28)):
+                     zd=D(2026, 9, 28), silent=()):
             self.asked, self.fail, self.fail_on = [], fail, set(fail_on)
             self.zd = zd                # the RDB's .z.D; None cannot say
             self.empty = empty          # no print at all, as a wrong day
+            self.silent = set(silent)   # these syms have no print
             self.tables = list(tables)
             self.syms, self.sizes, self.max_syms = [], [], max_syms
             self.parts = parts or [D(2026, 9, 24), D(2026, 9, 25)]
@@ -1304,7 +1319,8 @@ def self_test() -> int:
                 return [{"sym": s, T: dt.time.fromisoformat(t), "price": p,
                          "size": n, "cond": c, "ex": "X"}
                         for s in args[-1] for t, p, n, c in
-                        ([] if self.empty else TICK_ROWS.get(s, []))]
+                        ([] if self.empty or s in self.silent
+                         else TICK_ROWS.get(s, []))]
             raise AssertionError(f"qatt was asked {q}")
 
     class FakeQuote:
@@ -1403,9 +1419,9 @@ def self_test() -> int:
                "8888.HK,3.4,equity_master,no-trades",
                "8889.HK,,,no-close",
                "7203.JP,2876,qatt,",
-               "AIA.NZ,6.13,equity_master,no-closing-trade",
+               "AIA.NZ,6.14,qatt,last-trade",
                "QQQ.XX,,,no-close",
-               "ZZZ.XX,1.4,equity_master,no-close-codes"])
+               "ZZZ.XX,1.5,qatt,last-trade"])
         check("a no-trades sym with a quote is quote-only, cond its first "
               "close code; one with no close codes is skipped",
               z.get(QUOTE_ONLY),
@@ -1434,15 +1450,16 @@ def self_test() -> int:
               list(manifest),
               ["date", "source", "equity_master date", "time column",
                "kdb timezone", "syms asked", "prints", "syms with prints",
-               "quote only", "closes from qatt", "closes from equity_master",
-               "no close", "exported at"])
+               "quote only", "closes from qatt", "closes from last trade",
+               "closes from equity_master", "no close", "exported at"])
         check("manifest values",
               [manifest.get(k) for k in
                ("date", "source", "equity_master date", "time column",
                 "syms asked", "prints", "syms with prints", "quote only",
-                "closes from qatt", "closes from equity_master", "no close")],
+                "closes from qatt", "closes from last trade",
+                "closes from equity_master", "no close")],
               ["2026-09-25", "hdb", "2026-09-24", T, "6", "7", "3", "1",
-               "1", "3", "2"])
+               "1", "2", "1", "2"])
         check("the universe: the kept rows, and each drop with its reason",
               [ln for ln in log.lines if ln.startswith("..  universe")
                or ln.startswith("..  dropped")],
@@ -1450,16 +1467,23 @@ def self_test() -> int:
                "of close_conditions.csv",
                "..  dropped                 1 rows   exchange code not ours: "
                "US 1"])
-        check("one !! line per fallback, with the market and the price",
+        check("one !! line per equity_master close and per no-close; none "
+              "for a last trade",
               [ln for ln in log.lines if ln.startswith("!!  close")],
               ["!!  close  8888.HK  HK  no-trades  -> equity_master 3.4",
                "!!  close  8889.HK  HK  no-trades  -> no close, PX_LAST "
                "null or <= 0",
-               "!!  close  AIA.NZ  NZ  no-closing-trade  -> equity_master "
-               "6.13",
-               "!!  close  QQQ.XX  XX  no-close-codes  -> no close, PX_LAST "
-               "null or <= 0",
-               "!!  close  ZZZ.XX  XX  no-close-codes  -> equity_master 1.4"])
+               "!!  close  QQQ.XX  XX  no-trades  -> no close, PX_LAST "
+               "null or <= 0"])
+        check("last-trade closes are a count on the market's done line",
+              [ln.split("   ")[-1] for ln in log.lines
+               if ln.startswith("..  NZ done")],
+              ["2 prints, closing print 0, last trade 1, equity_master 0, "
+               "no close 0, quote-only 0"])
+        check("a market with no close codes is one !! line",
+              [ln for ln in log.lines if "no close codes in" in ln],
+              ["!!  XX has no close codes in close_conditions.csv: a name "
+               "that traded closes at its last trade"])
         check("a quote with no close code to label it is a !! line",
               [ln for ln in log.lines if ln.startswith("!!  quote")],
               ["!!  quote  QQQ.XX  XX  no close codes for its market, "
@@ -1470,11 +1494,10 @@ def self_test() -> int:
         check("a summary row per exchange code: syms, with ticks, qatt, "
               "fallbacks by reason, no-close, quote-only",
               [ln.split()[1:] for ln in table],
-              [["market", "syms", "ticks", "qatt", "no-trades",
-                "no-closing-trade", "no-close-codes", "no-close",
-                "quote-only"],
-               ["HK", "2", "0", "0", "1", "0", "0", "1", "1"],
-               ["JT", "1", "1", "1", "0", "0", "0", "0", "0"]])
+              [["market", "syms", "ticks", "qatt", "last-trade",
+                "no-trades", "no-close", "quote-only"],
+               ["HK", "2", "0", "0", "0", "1", "1", "1"],
+               ["JT", "1", "1", "1", "0", "0", "0", "0"]])
 
     print("\nthe RDB, when there is no --date")
     with tempfile.TemporaryDirectory() as tmp:
@@ -1976,19 +1999,24 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         em = FakeEm(equity=EQUITY_ROWS + [equity_row("7203.JT", 1)])
         cc_text = ("BloombergCode,FidessaMarket,Type\n"
-                   "7203 JT,TYO-MAIN,Equity\n")
+                   "7203 JT,TYO-MAIN,Equity\nAIA NZ,NZE-MAIN,Equity\n")
+        silent = {"7203.JP"}            # no print: its close is PX_LAST
         z = members(run(tmp, D(2026, 9, 25), em=em, cc_text=cc_text,
-                        conds={"JT": []}))
+                        conds={"JT": [], "NZ": ["CA"]},
+                        qatt=FakeQatt(silent=silent)))
         check("7203 JT picks 7203.JT for equity.csv",
-              [r.split(",")[:3] for r in z[EQUITY][1:]],
+              [r.split(",")[:3] for r in z[EQUITY][1:2]],
               [["7203 JT", "7203.JT", "1"]])
         check("but 7203.JP's fallback is its own row's PX_LAST",
-              z[CLOSES][1:], ["7203.JP,2871,equity_master,no-close-codes"])
+              [r for r in z[CLOSES] if r.startswith("7203.JP,")],
+              ["7203.JP,2871,equity_master,no-trades"])
         (Path(tmp) / "out" / "phase1-20260925" / "ticks-JT.csv").unlink()
         z = members(run(tmp, D(2026, 9, 25), em=FakeEm(equity=[]),
-                        cc_text=cc_text, conds={"JT": []}))
+                        cc_text=cc_text, conds={"JT": [], "NZ": ["CA"]},
+                        qatt=FakeQatt(silent=silent)))
         check("and a resumed run reads it back from px.csv",
-              z[CLOSES][1:], ["7203.JP,2871,equity_master,no-close-codes"])
+              [r for r in z[CLOSES] if r.startswith("7203.JP,")],
+              ["7203.JP,2871,equity_master,no-trades"])
 
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1

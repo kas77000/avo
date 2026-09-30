@@ -119,9 +119,11 @@ EXPORT_DIR\phase1-YYYYMMDD.zip
 ```
 
 The log ends with a table per market: stocks, stocks with ticks, closes
-from qatt, fallbacks to equity_master, and quote-only names. A market with a
-large `no-closing-trade` count means its close condition codes are wrong, so
-look at it before using the zip.
+from a closing print (`qatt`), closes from the last trade (`last-trade`: it
+traded, but no print carried a close code), closes from equity_master
+(`no-trades`: it did not trade), and quote-only names. A market with mostly
+`last-trade` means its close condition codes are wrong, so look at it
+before using the zip.
 
 **If it is interrupted,** run the same command again: finished markets are
 skipped.
@@ -212,9 +214,10 @@ run `historical.r` alone.
 2. **The time column.** `TIME_FIELD` in `Phase1/AB/qattsource.py` is
    `tradeTime`. Phase0's `qatt_time_probe.py` confirms it on a real day.
 3. **Close codes.** In the AB log's summary table, most of each market's
-   stocks with ticks should have their close `from qatt`. A market with
-   mostly `no-closing-trade` needs its codes fixed in
-   `Phase1/AB/config/close_conditions.csv`.
+   stocks with ticks should be under `qatt` (a closing print). A market
+   with mostly `last-trade` needs its codes fixed in
+   `Phase1/AB/config/close_conditions.csv`: its stocks are closing at their
+   last trade instead of at the closing print.
 4. **Compare the outputs.** Run once with `"Test"` only, and compare
    `limitUpDown.csv` and `TradingData.csv` with the production files of the
    same day.
