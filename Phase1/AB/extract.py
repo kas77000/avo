@@ -1027,7 +1027,8 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         conns["qatt"] = conns["reconnect"]()
         return conns["qatt"]
 
-    size = {"n": int(cfg["SYM_CHUNK"])}     # the halved read size, for every market
+    n = int(cfg["SYM_CHUNK"])
+    size = {"n": n}                 # the halved read size, for every market
     todo = [m for m in sorted(by_market) if not only or m in only]
     for c in only or []:
         if c not in by_market:
