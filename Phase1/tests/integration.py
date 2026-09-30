@@ -182,6 +182,16 @@ NOMAS = N("NOMAS NZ", "NZE-MAIN", "Equity", "", "NZ", "NZ", "", "2.5",
           long="FIXTURE NZ NO MASTER", tick="0.01")
 NOMAS_SYM = "NOMAS.NZ"
 
+#  A Tokyo name that trades all day but never on a close code: its close is
+#  its LAST TRADED PRICE, 8215 - not the first (8230), not the day's high
+#  (8290), and not equity_master's PX_LAST (8150). In TYO's 7000 tier
+#  (+-1500) that gives the limits 9715 / 6715; PX_LAST would give
+#  9650 / 6650.
+LTP = N("9984 JT", "TYO-MAIN", "Equity", "9984.JP", "JT", "JP", "XTKS",
+        "8150", ladder=JP_LADDER, long="FIXTURE NO CLOSING PRINT",
+        code="9984 JP", kind="ltp")
+LTP_LAST, LTP_UP, LTP_DOWN = "8215", "9715", "6715"
+
 
 def ms_time(sec, ms):
     return dt.time(sec // 3600, sec // 60 % 60, sec % 60, ms * 1000)
@@ -238,6 +248,8 @@ class Day:
             sym = n.sym or NOMAS_SYM
             if n.kind == "trade":
                 self.raw[sym] = raw_prints(n)
+            elif n.kind == "ltp":
+                self.raw[sym] = ltp_prints(n)
             elif n.kind == "quote":
                 self.quotes[sym] = (dt.time(16, 8, 2), Decimal("3.41"),
                                     Decimal("3.43"))
@@ -251,6 +263,20 @@ class Day:
                             n.market, SESSIONS[n.ext][4], "ACTV",
                             n.ticker, "", "", ""])
         return path
+
+
+def ltp_prints(name):
+    """Prints with no close code at all: first 8230, high 8290, a second
+    with two prints at two prices mid-morning, and the last print, 8215,
+    two minutes before the session ends."""
+    start, end, _close, exs, _ = SESSIONS[name.ext]
+    sym, ex = name.sym, exs[0]
+    plan = [(start + 60, "8230", ""), (start + 3600, "8290", "X"),
+            (start + 7200, "8245", ""), (start + 7200, "8250", ""),
+            (end - 120, "8215", "")]
+    return [{"sym": sym, T: ms_time(sec, 100 + i), "price": Decimal(p),
+             "size": 100 * (i + 1), "cond": cond, "ex": ex}
+            for i, (sec, p, cond) in enumerate(plan)]
 
 
 def condense(rows, rep=lambda s: dt.timedelta(seconds=s)):
@@ -545,7 +571,7 @@ def first(pattern, text, cast=str):
 def scenario1(tmp):
     tmp.mkdir(parents=True, exist_ok=True)
     section("1. condensed vs raw")
-    day = Day(small_names(), extra=[NOMAS])
+    day = Day(small_names(), extra=[NOMAS, LTP])
     cc = day.write_crosscode(tmp / "CrossCode.csv")
     kA, kB = FakeKdb(day), FakeKdb(day)
     zA, _ = ab_build(tmp / "abA", cc, kA)
@@ -592,7 +618,7 @@ def scenario1(tmp):
         if times != sorted(times):
             bad_order.append(f)
         n = by_code.get(f.split("/")[0])
-        if n and n.kind == "trade":
+        if n and n.kind in ("trade", "ltp"):
             raw = day.raw[n.sym or NOMAS_SYM]
             if (len(lB) != len(raw) or sum(int(l[2]) for l in lB)
                     != sum(r["size"] for r in raw)):
@@ -636,6 +662,18 @@ def scenario1(tmp):
           all(closes.get(s, {}).get("close") == p for s, p in want.items()),
           str({s: (closes.get(s, {}).get("close"), p)
                for s, p in want.items()}))
+    got = closes.get(LTP.sym, {})
+    check(f"a name that traded with no closing print closes at its last "
+          f"traded price ({LTP_LAST}): source qatt, reason last-trade",
+          (got.get("close"), got.get("source"), got.get("reason"))
+          == (LTP_LAST, "qatt", "last-trade"), str(got))
+    luld = {r["BloombergCode"]: r for r in csv.DictReader(io.StringIO(
+        lA_.read_text("utf-8")))} if lA_.exists() else {}
+    row = luld.get(LTP.bbg, {})
+    check(f"and its limitUpDown row is computed from that price: "
+          f"{LTP_UP} / {LTP_DOWN}, not PX_LAST's 9650 / 6650",
+          (row.get("LimitUpPrice"), row.get("LimitDownPrice"))
+          == (LTP_UP, LTP_DOWN), str(row))
 
     section("1b. probes")
     check("an NZE-MAIN name with no equity_master row is asked of kdb, as "

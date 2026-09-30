@@ -16,8 +16,9 @@ The names, and what each one is for:
     005930 KP           Korea, closed by a GC print.
     299990 KP           a Korean ETF whose LONG_COMP_NAME carries 2X.
     123450 KQ           Korea, a close but no ladder.
-    AIA NZ              prints, none of them CA: the close falls back to
-                        equity_master (no-closing-trade).
+    AIA NZ              prints, none of them CA: the close is its last
+                        traded price, 6.14 (qatt, last-trade), not
+                        equity_master's PX_LAST 6.13.
     8888 HK             no prints, a quote: one quote-only line.
     8889 HK             nothing at all: NoTradingDay, and no close anywhere.
 
@@ -119,7 +120,7 @@ CLOSES = [
     ["005930.KS", "71800", "qatt", ""],
     ["299990.KS", "15310", "qatt", ""],
     ["123450.KS", "8420", "qatt", ""],
-    ["AIA.NZ", "6.13", "equity_master", "no-closing-trade"],
+    ["AIA.NZ", "6.14", "qatt", "last-trade"],
     ["8888.HK", "3.4", "equity_master", "no-trades"],
     ["8889.HK", "", "", "no-close"],
 ]
@@ -179,7 +180,12 @@ MANIFEST = [
     ["prints", str(_count(TICKS))],
     ["syms with prints", str(len({r[0] for r in TICKS[1:]}))],
     ["quote only", str(_count(QUOTE_ONLY))],
-    ["closes from qatt", str(_count(CLOSES, lambda r: r[2] == "qatt"))],
+    #  Four disjoint counts, as AB writes them: a closing print, the last
+    #  trade, PX_LAST, nothing.
+    ["closes from qatt",
+     str(_count(CLOSES, lambda r: r[2] == "qatt" and not r[3]))],
+    ["closes from last trade",
+     str(_count(CLOSES, lambda r: r[3] == "last-trade"))],
     ["closes from equity_master",
      str(_count(CLOSES, lambda r: r[2] == "equity_master"))],
     ["no close", str(_count(CLOSES, lambda r: r[1] == ""))],
