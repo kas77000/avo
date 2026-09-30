@@ -32,6 +32,10 @@ DEFAULTS = {
     #  The zone kdb stamps its prints in.  Written into the bundle by the
     #  export, so downstream converts from what the export actually saw.
     "KDB_TIMEZONE": "China Standard Time",
+    #  The mail at the end of every extract.py run.  Blank: no mail.
+    "SMTP_HOST": "",
+    "EMAIL_FROM": "",
+    "EMAIL_TO": [],          # a list of addresses
     "SYM_CHUNK": 200,        # syms per qatt round trip
     "MASTER_CHUNK": 5000,    # codes per equity_master round trip
 }

@@ -33,6 +33,7 @@ extract.py -> phase1-YYYYMMDD.zip  ---------------------->  run_phase1.cmd <zip>
    | `CROSSCODE_PATH` | `NewCrosscode.csv` on this machine |
    | `KDB_TIMEZONE` | optional, default `China Standard Time`; the zone kdb stamps prints in, copied to the manifest |
    | `SYM_CHUNK`, `MASTER_CHUNK` | optional, default 200 and 5000; syms per qatt read, codes per equity_master read |
+   | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | optional: the SMTP host, the sender, and a **list** of recipients for the mail at the end of every run. Left out, no mail |
 
 3. Check that the install works, with no kdb:
 
@@ -51,6 +52,7 @@ python extract.py --date 2026-09-25          that day, from the HDB
 python extract.py --date 2026-09-25 --rdb    that day, read from the RDB
 python extract.py --log C:\path\to\logs\extract.log
 python extract.py --fresh                    the day again, from scratch
+python extract.py --no-mail                  no mail at the end of this run
 python extract.py --market "NZ|HK"           only those markets, read again
 python extract.py --for "luld|td"            only what limit_up_down.r and
                                              trading_data.r read: no ticks
@@ -183,6 +185,36 @@ To redo a day the next morning, use `--date` with that day.
 
 The exit status is 0 when the zip was written, 1 when the run stopped, and 2
 for a bad argument or setting.
+
+## The mail at the end
+
+Every run that got as far as opening its log ends with a mail and an HTML
+report, whatever happened: a zip, no zip yet (`--market`), or an `XX`.
+
+- **Subject:**
+  `[Phase1] extract YYYY-MM-DD: OK - phase1-YYYYMMDD.zip`,
+  `... : PARTIAL - 2 markets still to do`, or
+  `... : FAILED - <the first XX line>`. A `--for` run adds its uses after
+  the date: `[Phase1] extract 2026-09-28 (luld|td): OK - ...`. The date is
+  the trade date, or today when the run stopped before knowing it.
+- **Body:** the trade date, source, `--for`, `--market`, the zip and its
+  size, how long the run took, the closes by kind (close-code, last-trade,
+  none-before-cutoff, no-trades, no-close), markets done of all, and the
+  number of `!!` and `XX` lines.
+- **Attached:** `phase1-YYYYMMDD-report.html`, written next to the zip in
+  `EXPORT_DIR` (in the staging folder when there is no zip). One
+  self-contained page, plain tables, readable in Outlook: the run's
+  parameters, host, times, equity_master date, time field, kdb timezone
+  and `LastTradeBefore` cutoffs; the universe kept and dropped; a row per
+  market (syms, with ticks, prints, closes by kind, quote-only, seconds;
+  markets already staged are marked so); every fallback close
+  (equity_master or none) with its market, reason and price; every `!!`
+  and `XX` line; the zip's name, size, members and manifest.
+
+With `SMTP_HOST` or `EMAIL_TO` not set, no mail is sent and the log says
+`..  no mail: SMTP_HOST / EMAIL_TO not set`; the report is still written.
+`--no-mail` skips it on a run by hand. A mail that cannot be sent is
+`!!  mail not sent: <error>`: the run's exit code does not change.
 
 ## The universe
 

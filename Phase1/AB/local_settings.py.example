@@ -27,6 +27,12 @@ CROSSCODE_PATH = r"C:\path\to\NewCrosscode.csv"
 # downstream converts from what the export saw.
 # KDB_TIMEZONE = "China Standard Time"
 
+# The mail at the end of every run, with the HTML report attached.  Left
+# out, no mail is sent.
+# SMTP_HOST = "smtp-host"
+# EMAIL_FROM = "phase1@example.com"
+# EMAIL_TO = ["desk@example.com"]
+
 # Performance tuning.
 # SYM_CHUNK = 200
 # MASTER_CHUNK = 5000

@@ -44,6 +44,7 @@ AB is the machine that can reach kdb.
    | `CROSSCODE_PATH` | the CrossCode CSV on AB |
    | `KDB_TIMEZONE` | optional, default `China Standard Time`: the clock kdb stamps prints in |
    | `SYM_CHUNK`, `MASTER_CHUNK` | optional, default 200 and 5000: how many stocks per kdb read |
+   | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | optional: the mail at the end of every run. `EMAIL_TO` is a list, e.g. `["desk@example.com"]`. Left out, no mail |
 
    The `quote` table is **not** on the qatt RDB. Set `QUOTE_RDB_SERVER` (and
    `QUOTE_SERVER`) to the process that has it, or the run stops at step 2
@@ -134,6 +135,13 @@ before using the zip.
 **If it is interrupted,** run the same command again: finished markets are
 skipped.
 
+**The mail.** Every run ends with a mail (when `SMTP_HOST` and `EMAIL_TO`
+are set): `[Phase1] extract YYYY-MM-DD: OK - <zip>`, `PARTIAL - N markets
+still to do` or `FAILED - <the first XX line>`, with
+`phase1-YYYYMMDD-report.html` attached (also written next to the zip): the
+run, the universe, each market, every fallback close, every `!!` and `XX`
+line, and the zip. A mail that cannot be sent never fails the run.
+
 Other ways to run it:
 
 | Command | What it does |
@@ -142,6 +150,7 @@ Other ways to run it:
 | `python extract.py --date 2026-09-25 --rdb` | that day, from the RDB (e.g. just after midnight, while the RDB still holds it). Check the `RDB date` line in the log: if it differs from the date asked, do not use that zip |
 | `python extract.py --market=NZE-MAIN` | redo only those markets (FidessaMarket names or Bloomberg codes, e.g. `"NZ\|HKG-MAIN"`, in quotes). The zip is rebuilt once every market is done |
 | `python extract.py --fresh` | forget the day's working folder and start over |
+| `python extract.py --no-mail` | no mail at the end of this run |
 | `python extract.py --for "luld\|td"` | a zip for `limit_up_down.r` and `trading_data.r` only: no ticks read, so much faster. `luld`, `td`, `ticks` in any mix; all three without `--for` |
 
 The zip is named for what it is for: `phase1-YYYYMMDD.zip` for all three

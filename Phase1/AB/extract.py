@@ -72,6 +72,7 @@ day.  The zip is written as
     python extract.py --fresh             the day again, from scratch
     python extract.py --market "NZ|HK"    only those markets, read again
     python extract.py --for "luld|td"     a zip for those jobs: no ticks read
+    python extract.py --no-mail           no mail at the end of this run
     python extract.py --log extract.log   tee the log to a file
     python extract.py --self-test         checks, no kdb
 """
@@ -96,9 +97,11 @@ from pathlib import Path
 import closes
 import crosscode
 import logs
+import mailer
 import marketcfg
 import qattsource
 import refdata
+import runreport
 import settings
 import universe
 
@@ -688,7 +691,8 @@ def read_quotes(conns, qday, syms, log) -> dict:
 
 
 def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
-          fresh=False, rdb=False, only=None, uses=None, cutoffs=None):
+          fresh=False, rdb=False, only=None, uses=None, cutoffs=None,
+          report=None):
     """Stage the day market by market, then write
     EXPORT_DIR/phase1-YYYYMMDD.zip, and return its path.
 
@@ -719,6 +723,9 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     so a luld/td run reuses a ticks run's closes, and a ticks run after a
     luld/td run reads, the full way, the markets that lack ticks.
 
+    `report`, a runreport.RunReport, is filled as the run goes, for the
+    mail main() sends at the end.
+
     `cutoffs` is closes.load_cutoffs': BBGCode -> LastTradeBefore, from
     config/ with the conditions, none when the conditions are given.  The
     market's last trade is then its last print at or before that time,
@@ -730,6 +737,8 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                            f"{'|'.join(USES)}")
     uses = tuple(u for u in USES if u in uses)
     ticks = "ticks" in uses
+    rp = report if report is not None else runreport.RunReport(uses, today)
+    rp.uses = uses
     if markets is None:
         markets = marketcfg.load(HERE / "config" / "markets.csv")
     if conditions is None:
@@ -753,7 +762,15 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         if e.rows:
             log.warn(f"{logs.thousands(len(e.rows))} rows dropped: {e.reason}")
     everything = len(rows)
+    rp.universe = {"rows": everything + sum(len(e.rows) for e in dropped),
+                   "dropped": [(e.reason, len(e.rows), "")
+                               for e in dropped if e.rows]}
     rows, dropped = universe_rows(rows, conditions)
+    rp.universe["kept"] = len(rows)
+    rp.universe["dropped"] += [
+        (reason, sum(c.values()), ", ".join(
+            f"{k or '(blank)'} {v:,}" for k, v in c.most_common(10)))
+        for reason, c in dropped.items() if c]
     log.kv("universe", logs.thousands(len(rows)) + " rows",
            f"of {logs.thousands(everything)}, the exchange codes of "
            f"close_conditions.csv")
@@ -821,6 +838,9 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                    for code, hkt in cutoffs.items()}
     except ValueError as e:
         raise ExtractError(f"LastTradeBefore: {e}") from e
+    rp.cutoffs = [(code, qattsource.hms(cut_seconds(day, cutoffs[code],
+                                                    HKT)),
+                   qattsource.hms(cut_kdb[code])) for code in sorted(cut_kdb)]
     for code in sorted(cut_kdb):
         if cut_kdb[code] != cut_seconds(day, cutoffs[code], HKT):
             log.kv("last trade before", f"{code} = "
@@ -844,6 +864,10 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     master_date = qattsource.resolve_master_date(
         em, day, days_back=(today - day).days)
     log.kv("equity_master date", master_date)
+    rp.trade_date = day
+    rp.run = {"source": source, "equity_master date": str(master_date),
+              "time field": qattsource.TIME_FIELD,
+              "kdb timezone": cfg["KDB_TIMEZONE"]}
 
     #  WHAT THE FOLDER WAS BUILT FROM.  It is keyed by the trade day only, so
     #  an RDB run's markets must not pass for an HDB run's of the same day,
@@ -871,6 +895,7 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     if not (stage / STAGE).exists():
         write_csv(stage / STAGE, ["key", "value"], built.items())
     log.kv("staging", str(stage))
+    rp.stage = stage
     chunk = int(cfg["MASTER_CHUNK"])
     if (stage / MASTER).exists():
         master = {r["BloombergCode"]: {f: r[f] for f in
@@ -907,6 +932,7 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
         by_market.setdefault(safe_code(code), []).append(s)
     log.kv("syms to export", logs.thousands(len(syms)),
            f"in {len(by_market)} markets")
+    rp.markets_total = len(by_market)
     #  A sym's cutoff is its market's - the code it is filed under.
     cut_of = {s: cut_kdb[m] for m, ms in by_market.items() if m in cut_kdb
               for s in ms}
@@ -1026,14 +1052,17 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                 if f.exists():
                     os.replace(f, o)
         elif done_for(files, uses):
-            if {r["sym"] for r in read_csv(files[1])} == set(msyms):
+            staged = read_csv(files[1])
+            if {r["sym"] for r in staged} == set(msyms):
                 log.info(f"{mkt} done already, skipped")
+                rp.market(mkt, staged, note="already staged")
                 continue
             log.warn(f"{mkt} staged for other syms than this run's; "
                      f"redoing it")
         settled = {}
         parts = [_part(f) for f in files]
         quote_rows, stats = [], {"prints": 0}
+        t0 = time.monotonic()
         try:
             try:
                 if ticks:
@@ -1137,10 +1166,17 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
                f"{sum(c.source == 'equity_master' for c in got):,}, "
                f"no close {sum(c.reason == 'no-close' for c in got):,}, "
                f"quote-only {len(quote_rows):,}")
+        rp.market(mkt, [{"sym": c.sym, "close": c.close, "source": c.source,
+                         "reason": c.reason, "why": settled[c.sym][1]}
+                        for c in got],
+                  prints=stats["prints"] if ticks else "",
+                  quote_only=len(quote_rows) if ticks else "",
+                  seconds=round(time.monotonic() - t0, 1))
 
     #  NO ZIP UNTIL EVERY MARKET IS STAGED: a --market run may leave some.
     missing = [m for m in sorted(by_market)
                if not done_for(market_files(stage, m), uses)]
+    rp.missing = missing
     if missing:
         log.info(f"{len(missing)} markets still to do "
                  f"({', '.join(missing)}); no zip yet - run without "
@@ -1186,6 +1222,9 @@ def build(cfg, date, conns, log, today=None, markets=None, conditions=None,
     if ticks:
         log.kv("quote only", logs.thousands(manifest["quote only"]))
     log.ok(f"written  {out.stat().st_size / 1e6:,.1f} MB  {out}")
+    rp.zip, rp.zip_size = str(out), out.stat().st_size
+    rp.members = zip_members(uses)
+    rp.manifest = {k: str(v) for k, v in manifest.items()}
     return out
 
 
@@ -1214,6 +1253,8 @@ def main(argv=None, today=None) -> int:
     p.add_argument("--log", default="", help="tee the log to this file")
     p.add_argument("--fresh", action="store_true",
                    help="delete the day's staging folder and start over")
+    p.add_argument("--no-mail", action="store_true",
+                   help="send no mail at the end of this run")
     p.add_argument("--self-test", action="store_true",
                    help="checks, with no kdb")
     a = p.parse_args(argv)
@@ -1250,41 +1291,85 @@ def main(argv=None, today=None) -> int:
                       else names["qatt"])
     log = logs.Log(path=a.log or None)
     today = today or dt.date.today()
-    name = weekend(date, today)
-    if name:
-        log.fail(f"today, {today}, is a {name}: the RDB holds no trading "
-                 f"day. Use --date YYYY-MM-DD for the day you want")
-        log.close()
-        return 1
-    log.kv("qatt", source, names["qatt"])
-    log.kv("quote", source, names["quote"])
+    rp = runreport.RunReport(uses, today)
+    rp.params = {"--date": a.date or "(none: today)", "--rdb": a.rdb,
+                 "--for": "|".join(uses), "--market": a.market or "all",
+                 "--fresh": a.fresh}
+    log.on_emit = rp.capture
+    out = None
+    rc = 1
     try:
-        conns = {"em": qattsource.connect(em_host, em_port),
-                 "qatt": qattsource.connect(q_host, q_port),
-                 "reconnect": lambda: connect_again(q_host, q_port, log),
-                 "names": names}
-        if own_quote:
-            conns["quote"] = qattsource.connect(u_host, u_port)
-            conns["quote_reconnect"] = lambda: connect_again(
-                u_host, u_port, log)
-        build(cfg, date, conns, log, today=today, fresh=a.fresh,
-              rdb=a.rdb, only=parse_markets(a.market) or None,
-              uses=uses)
-    except ExtractError as e:
-        log.fail(str(e))
-        log.fail("no zip written")
-        return 1
-    except SystemExit as e:             # qattsource's explained failures
-        log.fail(str(e))
-        log.fail("no zip written")
-        return 1
-    except Exception as e:                                  # noqa: BLE001
-        log.fail(f"{type(e).__name__}: {e}")
-        log.fail("no zip written")
-        return 1
+        name = weekend(date, today)
+        if name:
+            log.fail(f"today, {today}, is a {name}: the RDB holds no trading "
+                     f"day. Use --date YYYY-MM-DD for the day you want")
+            return 1
+        log.kv("qatt", source, names["qatt"])
+        log.kv("quote", source, names["quote"])
+        try:
+            conns = {"em": qattsource.connect(em_host, em_port),
+                     "qatt": qattsource.connect(q_host, q_port),
+                     "reconnect": lambda: connect_again(q_host, q_port, log),
+                     "names": names}
+            if own_quote:
+                conns["quote"] = qattsource.connect(u_host, u_port)
+                conns["quote_reconnect"] = lambda: connect_again(
+                    u_host, u_port, log)
+            out = build(cfg, date, conns, log, today=today, fresh=a.fresh,
+                        rdb=a.rdb, only=parse_markets(a.market) or None,
+                        uses=uses, report=rp)
+        except ExtractError as e:
+            log.fail(str(e))
+            log.fail("no zip written")
+            return 1
+        except SystemExit as e:             # qattsource's explained failures
+            log.fail(str(e))
+            log.fail("no zip written")
+            return 1
+        except Exception as e:                              # noqa: BLE001
+            log.fail(f"{type(e).__name__}: {e}")
+            log.fail("no zip written")
+            return 1
+        rc = 0
+        return 0
     finally:
+        finish(rp, cfg, log, out, rc, no_mail=a.no_mail)
         log.close()
-    return 0
+
+
+def finish(rp, cfg, log, out, rc, no_mail=False) -> None:
+    """The end of every run once the log is open: write the HTML report and
+    send the mail - OK with a zip, PARTIAL without one, FAILED on an XX.
+    Nothing here changes the run's exit code: a report or a mail that
+    fails is a !! line."""
+    rp.ended = dt.datetime.now()
+    rp.status = ("FAILED" if rc or rp.first_fail() else
+                 "OK" if out else "PARTIAL")
+    page = None
+    try:
+        folder = (Path(out).parent if out
+                  else rp.stage if rp.stage and Path(rp.stage).is_dir()
+                  else Path(cfg["EXPORT_DIR"]))
+        page = rp.write_html(folder)
+        log.kv("report", str(page))
+    except Exception as e:                                  # noqa: BLE001
+        log.warn(f"report not written: {type(e).__name__}: {e}")
+    to = cfg.get("EMAIL_TO") or []
+    if isinstance(to, str):
+        to = [t.strip() for t in re.split(r"[,;]", to) if t.strip()]
+    host = str(cfg.get("SMTP_HOST") or "").strip()
+    if no_mail:
+        log.info("no mail: --no-mail")
+    elif not host or not to:
+        log.info("no mail: SMTP_HOST / EMAIL_TO not set")
+    else:
+        try:
+            mailer.send(rp.subject(), rp.body(), host,
+                        cfg.get("EMAIL_FROM") or "", to,
+                        [page] if page else [])
+            log.info(f"mail sent to {', '.join(to)}: {rp.subject()}")
+        except Exception as e:                              # noqa: BLE001
+            log.warn(f"mail not sent: {e}")
 
 
 def self_test() -> int:
@@ -1830,7 +1915,28 @@ def self_test() -> int:
                  ("quote-host", 3): FakeQuote()}
         saved = qattsource.connect, settings.load
 
-        def main_with(quote_rdb, argv=(), today=D(2026, 9, 28), hdb=None):
+        sent = []
+
+        class FakeSMTP:
+            """smtplib.SMTP as mailer uses it; `fail` makes sending raise."""
+            fail = False
+
+            def __init__(self, host):
+                self.host = host
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def send_message(self, msg):
+                if FakeSMTP.fail:
+                    raise OSError("connection refused")
+                sent.append(msg)
+
+        def main_with(quote_rdb, argv=(), today=D(2026, 9, 28), hdb=None,
+                      mail=None, tag=""):
             cfg = dict(settings.DEFAULTS, CROSSCODE_PATH=str(cc),
                        EXPORT_DIR=str(Path(tmp) / "out"),
                        EQUITY_MASTER_SERVER="em-host:1",
@@ -1838,10 +1944,13 @@ def self_test() -> int:
                        QUOTE_RDB_SERVER=quote_rdb,
                        QATT_SERVER="qatt-host:2", QUOTE_SERVER=quote_rdb)
             cfg.update(hdb or {})
+            cfg.update(mail or {})
             settings.load = lambda: cfg
             qattsource.connect = lambda h, p: fakes[(h, int(p))]
+            smtp = mailer.smtplib.SMTP
+            mailer.smtplib.SMTP = FakeSMTP
             logfile = Path(tmp) / (f"run{len(quote_rdb)}-{today}-"
-                                   f"{'_'.join(argv)}.log")
+                                   f"{'_'.join(argv)}{tag}.log")
             try:
                 with contextlib.redirect_stdout(io.StringIO()), \
                         contextlib.redirect_stderr(io.StringIO()):
@@ -1849,6 +1958,7 @@ def self_test() -> int:
                               today=today)
             finally:
                 qattsource.connect, settings.load = saved
+                mailer.smtplib.SMTP = smtp
             return rc, logfile.read_text("utf-8")
 
         rc, text = main_with("")
@@ -1882,6 +1992,61 @@ def self_test() -> int:
         rc, text = main_with("quote-host:3", ["--date", "2026-09-25"],
                              today=D(2026, 9, 26))
         check("--date on a Saturday goes through", rc, 0)
+
+        print("\nmain: the mail at the end")
+        MAIL = {"SMTP_HOST": "smtp-host", "EMAIL_FROM": "phase1@example.com",
+                "EMAIL_TO": ["desk@example.com"]}
+        out = Path(tmp) / "out"
+
+        def attached(m):
+            return [a.get_filename() for a in m.iter_attachments()]
+
+        sent.clear()
+        rc, text = main_with("", mail=MAIL, tag="-m1")
+        check("a run that stops with XX still mails: FAILED, with its first "
+              "XX line, the report attached",
+              (rc, [m["Subject"][:85] for m in sent],
+               [attached(m) for m in sent]),
+              (1, ["[Phase1] extract 2026-09-28: FAILED - the quote table is "
+                   "not on QATT_RDB_SERVER (qatt"],
+               [["phase1-20260928-report.html"]]))
+        sent.clear()
+        rc, text = main_with("quote-host:3", mail=MAIL, tag="-m2")
+        check("a good run mails OK, with the zip's name",
+              (rc, [m["Subject"] for m in sent]),
+              (0, ["[Phase1] extract 2026-09-28: OK - phase1-20260928.zip"]))
+        body = sent[0].get_body(("plain",)).get_content() if sent else ""
+        check("the body: date, source, closes by kind, markets, the log's "
+              "!! and XX", [ln.split()[0] for ln in body.splitlines()[2:11]],
+              ["trade", "source", "--for", "--market", "zip", "duration",
+               "closes", "markets", "log"])
+        page = out / "phase1-20260928-report.html"
+        check("the report is written next to the zip",
+              page.exists() and "<h2" in page.read_text("utf-8"), True)
+        sent.clear()
+        rc, text = main_with("quote-host:3", tag="-m3")
+        check("no SMTP_HOST / EMAIL_TO: no mail, said so",
+              (rc, sent, "..  no mail: SMTP_HOST / EMAIL_TO not set" in text),
+              (0, [], True))
+        rc, text = main_with("quote-host:3", ["--no-mail"], mail=MAIL)
+        check("--no-mail: no mail, said so",
+              (rc, sent, "..  no mail: --no-mail" in text), (0, [], True))
+        FakeSMTP.fail = True
+        rc, text = main_with("quote-host:3", mail=MAIL, tag="-m5")
+        FakeSMTP.fail = False
+        check("a mail that cannot be sent is a !! line; the exit code is "
+              "the run's", (rc, "!!  mail not sent: connection refused"
+                            in text), (0, True))
+        rc, text = main_with("quote-host:3", ["--market", "NZ", "--fresh"],
+                             mail=MAIL)
+        check("a --market run that leaves markets to do mails PARTIAL",
+              [m["Subject"] for m in sent][-1:],
+              ["[Phase1] extract 2026-09-28: PARTIAL - 2 markets still to "
+               "do"])
+        check("and its report is written in the staging folder",
+              (out / "phase1-20260928" / "phase1-20260928-report.html")
+              .exists(), True)
+        main_with("quote-host:3", tag="-m7")        # finish the day again
 
         print("\nmain: --date with --rdb")
         fakes[("hdb-host", 4)] = FakeQatt()

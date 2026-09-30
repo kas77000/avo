@@ -45,6 +45,9 @@ class Log:
         self.stamps = stamps
         self.clock = clock or (lambda: dt.datetime.now())
         self.counts = {DOT: 0, OK: 0, WARN: 0, FAIL: 0}
+        #  on_emit(level, text), when set, sees every line as it is
+        #  written - how a caller collects the !! and XX lines.
+        self.on_emit = None
         self.fh = None
         if path:
             p = Path(path)
@@ -70,6 +73,8 @@ class Log:
         if self.fh:
             self.fh.write(rendered + "\n")
             self.fh.flush()
+        if self.on_emit:
+            self.on_emit(level, text)
 
     # -- what callers actually use ----------------------------------------
 
