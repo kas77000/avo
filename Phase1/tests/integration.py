@@ -322,13 +322,18 @@ def condense(rows, rep=lambda s: dt.timedelta(seconds=s)):
 
 
 class FakeTable:
-    """A pykx table as extract sees it: one .pd()."""
+    """A pykx table as extract sees it: .py(), a dict of column lists (a
+    full copy); its .pd() fails, for extract must never use it - pandas
+    shares pykx's memory, and that crashed live."""
 
     def __init__(self, df):
         self.df = df
 
+    def py(self):
+        return {c: self.df[c].tolist() for c in self.df.columns}
+
     def pd(self):
-        return self.df.copy()
+        raise AssertionError(".pd() on a qatt answer")
 
 
 class FakeKdb:

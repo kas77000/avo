@@ -142,7 +142,7 @@ COLUMNS_Q = "cols qatt"
 
 def columns(conn) -> list:
     """Every column qatt has, as named on this server."""
-    return [text(c) for c in _iter(_py(conn(COLUMNS_Q)))]
+    return [text(c) for c in _iter(_atom(conn(COLUMNS_Q)))]
 
 
 def select_columns(have, time_field: str = None) -> list:
@@ -355,7 +355,7 @@ def diagnose(conn, date, syms) -> list:
 
     def ask(label, query, *args):
         try:
-            return _py(conn(query, *args))
+            return _atom(conn(query, *args))
         except Exception as e:                              # noqa: BLE001
             out.append((label, f"the query RAISED: {e}"))
             return None
@@ -403,7 +403,7 @@ def connect(host: str, port: int):
 # NORMALISING WHAT kdb HANDS BACK  - pure, and the part worth testing
 # =============================================================================
 
-def _py(value):
+def _atom(value):
     """pykx atoms carry a .py(); numpy scalars and plain python do not."""
     try:
         return value.py()
@@ -416,7 +416,7 @@ def text(value) -> str:
 
     kdb's null symbol is the empty one, so a null and a blank are the same
     thing here and both come back as ""."""
-    value = _py(value)
+    value = _atom(value)
     if value is None:
         return ""
     if isinstance(value, (bytes, bytearray)):
@@ -434,7 +434,7 @@ def to_decimal(value):
     caller has already filtered on price>0 in q, and a size or a price that
     arrives as 0 here means the filter did not run, which is worth seeing
     rather than silently dropping."""
-    value = _py(value)
+    value = _atom(value)
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -464,7 +464,7 @@ def to_time(value, int_unit: str = "ms"):
     qtype = getattr(value, "t", None)
     if qtype in (-18, -19) and not isinstance(value, bool):
         int_unit = "s" if qtype == -18 else "ms"
-    value = _py(value)
+    value = _atom(value)
     if value is None or isinstance(value, bool):
         return None
     #  NaT - kdb's null time or timestamp, through pandas - is a datetime
@@ -550,7 +550,7 @@ def partitions(conn) -> list:
     errors, answered = [], False
     for query in (PARTITIONS_Q, PARTITIONS_ALT_Q):
         try:
-            got = _py(conn(query))
+            got = _atom(conn(query))
         except Exception as e:                              # noqa: BLE001
             errors.append(f"{query}: {str(e).splitlines()[0]}")
             continue
@@ -594,7 +594,7 @@ def _iter(value):
 
 
 def _as_date(value):
-    value = _py(value)
+    value = _atom(value)
     if isinstance(value, dt.datetime):
         return value.date()
     if isinstance(value, dt.date):
@@ -640,18 +640,46 @@ def resolve_master_date(conn, requested, days_back=1, log=None):
            "  and check what type `date` actually is."]))
 
 
-def _rows(result):
-    """A pykx table -> a list of dicts, whatever the build hands back."""
-    if result is None:
-        return []
+def _py(result):
+    """A pykx answer as python objects, by .py() - a full copy, so nothing
+    read afterwards points into the q result's memory.  NEVER .pd(): a
+    pandas frame of a pykx table shares its memory, and reading or freeing
+    it crashed python with a native access violation on live days
+    (2026-09-30, markets of 2,000+ syms, in _second_column and then in
+    shape itself).  A list, tuple or dict is already python."""
+    if result is None or isinstance(result, (list, tuple, dict)):
+        return result
     try:
-        return result.pd().to_dict("records")
-    except AttributeError:
-        pass
-    try:
-        return list(result.py())
+        return result.py()
     except AttributeError:
         return list(result)
+
+
+def _rows(result):
+    """A pykx table -> a list of dicts, whatever the build hands back: .py()
+    gives a dict of column lists on some pykx builds, a list of row dicts on
+    others."""
+    got = _py(result)
+    if got is None:
+        return []
+    if isinstance(got, dict):
+        keys = list(got)
+        n = len(got[keys[0]]) if keys else 0
+        return [{k: got[k][i] for k in keys} for i in range(n)]
+    return list(got)
+
+
+def _py_columns(result, names) -> dict:
+    """A pykx table -> {column: list of python values} for each name, None
+    where the answer lacks it - from .py(), in either of its shapes."""
+    got = _py(result)
+    if got is None:
+        return {c: [] for c in names}
+    if isinstance(got, dict):
+        n = len(next(iter(got.values()))) if got else 0
+        return {c: list(got[c]) if c in got else [None] * n for c in names}
+    rows = list(got)
+    return {c: [r.get(c) for r in rows] for c in names}
 
 
 def fetch_master(conn, date, candidates: dict) -> dict:
@@ -744,18 +772,6 @@ def fetch_raw(conn, date, syms, cols=None):
 def fetch_live_raw(conn, syms, cols=None):
     """EXTRACT, today, from the RDB."""
     return conn(live_ticks_q(None, cols), list(syms)) if syms else []
-
-
-def _frame(result):
-    """A pykx table -> ONE pandas conversion, or the rows as dicts when the
-    answer is not a table.  Converted once: .pd() on a pykx table is a full
-    copy, and doing it per column would cost more than it saves."""
-    if result is None:
-        return []
-    try:
-        return result.pd()
-    except AttributeError:
-        return _rows(result)
 
 
 def _columns_of(src, names) -> dict:
@@ -852,6 +868,15 @@ def _second_column(src, field, int_unit: str = "ms") -> list:
             for b, v in zip(bad.tolist(), secs.tolist())]
 
 
+def _seconds_list(values, int_unit: str = "ms") -> list:
+    """A time column's python values as seconds of day, or None: an int is
+    int_unit's (a condensed read's "i"$ second is "s", with 0Ni - the int32
+    minimum - or None for null); anything else is _seconds_of's."""
+    one = _memo(lambda v: _int_second(v) if int_unit == "s"
+                and _is_number(v) else _seconds_of(v, int_unit))
+    return list(map(one, values))
+
+
 def _is_number(value) -> bool:
     """A plain int or float (numpy's too), not a bool and not a time -
     numpy's timedelta64 is an integer subclass, and is a time."""
@@ -864,7 +889,7 @@ def _is_number(value) -> bool:
 def _int_second(value):
     """An int seconds-of-day cell: None for a null - 0Ni, NaN - or anything
     outside one day."""
-    if value != value or not 0 <= value < 86_400:
+    if value is None or value != value or not 0 <= value < 86_400:
         return None
     return int(value)
 
@@ -897,10 +922,10 @@ def shape(result, time_field: str = None, cols=None) -> dict:
     self-test holds the two paths together."""
     from ticksfile import _num, condition
     field = time_field or TIME_FIELD
-    src = _frame(result)
-    c = _columns_of(src, ("sym",) + TICK_FIELDS)
-    seconds = _second_column(src, field, time_unit(cols, field))
-    del src
+    #  PYTHON OBJECTS, NOT PANDAS - see _py.  The answer stays referenced
+    #  (`result`) until the columns are built.
+    c = _py_columns(result, ("sym",) + TICK_FIELDS + (field,))
+    seconds = _seconds_list(c[field], time_unit(cols, field))
     num = _memo(lambda v: _num(to_decimal(v)))
     txt = _memo(text)
     out = {}
@@ -1030,12 +1055,15 @@ def self_test() -> int:
                           {"time": -2147483648},
                           {"time": 86400}], "time", "s"),
           [5, None, None, None, None])
-    class _Table:                   # a pykx table: one .pd()
+    class _Table:                   # a pykx table: .py(), never .pd()
         def __init__(self, df):
             self.df = df
 
+        def py(self):
+            return {c: self.df[c].tolist() for c in self.df.columns}
+
         def pd(self):
-            return self.df
+            raise AssertionError(".pd() on a qatt answer")
 
     check("shape() reads a condensed frame's int column as those seconds",
           shape(_Table(pd.DataFrame({"sym": ["A", "A"], "time": np.array(
@@ -1519,14 +1547,21 @@ def self_test() -> int:
          "ex": "T"}]
 
     class Table:
-        """A pykx table as far as either path looks: .pd() only."""
+        """A pykx table: .py() a dict of column lists when built from a
+        frame, a list of row dicts when built from rows - pykx builds give
+        either - and a .pd() that FAILS, so any use of it is caught."""
 
         def __init__(self, rows):
             self.rows = rows
 
+        def py(self):
+            if isinstance(self.rows, list):
+                return [dict(r) for r in self.rows]
+            return {c: self.rows[c].tolist() for c in self.rows.columns}
+
         def pd(self):
-            import pandas
-            return pandas.DataFrame(self.rows)
+            raise AssertionError(".pd() on a qatt answer: pandas shares "
+                                 "pykx's memory, and crashed live")
 
     def stamp(rows, shift=0):
         """What the load stage makes of shape()'s rows."""
@@ -1550,7 +1585,7 @@ def self_test() -> int:
     both(awkward, "rows as a list")
     try:
         import pandas  # noqa: F401
-        both(Table(awkward), "rows through pandas")
+        both(Table(awkward), "rows through .py(), as row dicts")
         both(Table([{k: v for k, v in r.items() if k != "cond"}
                     for r in awkward]),
              "a column the table lacks")
@@ -1612,7 +1647,7 @@ def self_test() -> int:
 
         print("\na condensed read's q second, through pandas")
         want_s = [33_300, 43_200, None]
-        check("a SecondVector's .pd(): timedelta64[s], 0Nv as NaT",
+        check("a second column's values: timedelta64[s], 0Nv as NaT",
               secs(base.astype("timedelta64[s]"), full), want_s)
         check("the same in pandas' default nanoseconds",
               secs(base, full), want_s)

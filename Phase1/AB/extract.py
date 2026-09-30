@@ -222,7 +222,7 @@ def require_table(conn, table, where, hint, log) -> None:
     themselves will say more."""
     try:
         have = {qattsource.text(t) for t in
-                qattsource._iter(qattsource._py(conn(TABLES_Q)))}
+                qattsource._iter(qattsource._atom(conn(TABLES_Q)))}
     except Exception as e:                                  # noqa: BLE001
         log.warn(f"could not list the tables on {where} "
                  f"({type(e).__name__}: {str(e)[:80]}); going on")
