@@ -306,16 +306,16 @@ per check, the files hit and the lines hit; the 20 files hitting the most
 checks, then the most lines; the distinct conditions) and `.csv` beside it,
 one row per (file, check): `file,line,check,value,detail`.
 
-`duplicate row` and `blank field` are expected on old raw files: exact
-repeats are normal in a file not yet condensed, and MicCode is blank in
-files written without a MIC. `zero volume` is expected on quote-only
+`duplicate row` is expected on old raw files: exact repeats are normal in
+a file not yet condensed. Exchange and MicCode are not checked at all: they are
+optional, only time, price and volume matter. `zero volume` is expected on quote-only
 files: `historical.r` writes one line with Volume 0 for a name that quoted
 but did not trade. The log notes each.
 
 | Level | Checks |
 |---|---|
 | error (exit 1) | unreadable or bad gz, empty file, wrong header, field count, bad time, bad price (blank, not a number, `<= 0`, exponent form like `1e+05`), bad volume (blank, not a number, negative, exponent form, or not a whole number), non-ASCII or control characters |
-| warning (exit 0) | time going back, duplicate rows, a price jump over 10x, prints outside the session or in the lunch break (China's window is firm, other markets' are approximate), line endings, BOM, stray `.part` files, duplicate day (.csv and .csv.gz), file name, blank Exchange/MicCode, zero volume (a Volume of exactly 0) |
+| warning (exit 0) | time going back, duplicate rows, a price jump over 10x, prints outside the session or in the lunch break (China's window is firm, other markets' are approximate), line endings, BOM, stray `.part` files, duplicate day (.csv and .csv.gz), file name, zero volume (a Volume of exactly 0) |
 
 Exit status: 0 no error, 1 at least one error, 2 a bad argument.
 

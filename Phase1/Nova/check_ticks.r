@@ -48,15 +48,16 @@
 #            or no line end on the last line), file name (date not 8
 #            digits, or a code differing from the folder's), stray file
 #            (.part / .tmp), duplicate day (one date as .csv and .csv.gz),
-#            condition (a comma or a quote in Condition), blank field
-#            (Exchange or MicCode), order (Time going back), duplicate row,
+#            condition (a comma or a quote in Condition), order (Time
+#            going back), duplicate row,
 #            jump (price x10 or /10 between consecutive priced rows),
 #            session (outside the market's window, CT_SESSIONS), lunch
 #            (inside its lunch break), zero volume (a Volume of exactly 0)
 #
-# duplicate row and blank field are expected on old raw files: exact
-# repeats are normal in a file not yet condensed (condense_history.r), and
-# MicCode is blank in files written without a MIC. zero volume is expected
+# duplicate row is expected on old raw files: exact repeats are normal in
+# a file not yet condensed (condense_history.r). Exchange and MicCode are
+# optional and never checked: only time, price and volume matter. zero
+# volume is expected
 # on quote-only files: historical.r writes one line with Volume 0 for a
 # name that quoted but did not trade. The log says so.
 #
@@ -81,21 +82,20 @@ CT_LEVEL <- c(
   "no rows" = "warning", "bom" = "warning", "line endings" = "warning",
   "file name" = "warning", "stray file" = "warning",
   "duplicate day" = "warning", "condition" = "warning",
-  "blank field" = "warning", "order" = "warning",
+  "order" = "warning",
   "duplicate row" = "warning", "jump" = "warning", "session" = "warning",
   "lunch" = "warning", "zero volume" = "warning")
 
 # The checks on rows: their finding counts lines and shows examples. The
 # others are on the file as a whole.
 CT_ROW_CHECKS <- c("field count", "bad time", "bad price", "bad volume",
-                   "non-ascii", "condition", "blank field", "order",
+                   "non-ascii", "condition", "order",
                    "duplicate row", "jump", "session", "lunch",
                    "zero volume")
 
 # What the log says of the checks that fire on most old files.
 CT_NOTE <- c(
   "duplicate row" = "expected on uncondensed raw files: exact repeats are normal there",
-  "blank field" = "expected on files written without a MIC: MicCode is blank there",
   "zero volume" = "expected on quote-only files: historical.r writes one Volume 0 line for a name that quoted but did not trade")
 
 # Each market's session in its LOCAL clock, by close_conditions.csv's
@@ -528,12 +528,7 @@ ct_check_file <- function(path, sess) {
   conds <- table(cond[ok])
   conds <- setNames(as.integer(conds), names(conds))
 
-  # Exchange and MicCode.
-  for (k in 5:6) {
-    bl <- which(ok & !nzchar(m[, k]))
-    if (length(bl)) add("blank field", ln[bl], CT_COLUMNS[k],
-                        paste(CT_COLUMNS[k], "is blank"))
-  }
+  # Exchange and MicCode are optional: a blank one is not a finding.
 
   # Order, among the readable times.
   vi <- which(vt)
@@ -1214,7 +1209,6 @@ ct_self_test <- function() {
     list(nm(17), "session", "3", 1, "a print before the session"),
     list(nm(18), "duplicate row", "4", 1, "a duplicate row"),
     list(nm(19), "jump", "4", 2, "a price x14 and back"),
-    list(nm(20), "blank field", "4", 1, "a blank Exchange"),
     list(nm(21), "non-ascii", "3", 1, "a non-ASCII byte"),
     list(nm(22), "condition", "3", 1, "an embedded quote in Condition"),
     list(nm(23), "session", "2", 30, "30 prints before the session"),
@@ -1265,6 +1259,9 @@ ct_self_test <- function() {
   check("the clean files, plain, gz and with a tz cell, have no findings",
         sum(r1$stats$findings[grepl(paste0("^", ok_f, "/"), r1$stats$file)]),
         0)
+  check("a blank Exchange or MicCode is no finding: only time, price and volume matter",
+        sum(r1$stats$findings[grepl(paste0("/", nm(20), "$"), r1$stats$file)]),
+        0)
   check("and are counted with their rows",
         r1$stats$rows[grepl(paste0("^", ok_f, "/"), r1$stats$file)],
         c(4L, 4L, 4L))
@@ -1292,10 +1289,8 @@ ct_self_test <- function() {
         c(TRUE, TRUE))
   check("but no lines for a file check",
         any(grepl("bom \\(warning\\) lines", lg)), FALSE)
-  check("and says duplicate row and blank field are expected",
-        c(any(grepl("note: duplicate row is expected on uncondensed", lg)),
-          any(grepl("note: blank field is expected on files written without",
-                    lg))), c(TRUE, TRUE))
+  check("and says duplicate row is expected",
+        any(grepl("note: duplicate row is expected on uncondensed", lg)), TRUE)
   tl <- regmatches(lg, regexpr("[0-9]+ checks +[0-9]+ lines", lg))
   tk <- as.numeric(sub(" checks.*$", "", tl))
   tn <- as.numeric(sub("^.*checks +([0-9]+) lines$", "\\1", tl))
