@@ -273,6 +273,33 @@ for `historical.r`.
   file whose size has not changed without opening it. Delete that list to
   have every file read again.
 
+## Checking tick files
+
+`check_ticks.r` reads the Historical tick files of some markets and lists
+anything odd. It changes nothing.
+
+```
+Rscript check_ticks.r --market=China --from=20260901
+Rscript check_ticks.r "--market=C1|CS" --from=20260901 --to=20260930
+Rscript check_ticks.r --market=China --folder="600000 C1"
+```
+
+`--market` takes countries (from `config/close_conditions.csv`) or
+Bloomberg exchange codes, as `condense_history.r` does. A whole market's
+history can be a million files, so narrow it with `--from`/`--to` or
+`--folder`. `WORKERS` in `settings.r` sets the parallel R processes.
+
+It writes `LOG_DIR/check-ticks-YYYYMMDD-HHMMSS.log` (a summary per code, the
+20 files with the most findings, the distinct conditions) and `.csv` beside
+it, one row per finding: `file,line,check,value,detail`.
+
+| Level | Checks |
+|---|---|
+| error (exit 1) | unreadable or bad gz, empty file, wrong header, field count, bad time, bad price (blank, not a number, `<= 0`, exponent form like `1e+05`), bad volume (same, or not a whole number), non-ASCII or control characters |
+| warning (exit 0) | time going back, duplicate rows, a price jump over 10x, prints outside the session or in the lunch break (China's window is firm, other markets' are approximate), line endings, BOM, stray `.part` files, duplicate day (.csv and .csv.gz), file name, blank Exchange/MicCode |
+
+Exit status: 0 no error, 1 at least one error, 2 a bad argument.
+
 ## Reading the log
 
 All three jobs append to `LOG_DIR/phase1-YYYYMMDD.log`, dated by the trade
