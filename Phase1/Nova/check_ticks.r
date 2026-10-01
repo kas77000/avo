@@ -668,8 +668,10 @@ ct_default_workers <- function() {
 }
 
 # The folders and files to check. Stops (exit 2) on a --folder= that is
-# not there or not in the market.
-ct_plan <- function(s, o, mk) {
+# not there or not in the market. say(i, n) is told the progress of the
+# listing, which on a share holding a whole market's history is slow.
+# Files are told apart by name only: no file.info per file.
+ct_plan <- function(s, o, mk, say = function(i, n) invisible(NULL)) {
   if (!dir.exists(s$OUTPUT_DIR)) stop("OUTPUT_DIR does not exist",
                                       call. = FALSE)
   all <- list.dirs(s$OUTPUT_DIR, recursive = FALSE, full.names = FALSE)
@@ -682,10 +684,12 @@ ct_plan <- function(s, o, mk) {
     folders <- o$folder
   }
   ignored <- 0
-  tasks <- lapply(folders, function(fd) {
+  n_folders <- length(folders)
+  tasks <- lapply(seq_along(folders), function(i) {
+    fd <- folders[i]
+    if (i %% 200 == 0 || i == n_folders) say(i, n_folders)
     dir <- file.path(s$OUTPUT_DIR, fd)
     f <- list.files(dir)
-    f <- f[!file.info(file.path(dir, f))$isdir]
     date <- ifelse(grepl("-[0-9]{8}\\.csv(\\.gz)?(\\.part|\\.tmp)?$", f,
                          ignore.case = TRUE),
                    sub("^.*-([0-9]{8})\\.csv.*$", "\\1", f,
@@ -711,14 +715,18 @@ ct_plan <- function(s, o, mk) {
 ct_run <- function(s, o, console = TRUE) {
   here <- p1_here()
   mk <- ct_resolve(o$market, file.path(here, "config"))
-  plan <- ct_plan(s, o, mk)
-  tasks <- plan$tasks
   stamp <- format(Sys.time(), "%Y%m%d-%H%M%S")
   stem <- file.path(s$LOG_DIR, paste0("check-ticks-", stamp))
   log <- ct_log_open(paste0(stem, ".log"), console)
   workers <- ct_count_setting(s$WORKERS, ct_default_workers(), "WORKERS")
 
   log$info(paste("check_ticks.r", paste(commandArgs(TRUE), collapse = " ")))
+  log$info(paste("listing the folders of", paste(mk$codes, collapse = " "),
+                 "in", s$OUTPUT_DIR))
+  plan <- ct_plan(s, o, mk, say = function(i, n) {
+    log$info(sprintf("listing folders %d/%d", i, n))
+  })
+  tasks <- plan$tasks
   log$step(1, "what is checked")
   log$kv("market", o$market)
   log$kv("codes", paste(mk$codes, collapse = " "))

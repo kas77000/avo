@@ -373,7 +373,11 @@ c_run <- function(s, market, dry = FALSE, from = "", to = "", log,
   if (length(done)) log$kv("done list", length(done), done_path)
 
   units <- list()
-  for (f in folders) {
+  for (i in seq_along(folders)) {
+    f <- folders[i]
+    if (i %% 200 == 0 || i == length(folders)) {
+      log$info(sprintf("listing folders %d/%d", i, length(folders)))
+    }
     nm <- sort(list.files(file.path(s$OUTPUT_DIR, f), pattern = C_FILES))
     if (nzchar(from) || nzchar(to)) {
       d <- sub("^.*-([0-9]{8})\\.csv(\\.gz)?$", "\\1", nm)
