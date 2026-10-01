@@ -9,7 +9,14 @@
 #     Rscript check_ticks.r --market=China
 #     Rscript check_ticks.r --market="C1|CS" --from=20260101 --to=20260930
 #     Rscript check_ticks.r --market=China --folder="600000 CG"
+#     Rscript check_ticks.r --market=China --sample=500
 #     Rscript check_ticks.r --self-test
+#
+# A finding is one (file, check): a file gives at most one finding per
+# check, however many of its lines are hit. For a check on rows, line and
+# value are the first offending line and its value, and detail reads
+# "N lines: <line>:<value>, ... (up to 3); first: <why>". "findings" in the
+# log counts (file, check) pairs; the summary also counts the lines hit.
 #
 # --market= is required: a Country of config/close_conditions.csv, or
 # exchange codes, any case, joined with |. A folder is checked when the
@@ -18,12 +25,14 @@
 # Convert2Composite TRUE, 1 or YES). --from= and --to= (YYYYMMDD) keep the
 # files whose name date is in range; a file whose name has no readable date
 # is always checked. --folder= checks that one folder (it must still be in
-# the market). settings.r gives OUTPUT_DIR, LOG_DIR and WORKERS (as in
-# historical.r: R processes, one per folder at a time; 1 is no cluster).
+# the market). --sample=N checks N of the selected files only, evenly
+# spread: the files of all the folders in sorted order, every (all/N)-th
+# one, the same N on every run (a quick overview of a whole market).
+# settings.r gives OUTPUT_DIR, LOG_DIR and WORKERS (as in historical.r: R
+# processes, one per folder at a time; 1 is no cluster).
 #
 # Exit code: 0 no error-level finding, 1 at least one, 2 bad arguments or
-# settings. Findings are listed at most 20 per check per file, then one row
-# "N more" with the file's total in value.
+# settings.
 #
 # Checks, and their level (CT_LEVEL below):
 #   error    unreadable (bad or truncated gz), empty (0 bytes), header
@@ -44,6 +53,10 @@
 #            session (outside the market's window, CT_SESSIONS), lunch
 #            (inside its lunch break)
 #
+# duplicate row and blank field are expected on old raw files: exact
+# repeats are normal in a file not yet condensed (condense_history.r), and
+# MicCode is blank in files written without a MIC. The log says so.
+#
 # The log also lists each code's distinct Condition values with counts
 # (#N/A N.A. is legitimate, listed all the same) and the timezone cells the
 # headers carry. Lines are physical lines: the header is line 1.
@@ -55,7 +68,7 @@ local({
 })
 
 CT_COLUMNS <- c("#Time", "Last", "Volume", "Condition", "Exchange", "MicCode")
-CT_CAP <- 20
+CT_EXAMPLES <- 3
 CT_PROGRESS <- 200
 
 CT_LEVEL <- c(
@@ -68,6 +81,17 @@ CT_LEVEL <- c(
   "blank field" = "warning", "order" = "warning",
   "duplicate row" = "warning", "jump" = "warning", "session" = "warning",
   "lunch" = "warning")
+
+# The checks on rows: their finding counts lines and shows examples. The
+# others are on the file as a whole.
+CT_ROW_CHECKS <- c("field count", "bad time", "bad price", "bad volume",
+                   "non-ascii", "condition", "blank field", "order",
+                   "duplicate row", "jump", "session", "lunch")
+
+# What the log says of the checks that fire on most old files.
+CT_NOTE <- c(
+  "duplicate row" = "expected on uncondensed raw files: exact repeats are normal there",
+  "blank field" = "expected on files written without a MIC: MicCode is blank there")
 
 # Each market's session in its LOCAL clock, by close_conditions.csv's
 # Country, auctions included. China is the one that matters here; the
@@ -93,6 +117,9 @@ Taiwan,09:00:00,14:30:00,,",
 
 CT_NUM <- "^[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)$"
 CT_EXP <- "^[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)[eE][-+]?[0-9]+$"
+# A row whose one quoted cell is Condition, as a whole: split here in one
+# regexpr, as ct_split_quoted would. Any other quoted row goes to it.
+CT_QUOTED <- '^([^,"]*),([^,"]*),([^,"]*),"((?:[^"]|"")*)",([^,"]*),([^,"]*)$'
 
 # -- markets ------------------------------------------------------------
 
@@ -230,7 +257,14 @@ ct_read <- function(path) {
   out
 }
 
-# Every finding of one file, before the cap: check, line, value, detail.
+# The findings of one file. add() takes a check's offending lines with
+# their raw values and whys (vectors, or one for all); get() makes ONE
+# finding per check: the first line (by line, the file as a whole first)
+# and its value, shown by ct_show; for a row check the detail is "N lines:
+# up to CT_EXAMPLES line:value; first: <why>", for a file check the whys.
+# Only the values shown pass through ct_show, so a file with a finding on
+# every row costs no more than a clean one. lines is the distinct lines a
+# row check hit, 0 for a file check.
 ct_bag <- function() {
   e <- new.env()
   e$parts <- list()
@@ -238,59 +272,60 @@ ct_bag <- function() {
     n <- length(line)
     if (!n) return(invisible(NULL))
     e$parts[[length(e$parts) + 1]] <- list(
-      check = rep_len(check, n), line = as.integer(line),
+      check = check, line = as.integer(line),
       value = rep_len(as.character(value), n),
       detail = rep_len(as.character(detail), n))
     invisible(NULL)
   }
   get <- function() {
-    if (!length(e$parts)) {
-      return(data.frame(check = character(0), line = integer(0),
-                        value = character(0), detail = character(0),
-                        stringsAsFactors = FALSE))
-    }
-    data.frame(check = unlist(lapply(e$parts, `[[`, "check")),
-               line = unlist(lapply(e$parts, `[[`, "line")),
-               value = unlist(lapply(e$parts, `[[`, "value")),
-               detail = unlist(lapply(e$parts, `[[`, "detail")),
-               stringsAsFactors = FALSE)
+    chk <- vapply(e$parts, `[[`, "", "check")
+    out <- lapply(intersect(names(CT_LEVEL), chk), function(k) {
+      p <- e$parts[chk == k]
+      line <- unlist(lapply(p, `[[`, "line"))
+      value <- unlist(lapply(p, `[[`, "value"))
+      why <- unlist(lapply(p, `[[`, "detail"))
+      o <- order(line, na.last = FALSE)
+      i <- o[1]
+      if (k %in% CT_ROW_CHECKS) {
+        n <- length(unique(line))
+        ex <- utils::head(o, CT_EXAMPLES)
+        detail <- sprintf("%d line%s: %s; first: %s", n, if (n == 1) "" else "s",
+                          paste0(line[ex], ":", ct_show(value[ex], 40),
+                                 collapse = ", "), why[i])
+      } else {
+        n <- 0L
+        detail <- paste(unique(why[o]), collapse = "; ")
+      }
+      data.frame(check = k, line = line[i], value = ct_show(value[i]),
+                 detail = detail, lines = as.integer(n),
+                 stringsAsFactors = FALSE)
+    })
+    do.call(rbind, c(list(data.frame(
+      check = character(0), line = integer(0), value = character(0),
+      detail = character(0), lines = integer(0), stringsAsFactors = FALSE)),
+      out))
   }
   list(add = add, get = get)
 }
 
-# Sort, cap at CT_CAP a check, and count. Returns the listed rows (file
-# filled in, line "" for the file as a whole) and the totals per check.
-ct_cap <- function(f, rel) {
-  totals <- table(factor(f$check, levels = names(CT_LEVEL)))
-  totals <- setNames(as.integer(totals), names(totals))
-  if (!nrow(f)) {
-    return(list(rows = data.frame(file = character(0), line = character(0),
-                                  check = character(0), value = character(0),
-                                  detail = character(0),
-                                  stringsAsFactors = FALSE),
-                totals = totals))
-  }
-  f <- f[order(match(f$check, names(CT_LEVEL)), f$line, na.last = FALSE), ]
-  keep <- unlist(lapply(split(seq_len(nrow(f)),
-                              factor(f$check, levels = unique(f$check))),
-                        function(r) utils::head(r, CT_CAP)))
-  f <- f[sort(keep), ]
-  over <- totals[totals > CT_CAP]
+# One file's findings as CSV rows (file filled in, line "" for the file as
+# a whole), and per check: hit (0 or 1) and lines.
+ct_rows <- function(f, rel) {
+  hit <- setNames(integer(length(CT_LEVEL)), names(CT_LEVEL))
+  lines <- as.numeric(hit)
+  names(lines) <- names(hit)
+  hit[f$check] <- 1L
+  lines[f$check] <- f$lines
+  f <- f[order(match(f$check, names(CT_LEVEL))), , drop = FALSE]
   rows <- data.frame(file = rep(rel, nrow(f)),
                      line = ifelse(is.na(f$line), "", as.character(f$line)),
                      check = f$check, value = f$value, detail = f$detail,
                      stringsAsFactors = FALSE)
-  if (length(over)) {
-    rows <- rbind(rows, data.frame(
-      file = rel, line = "", check = names(over), value = as.character(over),
-      detail = sprintf("%d more not listed; %d in all", over - CT_CAP, over),
-      stringsAsFactors = FALSE))
-  }
-  list(rows = rows, totals = totals)
+  list(rows = rows, hit = hit, lines = lines)
 }
 
 # One tick file. sess is the market's CT_SESSIONS row, or NULL. Returns
-# list(f = findings before the cap, rows, conds = table of Condition, tz).
+# list(f = one finding per check (ct_bag), rows, conds = table of Condition, tz).
 ct_check_file <- function(path, sess) {
   bag <- ct_bag()
   add <- bag$add
@@ -325,8 +360,8 @@ ct_check_file <- function(path, sess) {
   lines <- strsplit(rawToChar(b), "\n", fixed = TRUE)[[1]]
   if (!length(lines)) lines <- ""
   nl <- length(lines)
-  cr <- grepl("\r$", lines)
-  lines <- sub("\r$", "", lines)
+  cr <- grepl("\r$", lines, perl = TRUE, useBytes = TRUE)
+  lines <- sub("\r$", "", lines, perl = TRUE, useBytes = TRUE)
 
   # Line ends: one finding for the file.
   ended <- seq_len(nl) < nl | ends_nl
@@ -345,7 +380,7 @@ ct_check_file <- function(path, sess) {
   # Bytes outside printable ASCII, in any line.
   odd <- grep("[^\\x20-\\x7e]", lines, perl = TRUE, useBytes = TRUE)
   if (length(odd)) {
-    add("non-ascii", odd, ct_show(lines[odd]),
+    add("non-ascii", odd, lines[odd],
         "a byte outside printable ASCII (shown as <xx>)")
   }
 
@@ -355,7 +390,7 @@ ct_check_file <- function(path, sess) {
     strsplit(paste0(h, ","), ",", fixed = TRUE)[[1]]
   tz <- "(none)"
   if (length(hc) < 6 || length(hc) > 7 || !identical(hc[1:6], CT_COLUMNS)) {
-    add("header", 1, ct_show(h),
+    add("header", 1, h,
         "want #Time,Last,Volume,Condition,Exchange,MicCode[,timezone]")
   } else if (length(hc) == 7) tz <- hc[7]
 
@@ -380,7 +415,24 @@ ct_check_file <- function(path, sess) {
       m[plain[six], ] <- matrix(unlist(sp[six]), ncol = 6, byrow = TRUE)
     }
   }
-  for (i in which(quoted)) {
+  # Quoted rows: printable ASCII ones of the usual shape in one regexpr
+  # (bytes are chars then), the rest one by one.
+  q <- which(quoted)
+  if (length(q)) {
+    asc <- !(q + 1L) %in% odd
+    rx <- regexpr(CT_QUOTED, d[q], perl = TRUE, useBytes = TRUE)
+    hit <- rx > 0 & asc
+    if (any(hit)) {
+      st <- attr(rx, "capture.start")[hit, , drop = FALSE]
+      len <- attr(rx, "capture.length")[hit, , drop = FALSE]
+      qd <- d[q][hit]
+      for (k in 1:6) m[q[hit], k] <- substring(qd, st[, k], st[, k] + len[, k] - 1)
+      m[q[hit], 4] <- gsub('""', '"', m[q[hit], 4], fixed = TRUE)
+      nf[q[hit]] <- 6L
+    }
+    q <- q[!hit]
+  }
+  for (i in q) {
     cells <- ct_split_quoted(d[i])
     nf[i] <- length(cells)
     if (nf[i] == 6) m[i, ] <- cells
@@ -388,34 +440,42 @@ ct_check_file <- function(path, sess) {
   ok <- nf == 6
   bad <- which(!ok)
   if (length(bad)) {
-    add("field count", ln[bad], ct_show(d[bad]),
+    add("field count", ln[bad], d[bad],
         paste0(nf[bad], " fields, want 6",
                ifelse(nf[bad] == 7, "; an unquoted comma in Condition?", "")))
   }
 
   # Time.
   t <- m[, 1]
-  fmt <- grepl("^[0-9]{2}:[0-9]{2}:[0-9]{2}$", t)
+  fmt <- grepl("^[0-9]{2}:[0-9]{2}:[0-9]{2}$", t, perl = TRUE,
+               useBytes = TRUE)
   hh <- mm <- ss <- rep(0L, nr)
   hh[fmt] <- as.integer(substr(t[fmt], 1, 2))
   mm[fmt] <- as.integer(substr(t[fmt], 4, 5))
   ss[fmt] <- as.integer(substr(t[fmt], 7, 8))
   late <- fmt & hh >= 24
   over <- fmt & !late & (mm >= 60 | ss >= 60)
+  # Seconds since midnight: order and the session compare numbers, not
+  # strings (the same order for HH:MM:SS, without the locale's collation).
+  sec <- hh * 3600L + mm * 60L + ss
+  tsec <- function(x) {
+    as.integer(substr(x, 1, 2)) * 3600L + as.integer(substr(x, 4, 5)) * 60L +
+      as.integer(substr(x, 7, 8))
+  }
   bt <- which(ok & (!fmt | late | over))
   if (length(bt)) {
     why <- ifelse(!nzchar(t[bt]), "blank",
                   ifelse(!fmt[bt], "not HH:MM:SS",
                          ifelse(late[bt], "out of range (>= 24:00:00)",
                                 "minutes or seconds >= 60")))
-    add("bad time", ln[bt], ct_show(t[bt]), why)
+    add("bad time", ln[bt], t[bt], why)
   }
   vt <- ok & fmt & !late & !over
 
   # Last.
   p <- m[, 2]
-  pnum <- grepl(CT_NUM, p)
-  pexp <- grepl(CT_EXP, p)
+  pnum <- grepl(CT_NUM, p, perl = TRUE, useBytes = TRUE)
+  pexp <- grepl(CT_EXP, p, perl = TRUE, useBytes = TRUE)
   pv <- rep(NA_real_, nr)
   pv[pnum | pexp] <- as.numeric(p[pnum | pexp])
   bp <- which(ok & (!(pnum | pexp) | pexp | (!is.na(pv) & pv <= 0)))
@@ -423,15 +483,16 @@ ct_check_file <- function(path, sess) {
     why <- ifelse(!nzchar(p[bp]), "blank",
                   ifelse(!pnum[bp] & !pexp[bp], "not a number",
                          ifelse(pv[bp] <= 0, "<= 0", "exponent form")))
-    add("bad price", ln[bp], ct_show(p[bp]), why)
+    add("bad price", ln[bp], p[bp], why)
   }
   priced <- ok & !is.na(pv) & pv > 0
 
   # Volume.
   v <- m[, 3]
-  vint <- grepl("^[0-9]+$", v)
+  vint <- grepl("^[0-9]+$", v, perl = TRUE, useBytes = TRUE)
   vnum <- vint
-  vnum[!vint] <- grepl(CT_NUM, v[!vint]) | grepl(CT_EXP, v[!vint])
+  vnum[!vint] <- grepl(CT_NUM, v[!vint], perl = TRUE, useBytes = TRUE) |
+    grepl(CT_EXP, v[!vint], perl = TRUE, useBytes = TRUE)
   vv <- rep(NA_real_, nr)
   vv[vnum] <- as.numeric(v[vnum])
   bv <- which(ok & (!vint | (!is.na(vv) & vv <= 0)))
@@ -443,18 +504,18 @@ ct_check_file <- function(path, sess) {
                                        ifelse(grepl(CT_EXP, v[bv]),
                                               "exponent form",
                                               "not an integer")))))
-    add("bad volume", ln[bv], ct_show(v[bv]), why)
+    add("bad volume", ln[bv], v[bv], why)
   }
 
   # Condition.
   cond <- m[, 4]
   cc <- which(ok & grepl(",", cond, fixed = TRUE))
   if (length(cc)) {
-    add("condition", ln[cc], ct_show(cond[cc]),
+    add("condition", ln[cc], cond[cc],
         "a comma inside Condition (quoted in the file)")
   }
   cq <- which(ok & grepl('"', cond, fixed = TRUE))
-  if (length(cq)) add("condition", ln[cq], ct_show(cond[cq]),
+  if (length(cq)) add("condition", ln[cq], cond[cq],
                       "a quote inside Condition")
   conds <- table(cond[ok])
   conds <- setNames(as.integer(conds), names(conds))
@@ -462,14 +523,14 @@ ct_check_file <- function(path, sess) {
   # Exchange and MicCode.
   for (k in 5:6) {
     bl <- which(ok & !nzchar(m[, k]))
-    if (length(bl)) add("blank field", ln[bl], "", paste(CT_COLUMNS[k],
-                                                         "is blank"))
+    if (length(bl)) add("blank field", ln[bl], CT_COLUMNS[k],
+                        paste(CT_COLUMNS[k], "is blank"))
   }
 
   # Order, among the readable times.
   vi <- which(vt)
   if (length(vi) > 1) {
-    back <- which(t[vi][-1] < t[vi][-length(vi)]) + 1
+    back <- which(diff(sec[vi]) < 0) + 1
     if (length(back)) {
       add("order", ln[vi[back]], t[vi[back]],
           paste0("after ", t[vi[back - 1]], " on line ", ln[vi[back - 1]]))
@@ -479,7 +540,7 @@ ct_check_file <- function(path, sess) {
   # Exact duplicate rows.
   dup <- which(duplicated(d))
   if (length(dup)) {
-    add("duplicate row", ln[dup], ct_show(d[dup]),
+    add("duplicate row", ln[dup], d[dup],
         paste("same as line", ln[match(d[dup], d)]))
   }
 
@@ -489,21 +550,21 @@ ct_check_file <- function(path, sess) {
     r <- pv[pi_][-1] / pv[pi_][-length(pi_)]
     j <- which(r > 10 | r < 0.1) + 1
     if (length(j)) {
-      add("jump", ln[pi_[j]], ct_show(p[pi_[j]]),
-          sprintf("after %s on line %d (x%.4g)", ct_show(p[pi_[j - 1]]),
+      add("jump", ln[pi_[j]], p[pi_[j]],
+          sprintf("after %s on line %d (x%.4g)", p[pi_[j - 1]],
                   ln[pi_[j - 1]], r[j - 1]))
     }
   }
 
   # The session.
   if (!is.null(sess)) {
-    out <- which(vt & (t < sess$Start | t > sess$End))
+    out <- which(vt & (sec < tsec(sess$Start) | sec > tsec(sess$End)))
     if (length(out)) {
       add("session", ln[out], t[out],
           sprintf("outside %s-%s (%s)", sess$Start, sess$End, sess$Country))
     }
     if (nzchar(sess$LunchFrom)) {
-      lu <- which(vt & t > sess$LunchFrom & t < sess$LunchTo)
+      lu <- which(vt & sec > tsec(sess$LunchFrom) & sec < tsec(sess$LunchTo))
       if (length(lu)) {
         add("lunch", ln[lu], t[lu],
             sprintf("in the lunch break %s-%s (%s)", sess$LunchFrom,
@@ -517,33 +578,35 @@ ct_check_file <- function(path, sess) {
 # -- one folder ---------------------------------------------------------
 
 # What a worker runs. task: dir (the folder's path), folder (its name),
-# files (its tick files, names), stray (.part/.tmp names), sess. Returns
-# the listed findings, each file's rows and total findings, the folder's
-# totals per check, its Condition counts and its headers' tz cells.
+# files (its tick files, names), stray (.part/.tmp names), both (the
+# .csv.gz names whose day is also a .csv), sess. Returns the findings (one
+# per file and check), each file's rows, checks hit and lines hit, the
+# folder's files and lines per check, its Condition counts and its
+# headers' tz cells.
 ct_check_folder <- function(task) {
   rel <- function(name) paste0(task$folder, "/", name)
   rows <- list()
   stats <- list()
-  totals <- setNames(integer(length(CT_LEVEL)), names(CT_LEVEL))
+  hit <- setNames(integer(length(CT_LEVEL)), names(CT_LEVEL))
+  lines <- setNames(numeric(length(CT_LEVEL)), names(CT_LEVEL))
   conds <- integer(0)
   tz <- character(0)
   take <- function(name, f, nrows, is_tick) {
-    cp <- ct_cap(f, rel(name))
+    cp <- ct_rows(f, rel(name))
     rows[[length(rows) + 1]] <<- cp$rows
-    totals <<- totals + cp$totals
+    hit <<- hit + cp$hit
+    lines <<- lines + cp$lines
     stats[[length(stats) + 1]] <<- data.frame(
-      file = rel(name), rows = nrows, findings = sum(cp$totals),
-      errors = sum(cp$totals[CT_LEVEL == "error"]), tick = is_tick,
-      stringsAsFactors = FALSE)
+      file = rel(name), rows = nrows, findings = sum(cp$hit),
+      lines = sum(cp$lines), errors = sum(cp$hit[CT_LEVEL == "error"]),
+      tick = is_tick, stringsAsFactors = FALSE)
   }
   for (s in task$stray) {
     bag <- ct_bag()
     bag$add("stray file", NA, s, "a .part or .tmp file left in the folder")
     take(s, bag$get(), 0L, FALSE)
   }
-  base <- sub("\\.gz$", "", task$files, ignore.case = TRUE)
-  is_gz <- grepl("\\.gz$", task$files, ignore.case = TRUE)
-  both <- base[is_gz][tolower(base[is_gz]) %in% tolower(base[!is_gz])]
+  both <- task$both
   for (name in task$files) {
     r <- ct_check_file(file.path(task$dir, name), task$sess)
     bag <- ct_bag()
@@ -578,23 +641,25 @@ ct_check_folder <- function(task) {
     if (!is.na(r$tz)) tz <- c(tz, ct_show(r$tz))
   }
   list(rows = do.call(rbind, rows), stats = do.call(rbind, stats),
-       totals = totals, conds = conds, tz = table(tz))
+       hit = hit, lines = lines, conds = conds, tz = table(tz))
 }
 
 CT_WORKER_FUNS <- c("ct_check_folder", "ct_check_file", "ct_read",
-                    "ct_show", "ct_split_quoted", "ct_bag", "ct_cap",
-                    "CT_COLUMNS", "CT_CAP", "CT_LEVEL", "CT_NUM", "CT_EXP")
+                    "ct_show", "ct_split_quoted", "ct_bag", "ct_rows",
+                    "CT_COLUMNS", "CT_EXAMPLES", "CT_LEVEL", "CT_ROW_CHECKS",
+                    "CT_NUM", "CT_EXP", "CT_QUOTED")
 
 # -- the run ------------------------------------------------------------
 
 ct_usage <- paste0(
   "usage: Rscript check_ticks.r --market=<Country|CODE[|CODE...]> ",
-  "[--from=YYYYMMDD] [--to=YYYYMMDD] [--folder=\"<name>\"] | --self-test")
+  "[--from=YYYYMMDD] [--to=YYYYMMDD] [--folder=\"<name>\"] [--sample=N] ",
+  "| --self-test")
 
 # The arguments, or an error naming what is wrong.
 ct_args <- function(a) {
   o <- list(market = NULL, from = NULL, to = NULL, folder = NULL,
-            settings = NULL)
+            sample = NULL, settings = NULL)
   for (x in a) {
     k <- sub("^--([a-z-]+)=.*$", "\\1", x)
     if (!grepl("^--[a-z-]+=", x) || !k %in% names(o)) {
@@ -617,6 +682,14 @@ ct_args <- function(a) {
   }
   if (!is.null(o$from) && !is.null(o$to) && o$from > o$to) {
     stop("--from= is after --to=", call. = FALSE)
+  }
+  if (!is.null(o$sample)) {
+    if (!grepl("^[0-9]+$", o$sample) || as.numeric(o$sample) < 1 ||
+        as.numeric(o$sample) > .Machine$integer.max) {
+      stop("--sample= must be a whole number, 1 or more, not '", o$sample,
+           "'", call. = FALSE)
+    }
+    o$sample <- as.integer(o$sample)
   }
   o
 }
@@ -704,10 +777,33 @@ ct_plan <- function(s, o, mk, say = function(i, n) invisible(NULL)) {
     code <- ct_folder_code(fd)
     sess <- ct_session(if (code %in% names(mk$country)) mk$country[[code]]
                        else "")
-    list(dir = dir, folder = fd, files = sort(f[tick]), stray = f[stray],
-         sess = sess, code = code)
+    files <- sort(f[tick])
+    base <- sub("\\.gz$", "", files, ignore.case = TRUE)
+    is_gz <- grepl("\\.gz$", files, ignore.case = TRUE)
+    both <- base[is_gz][tolower(base[is_gz]) %in% tolower(base[!is_gz])]
+    list(dir = dir, folder = fd, files = files, stray = f[stray],
+         both = both, sess = sess, code = code)
   })
   list(tasks = tasks, ignored = ignored)
+}
+
+# --sample=n: n of the tasks' tick files, evenly spread over all of them in
+# order (folders sorted, then files): file 1, then every (all/n)-th. The
+# folders left with no file and no stray one are dropped. The same n gives
+# the same files on every run.
+ct_sample <- function(tasks, n) {
+  sizes <- vapply(tasks, function(t) length(t$files), numeric(1))
+  total <- sum(sizes)
+  if (n >= total) return(tasks)
+  pick <- floor((seq_len(n) - 1) * total / n) + 1
+  first <- cumsum(c(0, sizes))[seq_along(tasks)]
+  tasks <- lapply(seq_along(tasks), function(i) {
+    t <- tasks[[i]]
+    t$files <- t$files[pick[pick > first[i] & pick <= first[i] + sizes[i]] -
+                         first[i]]
+    t
+  })
+  Filter(function(t) length(t$files) || length(t$stray), tasks)
 }
 
 # The whole run, with s (settings) and o (arguments) already read. Returns
@@ -727,6 +823,8 @@ ct_run <- function(s, o, console = TRUE) {
     log$info(sprintf("listing folders %d/%d", i, n))
   })
   tasks <- plan$tasks
+  listed <- sum(vapply(tasks, function(t) length(t$files), numeric(1)))
+  if (!is.null(o$sample)) tasks <- ct_sample(tasks, o$sample)
   log$step(1, "what is checked")
   log$kv("market", o$market)
   log$kv("codes", paste(mk$codes, collapse = " "))
@@ -736,6 +834,11 @@ ct_run <- function(s, o, console = TRUE) {
   if (!is.null(o$folder)) log$kv("folder", o$folder)
   nfiles <- sum(vapply(tasks, function(t) length(t$files), numeric(1)))
   nstray <- sum(vapply(tasks, function(t) length(t$stray), numeric(1)))
+  if (!is.null(o$sample)) {
+    log$kv("sample", sprintf("%.0f of %.0f files", nfiles, listed),
+           if (nfiles < listed) sprintf("every %.4g-th, in sorted order",
+                                        listed / nfiles) else "all of them")
+  }
   log$kv("folders", length(tasks))
   log$kv("tick files", nfiles)
   log$kv("stray files", nstray, ".part / .tmp")
@@ -756,6 +859,8 @@ ct_run <- function(s, o, console = TRUE) {
     log$kv(paste0("  ", lv), paste(names(CT_LEVEL)[CT_LEVEL == lv],
                                    collapse = ", "))
   }
+  log$info(paste("a finding is one (file, check): line and value are the",
+                 "first hit, detail says how many lines"))
 
   log$step(2, "checking")
   cl <- NULL
@@ -794,6 +899,7 @@ ct_run <- function(s, o, console = TRUE) {
   done <- 0
   nfold <- 0
   nfind <- 0
+  nhit <- 0
   for (r in rounds) {
     res <- if (is.null(cl)) lapply(tasks[r], ct_check_folder) else
       parallel::clusterApplyLB(cl, tasks[r], ct_check_folder)
@@ -801,10 +907,13 @@ ct_run <- function(s, o, console = TRUE) {
     done <- done + sum(vapply(tasks[r], function(t) length(t$files),
                               numeric(1)))
     nfold <- nfold + length(r)
-    nfind <- nfind + sum(vapply(res, function(x) sum(x$totals), numeric(1)))
+    nfind <- nfind + sum(vapply(res, function(x) sum(x$hit), numeric(1)))
+    nhit <- nhit + sum(vapply(res, function(x) {
+      if (is.null(x$stats)) 0 else sum(x$stats$findings > 0)
+    }, numeric(1)))
     log$info(sprintf(
-      "checked %.0f of %.0f files (%d of %d folders), %.0f findings, %.0fs",
-      done, nfiles, nfold, length(tasks), nfind,
+      "checked %.0f of %.0f files (%d of %d folders), %.0f findings in %.0f files, %.0fs",
+      done, nfiles, nfold, length(tasks), nfind, nhit,
       proc.time()[["elapsed"]] - t0))
   }
 
@@ -814,11 +923,16 @@ ct_run <- function(s, o, console = TRUE) {
     lapply(out, `[[`, "rows")))
   stats <- do.call(rbind, c(list(data.frame(
     file = character(0), rows = integer(0), findings = integer(0),
-    errors = integer(0), tick = logical(0), stringsAsFactors = FALSE)),
+    lines = numeric(0), errors = integer(0), tick = logical(0),
+    stringsAsFactors = FALSE)),
     lapply(out, `[[`, "stats")))
   codes <- vapply(tasks, `[[`, "", "code")
   totals <- setNames(integer(length(CT_LEVEL)), names(CT_LEVEL))
-  for (x in out) totals <- totals + x$totals
+  lines <- setNames(numeric(length(CT_LEVEL)), names(CT_LEVEL))
+  for (x in out) {
+    totals <- totals + x$hit
+    lines <- lines + x$lines
+  }
 
   # The CSV.
   csv <- paste0(stem, ".csv")
@@ -833,36 +947,55 @@ ct_run <- function(s, o, console = TRUE) {
   log$step(3, "summary")
   ucodes <- unique(codes)
   if (length(ucodes)) {
+    # Per code: files, rows, files with a finding, then per check the
+    # files it hit and, for a row check, the lines.
     col <- function(code) {
       ix <- which(codes == code)
       st <- do.call(rbind, c(list(stats[0, ]), lapply(out[ix], `[[`, "stats")))
-      tt <- setNames(integer(length(CT_LEVEL)), names(CT_LEVEL))
-      for (x in out[ix]) tt <- tt + x$totals
-      c(files = sum(st$tick), rows = sum(st$rows),
-        "with findings" = sum(st$findings > 0), tt)
+      ff <- setNames(numeric(length(CT_LEVEL)), names(CT_LEVEL))
+      ll <- ff
+      for (x in out[ix]) {
+        ff <- ff + x$hit
+        ll <- ll + x$lines
+      }
+      c(sum(st$tick), sum(as.numeric(st$rows)), sum(st$findings > 0),
+        rbind(ff, ll))
     }
     tab <- sapply(ucodes, col)
+    if (!is.matrix(tab)) tab <- matrix(tab, ncol = length(ucodes))
+    colnames(tab) <- ucodes
     tab <- cbind(tab, all = rowSums(tab))
-    shown <- c(1:3, 3 + which(tab[-(1:3), "all"] > 0))
-    labels <- c(rownames(tab)[1:3],
-                paste0(rownames(tab)[-(1:3)], " (", CT_LEVEL, ")"))
+    labels <- c("files", "rows", "with findings",
+                rbind(paste0(names(CT_LEVEL), " (", CT_LEVEL, ") files"),
+                      paste0(names(CT_LEVEL), " (", CT_LEVEL, ") lines")))
+    is_lines <- c(FALSE, FALSE, FALSE, rbind(FALSE, TRUE))
+    row_chk <- c(TRUE, TRUE, TRUE,
+                 rbind(TRUE, names(CT_LEVEL) %in% CT_ROW_CHECKS))
+    fired <- c(TRUE, TRUE, TRUE, rep(tab[3 + 2 * seq_along(CT_LEVEL) - 1,
+                                          "all"] > 0, each = 2))
+    shown <- which(fired & row_chk)
     w <- max(12, nchar(sprintf("%.0f", tab)) + 2)
-    log$info(paste0(formatC("", width = -28),
+    log$info(paste0(formatC("", width = -36),
                     paste(formatC(colnames(tab), width = w), collapse = "")))
     for (i in shown) {
-      log$info(paste0(formatC(labels[i], width = -28),
+      log$info(paste0(formatC(labels[i], width = -36),
                       paste(formatC(sprintf("%.0f", tab[i, ]), width = w),
                             collapse = "")))
     }
     if (length(shown) == 3) log$info("no findings")
+    hitc <- names(CT_LEVEL)[tab[3 + 2 * seq_along(CT_LEVEL) - 1, "all"] > 0]
+    for (k in intersect(names(CT_NOTE), hitc)) {
+      log$info(paste0("note: ", k, " is ", CT_NOTE[[k]]))
+    }
   }
 
   log$step(4, "the files with the most findings")
   top <- stats[stats$findings > 0, ]
-  top <- utils::head(top[order(-top$findings, top$file), ], 20)
+  top <- utils::head(top[order(-top$findings, -top$lines, top$file), ], 20)
   if (!nrow(top)) log$info("none")
   for (i in seq_len(nrow(top))) {
-    log$info(sprintf("%6d  %s%s", top$findings[i], top$file[i],
+    log$info(sprintf("%3d checks %10.0f lines  %s%s", top$findings[i],
+                     top$lines[i], top$file[i],
                      if (top$errors[i]) sprintf("   (%d errors)",
                                                 top$errors[i]) else ""))
   }
@@ -904,9 +1037,15 @@ ct_run <- function(s, o, console = TRUE) {
   exit <- if (errs > 0) 1L else 0L
   msg <- sprintf("%.0f error-level and %.0f warning-level findings in %d files",
                  errs, warns, sum(stats$findings > 0))
+  if (warns > 0 && all(names(totals)[CT_LEVEL == "warning" & totals > 0] %in%
+                         names(CT_NOTE))) {
+    msg <- paste0(msg, " (only ", paste(names(CT_NOTE), collapse = " / "),
+                  ": expected on old raw files)")
+  }
   if (errs > 0) log$fail(msg) else if (warns > 0) log$warn(msg) else
     log$ok(msg)
-  list(exit = exit, rows = rows, stats = stats, totals = totals, csv = csv,
+  list(exit = exit, rows = rows, stats = stats, totals = totals,
+       lines = lines, files = nfiles, csv = csv,
        log = log$path, codes = mk$codes, select = mk$select)
 }
 
@@ -950,6 +1089,11 @@ ct_self_test <- function() {
   check("a good set is taken", ct_args(c("--market=China", "--to=20260930",
                                          "--folder=600000 CG"))$folder,
         "600000 CG")
+  check("--sample= takes a whole number",
+        ct_args(c("--market=China", "--sample=50"))$sample, 50L)
+  check("and refuses 0", bad_args(c("--market=China", "--sample=0")),
+        "refused")
+  check("or a word", bad_args(c("--market=China", "--sample=ten")), "refused")
 
   cat("\nthe tree\n")
   root <- tempfile("check-ticks-")
@@ -1033,59 +1177,73 @@ ct_self_test <- function() {
   o <- ct_args("--market=China")
   r1 <- ct_run(s, o, console = FALSE)
   f <- r1$rows
-  found <- function(file, chk, line = "") {
-    any(f$file == paste0(F, "/", file) & f$check == chk & f$line == line)
+  hits <- function(file, chk) {
+    f[f$file == paste0(F, "/", file) & f$check == chk, ]
   }
-  cat("\nevery defect is found, with its check and line\n")
+  cat("\nevery defect is one finding, at its first line, with its lines\n")
+  # file, check, first line, lines (NA: a file check), what it is.
   want <- list(
-    list(paste0(nm(1), ".gz"), "unreadable", "", "a .gz that is not gzip"),
-    list(paste0(nm(2), ".gz"), "unreadable", "", "a gz cut short"),
-    list(nm(3), "empty", "", "an empty file"),
-    list(nm(4), "no rows", "1", "a header only"),
-    list(nm(5), "header", "1", "a wrong header"),
-    list(nm(6), "bom", "1", "a BOM"),
-    list(nm(7), "line endings", "1", "\\n line ends"),
-    list(nm(8), "line endings", "3", "mixed line ends, at the first \\n"),
-    list(nm(9), "line endings", "5", "no line end on the last line"),
-    list(nm(10), "field count", "3", "an unquoted T,XT: 7 fields"),
-    list(nm(11), "condition", "3", "a quoted \"T,XT\" condition"),
-    list(nm(12), "order", "4", "a time going back"),
-    list(nm(13), "bad time", "3", "25:00:00"),
-    list(nm(14), "bad price", "3", "a NaN price"),
-    list(nm(14), "bad price", "4", "a price in exponent form"),
-    list(nm(15), "bad volume", "3", "a zero volume"),
-    list(nm(15), "bad volume", "4", "a volume that is not an integer"),
-    list(nm(16), "lunch", "4", "a print in the lunch break"),
-    list(nm(17), "session", "3", "a print before the session"),
-    list(nm(18), "duplicate row", "4", "a duplicate row"),
-    list(nm(19), "jump", "4", "a price x14"),
-    list(nm(19), "jump", "5", "and back"),
-    list(nm(20), "blank field", "4", "a blank Exchange"),
-    list(nm(21), "non-ascii", "3", "a non-ASCII byte"),
-    list(nm(22), "condition", "3", "an embedded quote in Condition"),
-    list(paste0(nm(24), ".gz"), "duplicate day", "",
+    list(paste0(nm(1), ".gz"), "unreadable", "", NA, "a .gz that is not gzip"),
+    list(paste0(nm(2), ".gz"), "unreadable", "", NA, "a gz cut short"),
+    list(nm(3), "empty", "", NA, "an empty file"),
+    list(nm(4), "no rows", "1", NA, "a header only"),
+    list(nm(5), "header", "1", NA, "a wrong header"),
+    list(nm(6), "bom", "1", NA, "a BOM"),
+    list(nm(7), "line endings", "1", NA, "\\n line ends"),
+    list(nm(8), "line endings", "3", NA, "mixed line ends, at the first \\n"),
+    list(nm(9), "line endings", "5", NA, "no line end on the last line"),
+    list(nm(10), "field count", "3", 1, "an unquoted T,XT: 7 fields"),
+    list(nm(11), "condition", "3", 1, "a quoted \"T,XT\" condition"),
+    list(nm(12), "order", "4", 1, "a time going back"),
+    list(nm(13), "bad time", "3", 1, "25:00:00"),
+    list(nm(14), "bad price", "3", 2, "a NaN price, then 1e+01"),
+    list(nm(15), "bad volume", "3", 2, "a zero volume, then 12.5"),
+    list(nm(16), "lunch", "4", 1, "a print in the lunch break"),
+    list(nm(17), "session", "3", 1, "a print before the session"),
+    list(nm(18), "duplicate row", "4", 1, "a duplicate row"),
+    list(nm(19), "jump", "4", 2, "a price x14 and back"),
+    list(nm(20), "blank field", "4", 1, "a blank Exchange"),
+    list(nm(21), "non-ascii", "3", 1, "a non-ASCII byte"),
+    list(nm(22), "condition", "3", 1, "an embedded quote in Condition"),
+    list(nm(23), "session", "2", 30, "30 prints before the session"),
+    list(paste0(nm(24), ".gz"), "duplicate day", "", NA,
          "one day as .csv and .csv.gz"),
-    list(paste0(nm(25), ".part"), "stray file", "", "a .part file"),
-    list("raw-600001 C1-2026092.csv", "file name", "", "a 7-digit date"),
-    list("raw-600009 C1-20260926.csv", "file name", "",
+    list(paste0(nm(25), ".part"), "stray file", "", NA, "a .part file"),
+    list("raw-600001 C1-2026092.csv", "file name", "", NA, "a 7-digit date"),
+    list("raw-600009 C1-20260926.csv", "file name", "", NA,
          "a code differing from the folder's"))
-  for (w in want) check(paste0(w[[4]], ": ", w[[2]], " line ",
-                               if (nzchar(w[[3]])) w[[3]] else "-"),
-                        found(w[[1]], w[[2]], w[[3]]), TRUE)
-  check("NaN's detail says it is not a number",
-        f$detail[f$file == paste0(F, "/", nm(14)) & f$line == "3"],
-        "not a number")
-  check("a zero volume says zero",
-        f$detail[f$file == paste0(F, "/", nm(15)) & f$line == "3"], "zero")
+  for (w in want) {
+    h <- hits(w[[1]], w[[2]])
+    lines <- if (is.na(w[[4]])) NA else
+      sprintf("%d line%s", w[[4]], if (w[[4]] == 1) "" else "s")
+    check(paste0(w[[5]], ": one ", w[[2]], ", line ",
+                 if (nzchar(w[[3]])) w[[3]] else "-",
+                 if (!is.na(lines)) paste0(", ", lines) else ""),
+          list(nrow(h), h$line[1],
+               if (is.na(lines)) NA else sub(":.*$", "", h$detail[1])),
+          list(1L, w[[3]], lines))
+  }
+  check("the detail: N lines, up to 3 line:value, the first's why",
+        hits(nm(14), "bad price")$detail,
+        "2 lines: 3:NaN, 4:1e+01; first: not a number")
+  check("a zero volume first: zero",
+        sub("^.*; first: ", "", hits(nm(15), "bad volume")$detail), "zero")
   check("25:00:00 is out of range",
-        f$detail[f$file == paste0(F, "/", nm(13)) & f$line == "3"],
+        sub("^.*; first: ", "", hits(nm(13), "bad time")$detail),
         "out of range (>= 24:00:00)")
-  check("a non-ASCII value is shown as bytes",
-        f$value[f$file == paste0(F, "/", nm(21)) & f$check == "non-ascii"],
+  check("a non-ASCII value is shown as bytes", hits(nm(21), "non-ascii")$value,
         "09:30:00,10.6,200,<c3><a9>,SH,XSHG")
-  cap <- f[f$file == paste0(F, "/", nm(23)) & f$check == "session", ]
-  check("30 session prints: 20 listed, then one row of the total",
-        list(nrow(cap), cap$value[21], cap$line[21]), list(21L, "30", ""))
+  s30 <- hits(nm(23), "session")
+  check("30 session prints: one finding of 30 lines, 3 examples",
+        list(nrow(s30), s30$value, s30$detail),
+        list(1L, "08:00:00", paste0("30 lines: 2:08:00:00, 3:08:01:00, ",
+                                    "4:08:02:00; first: outside ",
+                                    "09:15:00-15:00:00 (China)")))
+  check("no file has two findings of one check",
+        anyDuplicated(f[, c("file", "check")]), 0L)
+  check("findings count (file, check); lines count the lines",
+        list(r1$totals[["session"]], r1$lines[["session"]],
+             sum(r1$stats$findings)), list(2L, 31, nrow(f)))
   check("the clean files, plain, gz and with a tz cell, have no findings",
         sum(r1$stats$findings[grepl(paste0("^", ok_f, "/"), r1$stats$file)]),
         0)
@@ -1106,13 +1264,34 @@ ct_self_test <- function() {
                                       fixed = TRUE)), TRUE)
   check("and each check's level", any(grepl("error +unreadable, empty", lg)),
         TRUE)
+  check("progress: findings in files",
+        any(grepl(paste0("checked [0-9]+ of [0-9]+ files \\([0-9]+ of [0-9]+ ",
+                         "folders\\), [0-9]+ findings in [0-9]+ files, ",
+                         "[0-9]+s$"), lg)), TRUE)
+  check("the summary has a check's files and lines",
+        c(any(grepl("session \\(warning\\) files +.* 2$", lg)),
+          any(grepl("session \\(warning\\) lines +.* 31$", lg))),
+        c(TRUE, TRUE))
+  check("but no lines for a file check",
+        any(grepl("bom \\(warning\\) lines", lg)), FALSE)
+  check("and says duplicate row and blank field are expected",
+        c(any(grepl("note: duplicate row is expected on uncondensed", lg)),
+          any(grepl("note: blank field is expected on files written without",
+                    lg))), c(TRUE, TRUE))
+  tl <- regmatches(lg, regexpr("[0-9]+ checks +[0-9]+ lines", lg))
+  tk <- as.numeric(sub(" checks.*$", "", tl))
+  tn <- as.numeric(sub("^.*checks +([0-9]+) lines$", "\\1", tl))
+  check("the top files sort by checks hit, then lines",
+        list(length(tl) > 1, order(-tk, -tn)), list(TRUE, seq_along(tl)))
 
   cat("\nthe CSV\n")
   csv <- read.csv(r1$csv, colClasses = "character", na.strings = character(0),
                   encoding = "UTF-8")
   check("it is written, with its header", names(csv),
         c("file", "line", "check", "value", "detail"))
-  check("a row for every finding listed", nrow(csv), nrow(f))
+  check("one row per (file, check)",
+        list(nrow(csv), anyDuplicated(csv[, c("file", "check")])),
+        list(nrow(f), 0L))
   check("a value with a comma comes back whole",
         csv$value[csv$file == paste0(F, "/", nm(11)) &
                     csv$check == "condition"], "T,XT")
@@ -1125,7 +1304,25 @@ ct_self_test <- function() {
   key <- function(x) x[do.call(order, unname(as.list(x))), ]
   check("WORKERS=2 finds what WORKERS=1 does",
         identical(key(r2$rows), key(r1$rows)), TRUE)
-  check("with the same totals", r2$totals, r1$totals)
+  check("with the same totals and lines", list(r2$totals, r2$lines),
+        list(r1$totals, r1$lines))
+
+  cat("\n--sample\n")
+  pl <- ct_plan(s, o, ct_resolve("China", cfg))
+  allf <- unlist(lapply(pl$tasks, function(x) paste0(x$folder, "/", x$files)))
+  so <- ct_args(c("--market=China", "--sample=5"))
+  r5 <- ct_run(s, so, console = FALSE)
+  r6 <- ct_run(modifyList(s, list(WORKERS = 2)), so, console = FALSE)
+  picked <- r5$stats$file[r5$stats$tick]
+  check("--sample=5 checks 5 files, evenly spread in sorted order",
+        picked, allf[floor((0:4) * length(allf) / 5) + 1])
+  check("the same 5 on every run, and with 2 workers",
+        r6$stats$file[r6$stats$tick], picked)
+  check("and the log says sample",
+        any(grepl("sample +5 of [0-9]+ files", readLines(r5$log))), TRUE)
+  check("--sample= over the count checks them all",
+        ct_run(s, ct_args(c("--market=China", "--sample=100000")),
+               console = FALSE)$files, length(allf))
 
   cat("\none folder, dates, and the exit codes\n")
   r3 <- ct_run(s, ct_args(c("--market=China", "--folder=600000 CG")),

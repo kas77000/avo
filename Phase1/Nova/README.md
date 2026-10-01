@@ -282,16 +282,31 @@ anything odd. It changes nothing.
 Rscript check_ticks.r --market=China --from=20260901
 Rscript check_ticks.r "--market=C1|CS" --from=20260901 --to=20260930
 Rscript check_ticks.r --market=China --folder="600000 C1"
+Rscript check_ticks.r --market=China --sample=500
 ```
 
 `--market` takes countries (from `config/close_conditions.csv`) or
 Bloomberg exchange codes, as `condense_history.r` does. A whole market's
-history can be a million files, so narrow it with `--from`/`--to` or
-`--folder`. `WORKERS` in `settings.r` sets the parallel R processes.
+history can be hundreds of thousands of files, so narrow it with
+`--from`/`--to` or `--folder`, or take a quick overview with `--sample=N`:
+N files evenly spread over the selection (every k-th file in sorted order,
+the same ones on every run). `WORKERS` in `settings.r` sets the parallel R
+processes.
 
-It writes `LOG_DIR/check-ticks-YYYYMMDD-HHMMSS.log` (a summary per code, the
-20 files with the most findings, the distinct conditions) and `.csv` beside
-it, one row per finding: `file,line,check,value,detail`.
+A finding is one (file, check): a file gives at most one finding per check,
+however many of its lines are hit. Its `line` and `value` are the first
+offending line and value; for a check on rows the `detail` reads
+`N lines: 3:NaN, 4:1e+01; first: not a number` (up to 3 examples). The
+progress line counts findings and the files they are in.
+
+It writes `LOG_DIR/check-ticks-YYYYMMDD-HHMMSS.log` (a summary per code with,
+per check, the files hit and the lines hit; the 20 files hitting the most
+checks, then the most lines; the distinct conditions) and `.csv` beside it,
+one row per (file, check): `file,line,check,value,detail`.
+
+`duplicate row` and `blank field` are expected on old raw files: exact
+repeats are normal in a file not yet condensed, and MicCode is blank in
+files written without a MIC. The log notes it.
 
 | Level | Checks |
 |---|---|
