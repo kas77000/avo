@@ -234,6 +234,45 @@ in the extract's universe (above) with a BloombergCode, the reference
 columns from `equity.csv` and the `Close`, sorted by market then RicCode.
 It is not written if no row has a Close.
 
+## Condensing old tick files
+
+Today's AB extract condenses ticks in kdb: one line per second, price,
+condition, exchange and MicCode, with the Volume summed. The tick files
+Phase0's Historical job left in `OUTPUT_DIR` have one line per print.
+`condense_history.r` rewrites those old files the same way, in place, one
+market at a time. See it first with `--dry-run`, which reads and counts
+but writes nothing, then run it for real:
+
+```
+Rscript condense_history.r --market=China --dry-run
+Rscript condense_history.r --market=China
+```
+
+`--market=` is required: a Country from `config/close_conditions.csv`, or
+exchange codes joined by `|` (`"--market=C1|CS"`), in any case. A folder
+belongs to the market when the code after the last space of its name is
+one of those codes, or the composite `config/hist_composites.csv` converts
+it to (`Japan` is `JT`, whose files are in `... JP` folders).
+`--from=YYYYMMDD` and `--to=YYYYMMDD` keep to the files of those days.
+`WORKERS` in `settings.r` sets how many R processes share the folders, as
+for `historical.r`.
+
+- Only `raw-*.csv` and `raw-*.csv.gz` are read. A `.gz` stays a `.gz`.
+  Venue zips are left alone.
+- The line counts change. That is expected: lines with the same second,
+  price, condition, exchange and MicCode become one line. The header line
+  is kept as it was. A blank or non-numeric Volume is never summed, and its
+  line is kept as it is.
+- A file that is already condensed is left alone, untouched. So are files
+  it cannot read in full (a bad `.gz`, a strange header): each one gets a
+  `!!` line.
+- Each run logs to `LOG_DIR/condense-YYYYMMDD-HHMMSS.log`, with a progress
+  line every 200 files and a summary per exchange code at the end.
+- Stopping it and running it again is safe. Every finished file is listed
+  in `LOG_DIR/condense-done.txt` with its size, and a rerun skips a listed
+  file whose size has not changed without opening it. Delete that list to
+  have every file read again.
+
 ## Reading the log
 
 All three jobs append to `LOG_DIR/phase1-YYYYMMDD.log`, dated by the trade

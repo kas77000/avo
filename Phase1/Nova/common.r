@@ -77,11 +77,13 @@ p1_settings <- function(path = file.path(p1_here(), "settings.r"),
 # Phase0's logs.Log: "HH:MM:SS  lvl  text" to the console and appended to
 # LOG_DIR/phase1-YYYYMMDD.log, each run opening with "=== stamp ===" and a
 # blank line between runs. A NULL or "" dir logs to the console only.
-p1_log_open <- function(dir, date) {
+# `name`, when given, is the log's file name instead (condense_history.r).
+p1_log_open <- function(dir, date, name = NULL) {
   path <- NULL
   if (!is.null(dir) && nzchar(dir)) {
     dir.create(dir, recursive = TRUE, showWarnings = FALSE)
-    path <- file.path(dir, sprintf("phase1-%s.log", format(date, "%Y%m%d")))
+    if (is.null(name)) name <- sprintf("phase1-%s.log", format(date, "%Y%m%d"))
+    path <- file.path(dir, name)
     gap <- if (file.exists(path) && file.info(path)$size > 0) "\n" else ""
     cat(gap, "=== ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), " ===\n",
         sep = "", file = path, append = TRUE)
