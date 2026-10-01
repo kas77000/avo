@@ -40,7 +40,8 @@
 #            MicCode, or more than 7), field count (not 6), bad time
 #            (blank, not HH:MM:SS, out of range), bad price (blank, not a
 #            number, NA/NaN/Inf/#N/A, <= 0, exponent form), bad volume
-#            (blank, not a number, negative, zero, not an integer),
+#            (blank, not a number, negative, exponent form, not an
+#            integer),
 #            non-ascii (bytes outside printable ASCII, control characters,
 #            NUL, in any cell or the header)
 #   warning  no rows (a header only), bom, line endings (not \r\n, mixed,
@@ -51,11 +52,13 @@
 #            (Exchange or MicCode), order (Time going back), duplicate row,
 #            jump (price x10 or /10 between consecutive priced rows),
 #            session (outside the market's window, CT_SESSIONS), lunch
-#            (inside its lunch break)
+#            (inside its lunch break), zero volume (a Volume of exactly 0)
 #
 # duplicate row and blank field are expected on old raw files: exact
 # repeats are normal in a file not yet condensed (condense_history.r), and
-# MicCode is blank in files written without a MIC. The log says so.
+# MicCode is blank in files written without a MIC. zero volume is expected
+# on quote-only files: historical.r writes one line with Volume 0 for a
+# name that quoted but did not trade. The log says so.
 #
 # The log also lists each code's distinct Condition values with counts
 # (#N/A N.A. is legitimate, listed all the same) and the timezone cells the
@@ -80,18 +83,20 @@ CT_LEVEL <- c(
   "duplicate day" = "warning", "condition" = "warning",
   "blank field" = "warning", "order" = "warning",
   "duplicate row" = "warning", "jump" = "warning", "session" = "warning",
-  "lunch" = "warning")
+  "lunch" = "warning", "zero volume" = "warning")
 
 # The checks on rows: their finding counts lines and shows examples. The
 # others are on the file as a whole.
 CT_ROW_CHECKS <- c("field count", "bad time", "bad price", "bad volume",
                    "non-ascii", "condition", "blank field", "order",
-                   "duplicate row", "jump", "session", "lunch")
+                   "duplicate row", "jump", "session", "lunch",
+                   "zero volume")
 
 # What the log says of the checks that fire on most old files.
 CT_NOTE <- c(
   "duplicate row" = "expected on uncondensed raw files: exact repeats are normal there",
-  "blank field" = "expected on files written without a MIC: MicCode is blank there")
+  "blank field" = "expected on files written without a MIC: MicCode is blank there",
+  "zero volume" = "expected on quote-only files: historical.r writes one Volume 0 line for a name that quoted but did not trade")
 
 # Each market's session in its LOCAL clock, by close_conditions.csv's
 # Country, auctions included. China is the one that matters here; the
@@ -495,15 +500,18 @@ ct_check_file <- function(path, sess) {
     grepl(CT_EXP, v[!vint], perl = TRUE, useBytes = TRUE)
   vv <- rep(NA_real_, nr)
   vv[vnum] <- as.numeric(v[vnum])
-  bv <- which(ok & (!vint | (!is.na(vv) & vv <= 0)))
+  # A Volume of exactly 0 (written as a whole number) is not an error:
+  # historical.r writes one 0-volume line for a name that only quoted.
+  zv <- which(ok & vint & vv == 0)
+  if (length(zv)) add("zero volume", ln[zv], v[zv], "a volume of 0")
+  bv <- which(ok & (!vint | (!is.na(vv) & vv < 0)))
   if (length(bv)) {
     why <- ifelse(!nzchar(v[bv]), "blank",
                   ifelse(!vnum[bv], "not a number",
                          ifelse(vv[bv] < 0, "negative",
-                                ifelse(vv[bv] == 0, "zero",
-                                       ifelse(grepl(CT_EXP, v[bv]),
-                                              "exponent form",
-                                              "not an integer")))))
+                                ifelse(grepl(CT_EXP, v[bv]),
+                                       "exponent form",
+                                       "not an integer"))))
     add("bad volume", ln[bv], v[bv], why)
   }
 
@@ -1040,7 +1048,7 @@ ct_run <- function(s, o, console = TRUE) {
   if (warns > 0 && all(names(totals)[CT_LEVEL == "warning" & totals > 0] %in%
                          names(CT_NOTE))) {
     msg <- paste0(msg, " (only ", paste(names(CT_NOTE), collapse = " / "),
-                  ": expected on old raw files)")
+                  ": expected, see the notes)")
   }
   if (errs > 0) log$fail(msg) else if (warns > 0) log$warn(msg) else
     log$ok(msg)
@@ -1147,7 +1155,9 @@ ct_self_test <- function() {
   put(F, nm(14), c(H, ok_rows[1], "09:30:00,NaN,200,A,SH,XSHG",
                    "10:00:00,1e+01,300,A,SH,XSHG", ok_rows[4]))
   put(F, nm(15), c(H, ok_rows[1], "09:30:00,10.6,0,A,SH,XSHG",
-                   "10:00:00,10.7,12.5,A,SH,XSHG", ok_rows[4]))
+                   "10:00:00,10.7,12.5,A,SH,XSHG",
+                   "14:59:00,10.8,-5,A,SH,XSHG"))
+  put(F, nm(26), c(H, "15:00:00,10.8,0,CA,SH,XSHG"))
   put(F, nm(16), c(H, ok_rows[1:2], "12:00:00,10.7,300,A,SH,XSHG",
                    ok_rows[4]))
   put(F, nm(17), c(H, ok_rows[1], "08:00:00,10.6,200,A,SH,XSHG",
@@ -1197,7 +1207,9 @@ ct_self_test <- function() {
     list(nm(12), "order", "4", 1, "a time going back"),
     list(nm(13), "bad time", "3", 1, "25:00:00"),
     list(nm(14), "bad price", "3", 2, "a NaN price, then 1e+01"),
-    list(nm(15), "bad volume", "3", 2, "a zero volume, then 12.5"),
+    list(nm(15), "bad volume", "4", 2, "a volume of 12.5, then -5"),
+    list(nm(15), "zero volume", "3", 1, "a volume of 0, a warning"),
+    list(nm(26), "zero volume", "2", 1, "a quote-only file's Volume 0"),
     list(nm(16), "lunch", "4", 1, "a print in the lunch break"),
     list(nm(17), "session", "3", 1, "a print before the session"),
     list(nm(18), "duplicate row", "4", 1, "a duplicate row"),
@@ -1226,8 +1238,14 @@ ct_self_test <- function() {
   check("the detail: N lines, up to 3 line:value, the first's why",
         hits(nm(14), "bad price")$detail,
         "2 lines: 3:NaN, 4:1e+01; first: not a number")
-  check("a zero volume first: zero",
-        sub("^.*; first: ", "", hits(nm(15), "bad volume")$detail), "zero")
+  check("12.5 is not an integer, -5 negative: both bad volume",
+        hits(nm(15), "bad volume")$detail,
+        "2 lines: 4:12.5, 5:-5; first: not an integer")
+  check("a volume of 0 is a warning, not an error",
+        unname(CT_LEVEL[c("zero volume", "bad volume")]),
+        c("warning", "error"))
+  check("a quote-only file (one Volume 0 line) has no other finding",
+        f$check[f$file == paste0(F, "/", nm(26))], "zero volume")
   check("25:00:00 is out of range",
         sub("^.*; first: ", "", hits(nm(13), "bad time")$detail),
         "out of range (>= 24:00:00)")

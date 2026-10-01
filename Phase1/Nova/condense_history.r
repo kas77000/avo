@@ -9,15 +9,23 @@
 #     Rscript condense_history.r "--market=C1|CS" --from=20240101 --to=20241231
 #     Rscript condense_history.r --self-test
 #
-# The rule, per file. Lines are grouped by #Time, Last, Condition, Exchange
-# and MicCode as text, exactly as written, and the group's Volumes summed:
-# a plain integer when the sum is whole (123456789012, never 1.2e+11), else
-# the shortest plain decimal. A line alone in its group keeps its Volume as
-# written, unless written with an exponent (1e+05 becomes 100000). A blank or non-numeric Volume is never summed: its line is kept
-# as it is. The lines are written sorted by #Time, then Last as a number
-# (its text breaks a tie), then Condition, Exchange and MicCode as text, in
-# byte order; a blank #Time sorts first. The header line is kept as it was,
-# its timezone cell too, and every line ends \r\n, as csv.writer wrote them.
+# The rule, per file, mirrors the AB extract's kdb query exactly:
+#
+#     0!select size:sum size by sym, time:"i"$time.second, price, cond, ex
+#
+# A file is one sym. Lines are grouped by #Time (whole seconds already),
+# Last as a NUMBER (10.5 and 10.50 are one price, written as the first
+# text seen for it), Condition and Exchange as text, and MicCode (one per
+# file, so it changes nothing); the group's Volumes are summed: a plain
+# integer when the sum is whole (123456789012, never 1.2e+11), else the
+# shortest plain decimal. A line alone in its group keeps its Volume as
+# written, unless written with an exponent (1e+05 becomes 100000). A blank
+# or non-numeric Volume is never summed: its line is kept as it is. The
+# lines are written in the keyed table's order: #Time (a blank one first,
+# like q's null), then Last as a number, then Condition, then Exchange,
+# text in byte order; a file out of time order comes out in it. The header
+# line is kept as it was, its timezone cell too, and every line ends \r\n,
+# as csv.writer wrote them.
 #
 # In place, safely. A file is written as <name>.part (gzipped for a .gz)
 # and then put over the original; a .gz stays .gz. A file in which no two
@@ -203,11 +211,18 @@ c_volume <- function(s) {
 
 # The condensed lines, or NULL when no two summable lines share the key.
 # Also the count of lines with a blank or non-numeric Volume.
+#
+# kdb's `select size:sum size by sym, time.second, price, cond, ex`: the
+# price is keyed by its VALUE (10.5 and 10.50 are one price, written as
+# the first text seen for it); a Last that is not a number is keyed by its
+# text. MicCode is one per file, so keying on it changes nothing.
 c_condense <- function(x) {
   v <- suppressWarnings(as.numeric(x$volume))
   ok <- is.finite(v)
   nonnum <- sum(!ok)
-  key <- paste(x$time, x$last, x$cond, x$ex, x$mic, sep = C_KEYSEP)
+  pn <- suppressWarnings(as.numeric(x$last))
+  pkey <- ifelse(is.na(pn), paste0("text:", x$last), sprintf("%.17g", pn))
+  key <- paste(x$time, pkey, x$cond, x$ex, x$mic, sep = C_KEYSEP)
   ko <- key[ok]
   if (!anyDuplicated(ko)) return(list(lines = NULL, nonnum = nonnum))
   first <- match(ko, ko)
@@ -225,8 +240,10 @@ c_condense <- function(x) {
   vol <- c(vol, x$volume[bad])
   isbad <- c(rep(FALSE, length(rows)), rep(TRUE, length(bad)))
   last <- x$last[idx]
-  o <- order(x$time[idx], suppressWarnings(as.numeric(last)), last,
-             x$cond[idx], x$ex[idx], x$mic[idx], isbad, idx)
+  # time, price (its value), cond, ex, as kdb's keyed table sorts them; a
+  # blank time first, like q's null. The rest only break ties.
+  o <- order(x$time[idx], pn[idx], x$cond[idx], x$ex[idx], x$mic[idx],
+             last, isbad, idx)
   lines <- paste(c_cell(x$time[idx]), c_cell(last), c_cell(vol),
                  c_cell(x$cond[idx]), c_cell(x$ex[idx]), c_cell(x$mic[idx]),
                  sep = ",")[o]
@@ -569,16 +586,24 @@ c_self_test <- function() {
            "09:30:02,11,20,\"T,XT\",T,XSHG",
            "09:31:00,12,50000,O,T,XSHG",
            "09:31:00,12,50000,O,T,XSHG",
-           "09:32:00,12,1e+05,O,T,XSHG")
+           "09:32:00,12,1e+05,O,T,XSHG",
+           "09:34:00,10,1,O,Z,XSHG",
+           "09:34:00,10,1,O,A,XSHG",
+           "09:33:00,10.50,1,B,T,XSHG",
+           "09:33:00,10.5,2,A,T,XSHG",
+           "09:33:00,10.5,3,B,T,XSHG")
   want <- c(H,
             ",10.5,7,O,T,XSHG",
             "09:30:00,10.6,200.5,,,XSHG",
             "09:30:01,9.75,50,O,T,XSHG",
-            "09:30:01,10.5,400,O,T,XSHG",
-            "09:30:01,10.50,5,O,T,XSHG",
+            "09:30:01,10.5,405,O,T,XSHG",
             "09:30:02,11,30,\"T,XT\",T,XSHG",
             "09:31:00,12,100000,O,T,XSHG",
             "09:32:00,12,100000,O,T,XSHG",
+            "09:33:00,10.5,2,A,T,XSHG",
+            "09:33:00,10.50,4,B,T,XSHG",
+            "09:34:00,10,1,O,A,XSHG",
+            "09:34:00,10,1,O,Z,XSHG",
             "15:00:00,10,123456789012,CA,,XSHG")
   sorted_once <- c("09:30:00,10,1,O,T,XSHG", "09:30:00,9,1,O,T,XSHG",
                    "09:29:00,10,1,O,T,XSHG")
@@ -698,7 +723,27 @@ c_self_test <- function() {
         unname(rA$all[c("files", "rewritten", "already", "unreadable")]),
         c(7, 3, 1, 3))
   check("rows before and after, per code",
-        unname(rA$by["C1", c("rows_b", "rows_a")]), c(28, 18))
+        unname(rA$by["C1", c("rows_b", "rows_a")]), c(38, 24))
+  cx <- function(rows) {
+    x <- read.csv(text = paste(rows, collapse = "\n"), header = FALSE,
+                  colClasses = "character", na.strings = character(0),
+                  col.names = C_COLS)
+    c_condense(as.list(x))$lines
+  }
+  check("10.5 and 10.50, same second, cond and ex: one line, Volume summed",
+        cx(c("09:30:01,10.5,100,O,T,XSHG", "09:30:01,10.50,5,O,T,XSHG")),
+        "09:30:01,10.5,105,O,T,XSHG")
+  check("written as the first text seen for the price",
+        cx(c("09:30:01,10.50,5,O,T,XSHG", "09:30:01,10.5,100,O,T,XSHG")),
+        "09:30:01,10.50,105,O,T,XSHG")
+  check("a file out of time order comes out in time, then price, cond, ex",
+        cx(c("10:00:00,9,1,O,T,X", "09:00:00,10,1,O,T,X",
+             "09:00:00,9.5,1,O,T,X", "09:00:00,9.5,1,B,T,X",
+             "09:00:00,9.5,1,B,A,X", "09:00:00,10,1,O,T,X",
+             ",11,1,O,T,X")),
+        c(",11,1,O,T,X", "09:00:00,9.5,1,B,A,X", "09:00:00,9.5,1,B,T,X",
+          "09:00:00,9.5,1,O,T,X", "09:00:00,10,2,O,T,X",
+          "10:00:00,9,1,O,T,X"))
   check("a sum of 100000 and a lone 1e+05 are both written 100000",
         c("09:31:00,12,100000,O,T,XSHG", "09:32:00,12,100000,O,T,XSHG") %in%
           got(file.path(o, rel$dup)), c(TRUE, TRUE))

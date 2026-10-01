@@ -260,7 +260,9 @@ for `historical.r`.
 - Only `raw-*.csv` and `raw-*.csv.gz` are read. A `.gz` stays a `.gz`.
   Venue zips are left alone.
 - The line counts change. That is expected: lines with the same second,
-  price, condition, exchange and MicCode become one line. The header line
+  price, condition, exchange and MicCode become one line, as the kdb
+  query `select size:sum size by sym, time.second, price, cond, ex` does.
+  The price is compared as a number (10.5 and 10.50 are one price). The header line
   is kept as it was. A blank or non-numeric Volume is never summed, and its
   line is kept as it is.
 - A file that is already condensed is left alone, untouched. So are files
@@ -306,12 +308,14 @@ one row per (file, check): `file,line,check,value,detail`.
 
 `duplicate row` and `blank field` are expected on old raw files: exact
 repeats are normal in a file not yet condensed, and MicCode is blank in
-files written without a MIC. The log notes it.
+files written without a MIC. `zero volume` is expected on quote-only
+files: `historical.r` writes one line with Volume 0 for a name that quoted
+but did not trade. The log notes each.
 
 | Level | Checks |
 |---|---|
-| error (exit 1) | unreadable or bad gz, empty file, wrong header, field count, bad time, bad price (blank, not a number, `<= 0`, exponent form like `1e+05`), bad volume (same, or not a whole number), non-ASCII or control characters |
-| warning (exit 0) | time going back, duplicate rows, a price jump over 10x, prints outside the session or in the lunch break (China's window is firm, other markets' are approximate), line endings, BOM, stray `.part` files, duplicate day (.csv and .csv.gz), file name, blank Exchange/MicCode |
+| error (exit 1) | unreadable or bad gz, empty file, wrong header, field count, bad time, bad price (blank, not a number, `<= 0`, exponent form like `1e+05`), bad volume (blank, not a number, negative, exponent form, or not a whole number), non-ASCII or control characters |
+| warning (exit 0) | time going back, duplicate rows, a price jump over 10x, prints outside the session or in the lunch break (China's window is firm, other markets' are approximate), line endings, BOM, stray `.part` files, duplicate day (.csv and .csv.gz), file name, blank Exchange/MicCode, zero volume (a Volume of exactly 0) |
 
 Exit status: 0 no error, 1 at least one error, 2 a bad argument.
 
